@@ -1,0 +1,66 @@
+{
+  "name": "eztweak",
+  "version": "0.1.0",
+  "description": "Annotate your live dev app in the browser; feedback flows to your local coding agent, which edits the source. Review, iterate, repeat.",
+  "type": "module",
+  "author": "Justin Chien",
+  "homepage": "https://github.com/cychien/eztweak#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cychien/eztweak.git"
+  },
+  "bugs": {
+    "url": "https://github.com/cychien/eztweak/issues"
+  },
+  "bin": {
+    "eztweak": "dist/cli.mjs"
+  },
+  "exports": {
+    "./vite": {
+      "types": "./dist/vite.d.ts",
+      "import": "./dist/vite.mjs"
+    }
+  },
+  "files": [
+    "dist",
+    "skills/eztweak",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "check": "npm run build && npm run typecheck && npm test",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test \"test/**/*.test.ts\"",
+    "prepublishOnly": "npm run check"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "agent",
+    "review",
+    "annotation",
+    "feedback",
+    "dev-server",
+    "vite",
+    "claude-code"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@babel/parser": "^7.26.0",
+    "@hugeicons/core-free-icons": "^4.2.3",
+    "express": "^5.1.0",
+    "http-proxy-middleware": "^3.0.3",
+    "magic-string": "^0.30.17",
+    "open": "^10.1.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.10.0",
+    "esbuild": "^0.25.0",
+    "tsx": "^4.23.11",
+    "typescript": "^5.7.0",
+    "vite": "^6.0.0"
+  }
+}

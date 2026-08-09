@@ -1,0 +1,213 @@
+/* Crosshair belongs on the page being annotated, not on our own chrome. `cursor`
+   inherits, so excluding the overlay here isn't enough — each interactive root
+   below declares its own, and descendants (button icons) inherit from it. */
+.ez-annotating,
+.ez-annotating *:not([data-ez-ui], [data-ez-ui] *) {
+  cursor: crosshair !important;
+}
+
+.ez-popup {
+  cursor: auto;
+}
+
+.ez-input {
+  cursor: text;
+}
+
+.ez-marker {
+  cursor: default;
+}
+
+[data-ez-ui] {
+  --ez-mauve-50: oklch(98.5% 0 0);
+  --ez-mauve-100: oklch(96% 0.003 325.6);
+  --ez-mauve-200: oklch(92.2% 0.005 325.62);
+  --ez-mauve-400: oklch(71.1% 0.019 323.02);
+  --ez-mauve-500: oklch(54.2% 0.034 322.5);
+  --ez-mauve-600: oklch(43.5% 0.029 321.78);
+  --ez-mauve-950: oklch(14.5% 0.008 326);
+  --ez-blue: oklch(62.3% 0.214 259.815);
+  --ez-amber: oklch(76.9% 0.188 70.08);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans TC', sans-serif;
+}
+
+/* The highlight sits over host pages of unknown colour, so it uses mid-scale
+   mauve — legible against both a white and a near-black canvas. */
+/* Each mode owns a colour, matched to its sidebar button: amber frames a region,
+   blue drops a pin. Both sit over host pages of unknown colour, so the marks use
+   the bright -500 steps rather than the darker button fills. */
+.ez-highlight {
+  position: fixed;
+  z-index: 2147483600;
+  pointer-events: none;
+  border: 2px solid var(--ez-amber);
+  border-radius: 4px;
+  background: oklch(76.9% 0.188 70.08 / 0.12);
+  display: none;
+}
+
+/* Point mode: the pin is the subject, so the resolved element is shown only as
+   a hint of what the comment will attach to. */
+.ez-highlight-soft {
+  border: 1.5px dashed var(--ez-blue);
+  background: transparent;
+}
+
+/* Sits on host pages of unknown colour, so the white ring — not the fill — is
+   what guarantees it stays legible on a dark canvas. */
+.ez-pin {
+  position: fixed;
+  z-index: 2147483602;
+  pointer-events: none;
+  width: 14px;
+  height: 14px;
+  margin: -7px 0 0 -7px;
+  border-radius: 50%;
+  background: var(--ez-blue);
+  border: 2.5px solid #fff;
+  box-shadow:
+    0 1px 4px oklch(0% 0 0 / 0.35),
+    0 0 0 4px oklch(62.3% 0.214 259.815 / 0.22);
+  display: none;
+}
+
+.ez-badge {
+  position: fixed;
+  z-index: 2147483601;
+  pointer-events: none;
+  background: var(--ez-mauve-950);
+  color: var(--ez-mauve-50);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.6;
+  padding: 2px 8px;
+  border-radius: 5px;
+  box-shadow: 0 0 0 1px oklch(100% 0 0 / 0.25);
+  max-width: 60vw;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: none;
+}
+
+.ez-markers {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 2147483599;
+  pointer-events: none;
+}
+
+.ez-marker {
+  position: absolute;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--ez-mauve-950);
+  color: var(--ez-mauve-50);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 20px;
+  text-align: center;
+  box-shadow: 0 0 0 2px oklch(100% 0 0 / 0.85);
+  pointer-events: auto;
+}
+
+.ez-select-btn {
+  position: absolute;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  z-index: 2147483602;
+  background: var(--ez-mauve-950);
+  color: var(--ez-mauve-50);
+  border: none;
+  border-radius: 7px;
+  padding: 5px 10px;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.4;
+  cursor: pointer;
+  box-shadow:
+    0 0 0 1px oklch(100% 0 0 / 0.25),
+    0 2px 8px oklch(14.5% 0.008 326 / 0.3);
+}
+
+.ez-popup {
+  position: fixed;
+  z-index: 2147483603;
+  width: 300px;
+  background: #fff;
+  color: var(--ez-mauve-950);
+  border: 1px solid var(--ez-mauve-200);
+  border-radius: 12px;
+  box-shadow: 0 8px 30px oklch(14.5% 0.008 326 / 0.16);
+  padding: 10px;
+}
+
+.ez-input {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--ez-mauve-200);
+  border-radius: 8px;
+  padding: 6px 8px;
+  /* Not the `font` shorthand: its family slot rejects `inherit`, which makes the
+     browser drop the whole declaration and fall back to the UA font. */
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.5;
+  color: var(--ez-mauve-950);
+  background: #fff;
+  resize: vertical;
+  outline: none;
+}
+
+.ez-input::placeholder {
+  color: var(--ez-mauve-400);
+}
+
+.ez-input:focus {
+  border-color: var(--ez-mauve-400);
+  outline: 2px solid var(--ez-mauve-400);
+  outline-offset: -1px;
+}
+
+.ez-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.ez-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--ez-mauve-200);
+  background: #fff;
+  color: var(--ez-mauve-600);
+  border-radius: 8px;
+  padding: 5px 12px;
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+
+.ez-btn:hover {
+  background: var(--ez-mauve-100);
+}
+
+.ez-btn-primary {
+  background: var(--ez-mauve-950);
+  border-color: var(--ez-mauve-950);
+  color: var(--ez-mauve-50);
+  font-weight: 600;
+  box-shadow: inset 0 1px 0 0 oklch(100% 0 0 / 0.14);
+}
+
+.ez-btn-primary:hover {
+  background: var(--ez-mauve-950);
+  opacity: 0.88;
+}
