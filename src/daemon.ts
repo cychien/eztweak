@@ -16,7 +16,7 @@ import {
 import { injectOverlay, wantsHtml } from './inject.js'
 import { toAgentItem, toConversationItem } from './label.js'
 import type { Annotation, PollResult, SessionEndedBy } from './protocol.js'
-import { SessionStore, newId } from './store.js'
+import { SessionStore, listPersistedSessions, newId } from './store.js'
 import { writeRegistry, clearRegistry } from './registry.js'
 
 const distDir = dirname(fileURLToPath(import.meta.url))
@@ -45,6 +45,23 @@ interface SnapshotWire {
   agentOnline: boolean
   /** Agent took a batch and hasn't come back to poll — it's off editing. */
   agentBusy: boolean
+}
+
+/** First port in `candidates` that binds. A `0` entry always succeeds, so keep
+ *  it last as the fallback. */
+async function listenOn(app: express.Express, candidates: number[]): Promise<Server> {
+  let lastError: unknown
+  for (const port of candidates) {
+    try {
+      return await new Promise<Server>((resolve, reject) => {
+        const server = app.listen(port, '127.0.0.1', () => resolve(server))
+        server.on('error', reject)
+      })
+    } catch (err) {
+      lastError = err
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error('no port available')
 }
 
 class SessionRuntime {
@@ -288,15 +305,17 @@ class SessionRuntime {
       wantsHtml(req.headers.accept) ? htmlProxy(req, res, next) : rawProxy(req, res, next),
     )
 
-    await new Promise<void>((resolve) => {
-      this.server = app.listen(0, '127.0.0.1', () => resolve())
-    })
+    // Prefer the port this session last held so an already-open shell tab only
+    // needs a reload after a daemon restart, but never fail over a taken port.
+    const preferred = this.store.session.port
+    this.server = await listenOn(app, preferred ? [preferred, 0] : [0])
     this.server.on('upgrade', (req, socket, head) => {
       if (req.url?.startsWith(URL_PREFIX)) return socket.destroy()
       rawProxy.upgrade(req, socket as Socket, head)
     })
     const address = this.server.address()
     this.port = typeof address === 'object' && address ? address.port : 0
+    this.store.setPort(this.port)
     return this.port
   }
 
@@ -336,6 +355,22 @@ export async function daemonMain(version: string): Promise<void> {
   }
 
   const sessions = new Map<string, SessionRuntime>()
+
+  /** Rebuild the session map from disk. Without this a restarted daemon answers
+   *  `/sessions/find` with 404 and a reconnecting `poll` gives up on a session
+   *  whose queued feedback is sitting right there on disk. */
+  for (const persisted of listPersistedSessions()) {
+    if (persisted.state !== 'active') continue
+    const runtime = new SessionRuntime(persisted.targetOrigin)
+    try {
+      await runtime.start()
+      sessions.set(persisted.targetOrigin, runtime)
+    } catch {
+      // eslint-disable-next-line no-console
+      console.error(`could not restore session for ${persisted.targetOrigin}`)
+    }
+  }
+
   const control = express()
   control.use(express.json())
 
@@ -448,3 +483,4 @@ export async function daemonMain(version: string): Promise<void> {
   // eslint-disable-next-line no-console
   console.log(`daemon listening on 127.0.0.1:${port}`)
 }
+
