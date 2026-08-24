@@ -7,16 +7,16 @@ import type { Socket } from 'node:net'
 import express, { type Response, Router } from 'express'
 import { createProxyMiddleware, responseInterceptor } from 'http-proxy-middleware'
 import {
-  CONTROL_PORT_RANGE,
   IDLE_STOP_MS,
   PKG_NAME,
   POLL_TIMEOUT_MS,
   URL_PREFIX,
+  controlPortRange,
 } from './constants.js'
 import { injectOverlay, wantsHtml } from './inject.js'
 import { toAgentItem, toConversationItem } from './label.js'
 import type { Annotation, PollResult, SessionEndedBy } from './protocol.js'
-import { SessionStore, newId } from './store.js'
+import { SessionStore, listRestorableSessions, newId } from './store.js'
 import { writeRegistry, clearRegistry } from './registry.js'
 
 const distDir = dirname(fileURLToPath(import.meta.url))
@@ -45,6 +45,32 @@ interface SnapshotWire {
   agentOnline: boolean
   /** Agent took a batch and hasn't come back to poll — it's off editing. */
   agentBusy: boolean
+}
+
+/** First port in `candidates` that binds. A `0` entry always succeeds, so keep
+ *  it last as the fallback. */
+async function listenOn(app: express.Express, candidates: number[]): Promise<Server> {
+  let lastError: unknown
+  for (const port of candidates) {
+    try {
+      return await new Promise<Server>((resolve, reject) => {
+        const server = app.listen(port, '127.0.0.1', () => {
+          // Bind failures are the promise's business; anything after that would
+          // reject a settled promise and vanish, so log it instead.
+          server.off('error', reject)
+          server.on('error', (err: Error) => {
+            // eslint-disable-next-line no-console
+            console.error(`session proxy on port ${port} failed: ${err.message}`)
+          })
+          resolve(server)
+        })
+        server.on('error', reject)
+      })
+    } catch (err) {
+      lastError = err
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error('no port available')
 }
 
 class SessionRuntime {
@@ -288,15 +314,17 @@ class SessionRuntime {
       wantsHtml(req.headers.accept) ? htmlProxy(req, res, next) : rawProxy(req, res, next),
     )
 
-    await new Promise<void>((resolve) => {
-      this.server = app.listen(0, '127.0.0.1', () => resolve())
-    })
+    // Prefer the port this session last held so an already-open shell tab only
+    // needs a reload after a daemon restart, but never fail over a taken port.
+    const preferred = this.store.session.port
+    this.server = await listenOn(app, preferred ? [preferred, 0] : [0])
     this.server.on('upgrade', (req, socket, head) => {
       if (req.url?.startsWith(URL_PREFIX)) return socket.destroy()
       rawProxy.upgrade(req, socket as Socket, head)
     })
     const address = this.server.address()
     this.port = typeof address === 'object' && address ? address.port : 0
+    this.store.setPort(this.port)
     return this.port
   }
 
@@ -308,8 +336,11 @@ class SessionRuntime {
 /** A daemon already holding the control range — from a run whose registry file
  *  was deleted or corrupted. Adopting it beats racing it for ports and leaving
  *  two daemons alive with one registry between them. */
-async function findLiveDaemonInRange(): Promise<{ port: number; pid: number } | null> {
-  for (let port = CONTROL_PORT_RANGE.start; port <= CONTROL_PORT_RANGE.end; port++) {
+async function findLiveDaemonInRange(range: {
+  start: number
+  end: number
+}): Promise<{ port: number; pid: number } | null> {
+  for (let port = range.start; port <= range.end; port++) {
     try {
       const res = await fetch(`http://127.0.0.1:${port}/control/health`, {
         signal: AbortSignal.timeout(400),
@@ -327,7 +358,8 @@ async function findLiveDaemonInRange(): Promise<{ port: number; pid: number } | 
 }
 
 export async function daemonMain(version: string): Promise<void> {
-  const adopted = await findLiveDaemonInRange()
+  const range = controlPortRange()
+  const adopted = await findLiveDaemonInRange(range)
   if (adopted) {
     writeRegistry({ ...adopted, startedAt: Date.now() })
     // eslint-disable-next-line no-console
@@ -336,6 +368,23 @@ export async function daemonMain(version: string): Promise<void> {
   }
 
   const sessions = new Map<string, SessionRuntime>()
+
+  /** Rebuild the session map from disk. Without this a restarted daemon answers
+   *  `/sessions/find` with 404 and a reconnecting `poll` gives up on a session
+   *  whose queued feedback is sitting right there on disk. */
+  for (const persisted of listRestorableSessions()) {
+    try {
+      const runtime = new SessionRuntime(persisted.targetOrigin)
+      await runtime.start()
+      sessions.set(persisted.targetOrigin, runtime)
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error(
+        `could not restore session for ${persisted.targetOrigin}: ${err instanceof Error ? err.message : String(err)}`,
+      )
+    }
+  }
+
   const control = express()
   control.use(express.json())
 
@@ -407,7 +456,7 @@ export async function daemonMain(version: string): Promise<void> {
   })
 
   let port = 0
-  for (let p = CONTROL_PORT_RANGE.start; p <= CONTROL_PORT_RANGE.end; p++) {
+  for (let p = range.start; p <= range.end; p++) {
     try {
       await new Promise<void>((resolve, reject) => {
         const server = control.listen(p, '127.0.0.1', () => resolve())

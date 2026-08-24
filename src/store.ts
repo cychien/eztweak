@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto'
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { SESSIONS_DIR } from './constants.js'
 import type { Annotation, ConversationEntry, FeedbackBatch, SessionEndedBy } from './protocol.js'
@@ -12,11 +12,40 @@ export function originKey(targetOrigin: string): string {
   return createHash('sha1').update(targetOrigin).digest('hex').slice(0, 12)
 }
 
-interface PersistedSession {
+export interface PersistedSession {
   targetOrigin: string
   state: 'active' | 'ended'
   endedBy?: SessionEndedBy
   createdAt: number
+  /** Last port this session's proxy held. A restarted daemon re-binds it so the
+   *  shell tab the user already has open survives a reload. */
+  port?: number
+}
+
+/** Every session on disk. */
+export function listPersistedSessions(): PersistedSession[] {
+  let keys: string[]
+  try {
+    keys = readdirSync(SESSIONS_DIR)
+  } catch {
+    return []
+  }
+  const sessions: PersistedSession[] = []
+  for (const key of keys) {
+    try {
+      const raw = readFileSync(join(SESSIONS_DIR, key, 'session.json'), 'utf8')
+      const parsed = JSON.parse(raw) as PersistedSession
+      if (typeof parsed?.targetOrigin === 'string') sessions.push(parsed)
+    } catch {
+      /* half-written or foreign directory - skip it */
+    }
+  }
+  return sessions
+}
+
+/** The sessions a starting daemon should rebuild proxies for. */
+export function listRestorableSessions(): PersistedSession[] {
+  return listPersistedSessions().filter((s) => s.state === 'active')
 }
 
 /**
@@ -49,6 +78,10 @@ export class SessionStore {
 
   private writeJson(file: string, value: unknown): void {
     writeFileSync(join(this.dir, file), JSON.stringify(value, null, 2))
+  }
+
+  private patchSession(patch: Partial<PersistedSession>): void {
+    this.writeJson('session.json', { ...this.session, ...patch })
   }
 
   get session(): PersistedSession {
@@ -130,8 +163,12 @@ export class SessionStore {
     this.writeJson('conversation.json', [...this.conversation, entry])
   }
 
+  setPort(port: number): void {
+    this.patchSession({ port })
+  }
+
   end(by: SessionEndedBy): void {
-    this.writeJson('session.json', { ...this.session, state: 'ended', endedBy: by })
+    this.patchSession({ state: 'ended', endedBy: by })
   }
 
   reopen(): void {

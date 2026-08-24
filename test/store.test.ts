@@ -6,7 +6,9 @@ import { test } from 'node:test'
 
 process.env.EZTWEAK_DATA_DIR = mkdtempSync(join(tmpdir(), 'eztweak-test-'))
 
-const { SessionStore } = await import('../src/store.js')
+const { SessionStore, listPersistedSessions, listRestorableSessions } = await import(
+  '../src/store.js'
+)
 const anchor = { selector: 'div', page: '/' }
 
 test('annotations queue: add, update, remove', () => {
@@ -64,4 +66,41 @@ test('state survives a store re-instantiation (daemon restart)', () => {
   second.reopen()
   assert.equal(second.session.state, 'active')
   assert.equal(second.session.endedBy, undefined)
+})
+
+// A restarted daemon rebuilds its session map from these, so a session it
+// cannot see is a session whose queued feedback it will never deliver.
+test('persisted sessions are listable across a daemon restart', () => {
+  const active = new SessionStore('http://localhost:4444')
+  active.setPort(51000)
+  const ended = new SessionStore('http://localhost:5555')
+  ended.end('user')
+
+  const listed = listPersistedSessions()
+  const byOrigin = new Map(listed.map((s) => [s.targetOrigin, s]))
+
+  assert.equal(byOrigin.get('http://localhost:4444')?.state, 'active')
+  assert.equal(byOrigin.get('http://localhost:4444')?.port, 51000)
+  assert.equal(byOrigin.get('http://localhost:5555')?.state, 'ended')
+})
+
+test('the remembered port survives an end/reopen cycle', () => {
+  const store = new SessionStore('http://localhost:6666')
+  store.setPort(51001)
+  store.end('agent')
+  store.reopen()
+  assert.equal(store.session.port, 51001)
+  assert.equal(store.session.state, 'active')
+  assert.equal(store.session.endedBy, undefined)
+})
+
+test('restore rebuilds every active session and skips ended ones', () => {
+  new SessionStore('http://localhost:7777')
+  new SessionStore('http://localhost:8888').end('user')
+
+  const restorable = listRestorableSessions().map((s) => s.targetOrigin)
+  assert.ok(restorable.includes('http://localhost:7777'))
+  assert.ok(!restorable.includes('http://localhost:8888'))
+  // Ended, but still on disk: restore decides what to rebuild, not what to keep.
+  assert.ok(listPersistedSessions().some((s) => s.targetOrigin === 'http://localhost:8888'))
 })
