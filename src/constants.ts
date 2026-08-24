@@ -11,33 +11,36 @@ export const REGISTRY_FILE = join(DATA_DIR, 'daemon.json')
 export const DAEMON_LOG = join(DATA_DIR, 'daemon.log')
 
 export const DEFAULT_CONTROL_PORT = 4400
-/** Ten consecutive ports starting here. A second daemon must never share the
- *  range with the first: `daemonMain` adopts any live daemon it finds inside
- *  its own range, so a separate DATA_DIR alone does not isolate it. Falling back
- *  to the default on a bad value would silently undo that isolation, so an
- *  unusable value is fatal rather than ignored. */
+const CONTROL_PORT_ENV = `${ENV_PREFIX}_CONTROL_PORT`
+/** A second daemon must never share the control range with the first:
+ *  `daemonMain` adopts any live daemon it finds inside its own range, so a
+ *  separate DATA_DIR alone does not isolate it. Falling back to the default on a
+ *  bad value would silently undo that isolation, so an unusable value is fatal
+ *  rather than ignored. */
 export function resolveControlPort(raw: string | undefined): number {
   if (raw === undefined || raw.trim() === '') return DEFAULT_CONTROL_PORT
   const port = Number(raw)
   if (!Number.isInteger(port) || port < 1024 || port > 65_525) {
     throw new Error(
-      `${ENV_PREFIX}_CONTROL_PORT must be an integer between 1024 and 65525, got ${JSON.stringify(raw)}`,
+      `${CONTROL_PORT_ENV} must be an integer between 1024 and 65525, got ${JSON.stringify(raw)}`,
     )
   }
   return port
 }
 
-function controlPortStart(): number {
-  try {
-    return resolveControlPort(process.env[`${ENV_PREFIX}_CONTROL_PORT`])
-  } catch (err) {
-    // eslint-disable-next-line no-console
-    console.error(err instanceof Error ? err.message : String(err))
-    process.exit(1)
-  }
+/** Ten consecutive ports starting at the resolved start. Resolved on call, not
+ *  at import: this module is a dependency of the published `eztweak/vite`
+ *  entry point, which must never read - let alone fail on - this variable. */
+export function controlPortRange(): { start: number; end: number } {
+  const start = resolveControlPort(process.env[CONTROL_PORT_ENV])
+  return { start, end: start + 9 }
 }
-const controlStart = controlPortStart()
-export const CONTROL_PORT_RANGE = { start: controlStart, end: controlStart + 9 }
+
+/** Surfaces a bad value at the command the user just ran, instead of leaving it
+ *  to a detached daemon whose message only reaches the log file. */
+export function assertControlPortEnv(): void {
+  controlPortRange()
+}
 
 /** How stale a session record on disk may be and still be restored when the
  *  daemon starts. Nothing marks a session `ended` when the daemon goes away, so

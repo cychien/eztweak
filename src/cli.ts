@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import open, { apps } from 'open'
-import { PKG_NAME, POLL_RETRIES, URL_PREFIX } from './constants.js'
+import { PKG_NAME, POLL_RETRIES, URL_PREFIX, assertControlPortEnv } from './constants.js'
 import { daemonMain } from './daemon.js'
 import { ensureDaemon, findRunningDaemon } from './registry.js'
 import type { PollResult } from './protocol.js'
@@ -197,6 +197,7 @@ async function cmdStop(): Promise<void> {
 }
 
 async function main(): Promise<void> {
+  assertControlPortEnv()
   const argv = process.argv.slice(2)
   const [first, ...rest] = argv
   const flags = new Set(argv.filter((a) => a.startsWith('--')))

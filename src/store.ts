@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto'
-import { mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { SESSION_RESTORE_MAX_AGE_MS, SESSIONS_DIR } from './constants.js'
 import type { Annotation, ConversationEntry, FeedbackBatch, SessionEndedBy } from './protocol.js'
@@ -17,33 +17,36 @@ export interface PersistedSession {
   state: 'active' | 'ended'
   endedBy?: SessionEndedBy
   createdAt: number
+  /** Last real user or agent activity. The restore age bound reads this and
+   *  nothing else, so a write the daemon performs on its own - `setPort` during
+   *  startup restore - must never renew it, or the bound becomes a lease that
+   *  renews itself and never expires. Absent on pre-existing records. */
+  lastActivityAt?: number
   /** Last port this session's proxy held. A restarted daemon re-binds it so the
    *  shell tab the user already has open survives a reload. */
   port?: number
 }
 
-/** A session's record plus when it was last written, which is what bounds
- *  restore-on-startup. */
-export interface SessionOnDisk extends PersistedSession {
-  updatedAt: number
+/** A record that never noted activity is only as fresh as its creation, and one
+ *  that has neither timestamp counts as expired rather than as just-used. */
+function activityAt(session: PersistedSession): number {
+  return session.lastActivityAt ?? session.createdAt ?? 0
 }
 
 /** Every session on disk. */
-export function listPersistedSessions(): SessionOnDisk[] {
+export function listPersistedSessions(): PersistedSession[] {
   let keys: string[]
   try {
     keys = readdirSync(SESSIONS_DIR)
   } catch {
     return []
   }
-  const sessions: SessionOnDisk[] = []
+  const sessions: PersistedSession[] = []
   for (const key of keys) {
     try {
-      const file = join(SESSIONS_DIR, key, 'session.json')
-      const parsed = JSON.parse(readFileSync(file, 'utf8')) as PersistedSession
-      if (typeof parsed?.targetOrigin === 'string') {
-        sessions.push({ ...parsed, updatedAt: statSync(file).mtimeMs })
-      }
+      const raw = readFileSync(join(SESSIONS_DIR, key, 'session.json'), 'utf8')
+      const parsed = JSON.parse(raw) as PersistedSession
+      if (typeof parsed?.targetOrigin === 'string') sessions.push(parsed)
     } catch {
       /* half-written or foreign directory - skip it */
     }
@@ -52,12 +55,12 @@ export function listPersistedSessions(): SessionOnDisk[] {
 }
 
 /** The sessions a starting daemon should rebuild proxies for: still active, and
- *  recent enough that the user plausibly still has that target open. Nothing
- *  marks a session `ended` when the daemon dies, so the age bound is the only
- *  thing keeping this list from growing without limit. */
-export function listRestorableSessions(): SessionOnDisk[] {
+ *  used recently enough that the user plausibly still has that target open.
+ *  Nothing marks a session `ended` when the daemon dies, so the age bound is the
+ *  only thing keeping this list from growing without limit. */
+export function listRestorableSessions(): PersistedSession[] {
   const cutoff = Date.now() - SESSION_RESTORE_MAX_AGE_MS
-  return listPersistedSessions().filter((s) => s.state === 'active' && s.updatedAt >= cutoff)
+  return listPersistedSessions().filter((s) => s.state === 'active' && activityAt(s) >= cutoff)
 }
 
 /**
@@ -72,10 +75,12 @@ export class SessionStore {
     this.dir = join(SESSIONS_DIR, originKey(targetOrigin))
     mkdirSync(this.dir, { recursive: true })
     if (!this.readJson<PersistedSession>('session.json')) {
+      const now = Date.now()
       this.writeJson('session.json', {
         targetOrigin,
         state: 'active',
-        createdAt: Date.now(),
+        createdAt: now,
+        lastActivityAt: now,
       } satisfies PersistedSession)
     }
   }
@@ -90,6 +95,16 @@ export class SessionStore {
 
   private writeJson(file: string, value: unknown): void {
     writeFileSync(join(this.dir, file), JSON.stringify(value, null, 2))
+  }
+
+  private patchSession(patch: Partial<PersistedSession>): void {
+    this.writeJson('session.json', { ...this.session, ...patch })
+  }
+
+  /** Records real user or agent activity, which is what keeps a session inside
+   *  the restore window. Never call it for daemon-internal bookkeeping. */
+  touch(): void {
+    this.patchSession({ lastActivityAt: Date.now() })
   }
 
   get session(): PersistedSession {
@@ -172,15 +187,15 @@ export class SessionStore {
   }
 
   setPort(port: number): void {
-    this.writeJson('session.json', { ...this.session, port })
+    this.patchSession({ port })
   }
 
   end(by: SessionEndedBy): void {
-    this.writeJson('session.json', { ...this.session, state: 'ended', endedBy: by })
+    this.patchSession({ state: 'ended', endedBy: by, lastActivityAt: Date.now() })
   }
 
   reopen(): void {
     const { endedBy: _endedBy, ...rest } = this.session
-    this.writeJson('session.json', { ...rest, state: 'active' })
+    this.writeJson('session.json', { ...rest, state: 'active', lastActivityAt: Date.now() })
   }
 }

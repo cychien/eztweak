@@ -7,11 +7,11 @@ import type { Socket } from 'node:net'
 import express, { type Response, Router } from 'express'
 import { createProxyMiddleware, responseInterceptor } from 'http-proxy-middleware'
 import {
-  CONTROL_PORT_RANGE,
   IDLE_STOP_MS,
   PKG_NAME,
   POLL_TIMEOUT_MS,
   URL_PREFIX,
+  controlPortRange,
 } from './constants.js'
 import { injectOverlay, wantsHtml } from './inject.js'
 import { toAgentItem, toConversationItem } from './label.js'
@@ -97,6 +97,7 @@ class SessionRuntime {
 
   touch(): void {
     this.lastActivity = Date.now()
+    this.store.touch()
   }
 
   snapshot(): SnapshotWire {
@@ -336,8 +337,11 @@ class SessionRuntime {
 /** A daemon already holding the control range — from a run whose registry file
  *  was deleted or corrupted. Adopting it beats racing it for ports and leaving
  *  two daemons alive with one registry between them. */
-async function findLiveDaemonInRange(): Promise<{ port: number; pid: number } | null> {
-  for (let port = CONTROL_PORT_RANGE.start; port <= CONTROL_PORT_RANGE.end; port++) {
+async function findLiveDaemonInRange(range: {
+  start: number
+  end: number
+}): Promise<{ port: number; pid: number } | null> {
+  for (let port = range.start; port <= range.end; port++) {
     try {
       const res = await fetch(`http://127.0.0.1:${port}/control/health`, {
         signal: AbortSignal.timeout(400),
@@ -355,7 +359,8 @@ async function findLiveDaemonInRange(): Promise<{ port: number; pid: number } | 
 }
 
 export async function daemonMain(version: string): Promise<void> {
-  const adopted = await findLiveDaemonInRange()
+  const range = controlPortRange()
+  const adopted = await findLiveDaemonInRange(range)
   if (adopted) {
     writeRegistry({ ...adopted, startedAt: Date.now() })
     // eslint-disable-next-line no-console
@@ -452,7 +457,7 @@ export async function daemonMain(version: string): Promise<void> {
   })
 
   let port = 0
-  for (let p = CONTROL_PORT_RANGE.start; p <= CONTROL_PORT_RANGE.end; p++) {
+  for (let p = range.start; p <= range.end; p++) {
     try {
       await new Promise<void>((resolve, reject) => {
         const server = control.listen(p, '127.0.0.1', () => resolve())

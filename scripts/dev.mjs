@@ -94,18 +94,21 @@ async function clearStrayDaemon() {
   throw new Error(`could not clear the daemon on ${DEV_CONTROL_PORT} (pid ${stray.pid})`)
 }
 
-/** Resolves once the daemon we just spawned is the one answering - matching on
- *  pid, because a restart usually reclaims the same port and a stale registry
- *  from the previous one would otherwise look healthy. */
+/** Resolves true once the daemon we just spawned is the one answering - matching
+ *  on pid, because a restart usually reclaims the same port and a stale registry
+ *  from the previous one would otherwise look healthy. False once the start has
+ *  been abandoned, so the crash cap does not leave a caller waiting out the whole
+ *  timeout for a pid that will never answer. */
 async function waitForDaemon(timeoutMs = 10_000) {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
+    if (!daemon) return false
     try {
       const res = await fetch(`http://127.0.0.1:${DEV_CONTROL_PORT}/control/health`, {
         signal: AbortSignal.timeout(1000),
       })
       const body = res.ok ? await res.json() : null
-      if (body?.ok && body.pid === daemon?.pid) return
+      if (body?.ok && body.pid === daemon?.pid) return true
     } catch {
       /* not up yet */
     }
@@ -136,8 +139,7 @@ async function restartDaemon() {
   daemon = null
   await killDaemon(dying)
   startDaemon()
-  await waitForDaemon()
-  log('daemon restarted - in-flight polls reconnect on their own')
+  if (await waitForDaemon()) log('daemon restarted - in-flight polls reconnect on their own')
 }
 
 let restartChain = Promise.resolve()
@@ -209,7 +211,7 @@ writeFileSync(TARGET_FILE, JSON.stringify({ url: targetUrl }, null, 2))
 
 await clearStrayDaemon()
 startDaemon()
-await waitForDaemon()
+if (!(await waitForDaemon())) throw new Error('dev daemon gave up during startup')
 await runCli([targetUrl])
 
 log('review shell open. next: `npm run dev:agent` in another terminal')

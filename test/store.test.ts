@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, utimesSync } from 'node:fs'
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -95,20 +95,63 @@ test('the remembered port survives an end/reopen cycle', () => {
   assert.equal(store.session.endedBy, undefined)
 })
 
-test('restore skips ended sessions and ones too old to still be open', () => {
-  const fresh = new SessionStore('http://localhost:7777')
+const sessionFile = (origin: string) => join(SESSIONS_DIR, originKey(origin), 'session.json')
+
+function rewriteSession(origin: string, patch: Record<string, unknown>): void {
+  const file = sessionFile(origin)
+  const record = JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown>
+  writeFileSync(file, JSON.stringify({ ...record, ...patch }, null, 2))
+}
+
+const restorableOrigins = () => listRestorableSessions().map((s) => s.targetOrigin)
+
+test('restore skips ended sessions and ones with no recent activity', () => {
+  new SessionStore('http://localhost:7777')
   new SessionStore('http://localhost:8888').end('user')
-  const stale = new SessionStore('http://localhost:9999')
+  new SessionStore('http://localhost:9999')
+  rewriteSession('http://localhost:9999', {
+    lastActivityAt: Date.now() - SESSION_RESTORE_MAX_AGE_MS - 60_000,
+  })
 
-  const staleFile = join(SESSIONS_DIR, originKey(stale.targetOrigin), 'session.json')
-  const staleAt = (Date.now() - SESSION_RESTORE_MAX_AGE_MS - 60_000) / 1000
-  utimesSync(staleFile, staleAt, staleAt)
-
+  assert.ok(restorableOrigins().includes('http://localhost:7777'))
+  assert.ok(!restorableOrigins().includes('http://localhost:8888'))
+  assert.ok(!restorableOrigins().includes('http://localhost:9999'))
+  // Stale, but still on disk: the bound decides what to restore, not what to keep.
   const listed = listPersistedSessions().map((s) => s.targetOrigin)
-  assert.ok(listed.includes(stale.targetOrigin))
+  assert.ok(listed.includes('http://localhost:9999'))
+})
 
-  const restorable = listRestorableSessions().map((s) => s.targetOrigin)
-  assert.ok(restorable.includes(fresh.targetOrigin))
-  assert.ok(!restorable.includes('http://localhost:8888'))
-  assert.ok(!restorable.includes(stale.targetOrigin))
+// The whole point of the bound: restoring a session rewrites session.json to
+// remember its port, and if that counted as activity nothing would ever expire.
+test('restoring a session does not renew its activity clock', () => {
+  const origin = 'http://localhost:7070'
+  const store = new SessionStore(origin)
+  rewriteSession(origin, { lastActivityAt: Date.now() - SESSION_RESTORE_MAX_AGE_MS + 60_000 })
+  const before = store.session.lastActivityAt
+
+  store.setPort(51002)
+  assert.equal(store.session.lastActivityAt, before)
+  assert.equal(store.session.port, 51002)
+
+  rewriteSession(origin, { lastActivityAt: Date.now() - SESSION_RESTORE_MAX_AGE_MS - 60_000 })
+  store.setPort(51003)
+  assert.ok(!restorableOrigins().includes(origin))
+
+  store.touch()
+  assert.ok(restorableOrigins().includes(origin))
+})
+
+test('a record with no activity clock falls back to createdAt', () => {
+  const recent = 'http://localhost:7171'
+  const old = 'http://localhost:7272'
+  new SessionStore(recent)
+  new SessionStore(old)
+  rewriteSession(recent, { lastActivityAt: undefined })
+  rewriteSession(old, {
+    lastActivityAt: undefined,
+    createdAt: Date.now() - SESSION_RESTORE_MAX_AGE_MS - 60_000,
+  })
+
+  assert.ok(restorableOrigins().includes(recent))
+  assert.ok(!restorableOrigins().includes(old))
 })
