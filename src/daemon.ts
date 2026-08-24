@@ -16,7 +16,7 @@ import {
 import { injectOverlay, wantsHtml } from './inject.js'
 import { toAgentItem, toConversationItem } from './label.js'
 import type { Annotation, PollResult, SessionEndedBy } from './protocol.js'
-import { SessionStore, listPersistedSessions, newId } from './store.js'
+import { SessionStore, listRestorableSessions, newId } from './store.js'
 import { writeRegistry, clearRegistry } from './registry.js'
 
 const distDir = dirname(fileURLToPath(import.meta.url))
@@ -54,7 +54,16 @@ async function listenOn(app: express.Express, candidates: number[]): Promise<Ser
   for (const port of candidates) {
     try {
       return await new Promise<Server>((resolve, reject) => {
-        const server = app.listen(port, '127.0.0.1', () => resolve(server))
+        const server = app.listen(port, '127.0.0.1', () => {
+          // Bind failures are the promise's business; anything after that would
+          // reject a settled promise and vanish, so log it instead.
+          server.off('error', reject)
+          server.on('error', (err: Error) => {
+            // eslint-disable-next-line no-console
+            console.error(`session proxy on port ${port} failed: ${err.message}`)
+          })
+          resolve(server)
+        })
         server.on('error', reject)
       })
     } catch (err) {
@@ -359,15 +368,16 @@ export async function daemonMain(version: string): Promise<void> {
   /** Rebuild the session map from disk. Without this a restarted daemon answers
    *  `/sessions/find` with 404 and a reconnecting `poll` gives up on a session
    *  whose queued feedback is sitting right there on disk. */
-  for (const persisted of listPersistedSessions()) {
-    if (persisted.state !== 'active') continue
-    const runtime = new SessionRuntime(persisted.targetOrigin)
+  for (const persisted of listRestorableSessions()) {
     try {
+      const runtime = new SessionRuntime(persisted.targetOrigin)
       await runtime.start()
       sessions.set(persisted.targetOrigin, runtime)
-    } catch {
+    } catch (err) {
       // eslint-disable-next-line no-console
-      console.error(`could not restore session for ${persisted.targetOrigin}`)
+      console.error(
+        `could not restore session for ${persisted.targetOrigin}: ${err instanceof Error ? err.message : String(err)}`,
+      )
     }
   }
 
@@ -483,4 +493,3 @@ export async function daemonMain(version: string): Promise<void> {
   // eslint-disable-next-line no-console
   console.log(`daemon listening on 127.0.0.1:${port}`)
 }
-

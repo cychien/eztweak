@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto'
-import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { SESSIONS_DIR } from './constants.js'
+import { SESSION_RESTORE_MAX_AGE_MS, SESSIONS_DIR } from './constants.js'
 import type { Annotation, ConversationEntry, FeedbackBatch, SessionEndedBy } from './protocol.js'
 
 export function newId(): string {
@@ -22,25 +22,42 @@ export interface PersistedSession {
   port?: number
 }
 
-/** Every session on disk, for a daemon rebuilding its map after a restart. */
-export function listPersistedSessions(): PersistedSession[] {
+/** A session's record plus when it was last written, which is what bounds
+ *  restore-on-startup. */
+export interface SessionOnDisk extends PersistedSession {
+  updatedAt: number
+}
+
+/** Every session on disk. */
+export function listPersistedSessions(): SessionOnDisk[] {
   let keys: string[]
   try {
     keys = readdirSync(SESSIONS_DIR)
   } catch {
     return []
   }
-  const sessions: PersistedSession[] = []
+  const sessions: SessionOnDisk[] = []
   for (const key of keys) {
     try {
-      const raw = readFileSync(join(SESSIONS_DIR, key, 'session.json'), 'utf8')
-      const parsed = JSON.parse(raw) as PersistedSession
-      if (typeof parsed?.targetOrigin === 'string') sessions.push(parsed)
+      const file = join(SESSIONS_DIR, key, 'session.json')
+      const parsed = JSON.parse(readFileSync(file, 'utf8')) as PersistedSession
+      if (typeof parsed?.targetOrigin === 'string') {
+        sessions.push({ ...parsed, updatedAt: statSync(file).mtimeMs })
+      }
     } catch {
       /* half-written or foreign directory - skip it */
     }
   }
   return sessions
+}
+
+/** The sessions a starting daemon should rebuild proxies for: still active, and
+ *  recent enough that the user plausibly still has that target open. Nothing
+ *  marks a session `ended` when the daemon dies, so the age bound is the only
+ *  thing keeping this list from growing without limit. */
+export function listRestorableSessions(): SessionOnDisk[] {
+  const cutoff = Date.now() - SESSION_RESTORE_MAX_AGE_MS
+  return listPersistedSessions().filter((s) => s.state === 'active' && s.updatedAt >= cutoff)
 }
 
 /**

@@ -1,12 +1,15 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, utimesSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 
 process.env.EZTWEAK_DATA_DIR = mkdtempSync(join(tmpdir(), 'eztweak-test-'))
 
-const { SessionStore, listPersistedSessions } = await import('../src/store.js')
+const { SESSION_RESTORE_MAX_AGE_MS, SESSIONS_DIR } = await import('../src/constants.js')
+const { SessionStore, listPersistedSessions, listRestorableSessions, originKey } = await import(
+  '../src/store.js'
+)
 const anchor = { selector: 'div', page: '/' }
 
 test('annotations queue: add, update, remove', () => {
@@ -90,4 +93,22 @@ test('the remembered port survives an end/reopen cycle', () => {
   assert.equal(store.session.port, 51001)
   assert.equal(store.session.state, 'active')
   assert.equal(store.session.endedBy, undefined)
+})
+
+test('restore skips ended sessions and ones too old to still be open', () => {
+  const fresh = new SessionStore('http://localhost:7777')
+  new SessionStore('http://localhost:8888').end('user')
+  const stale = new SessionStore('http://localhost:9999')
+
+  const staleFile = join(SESSIONS_DIR, originKey(stale.targetOrigin), 'session.json')
+  const staleAt = (Date.now() - SESSION_RESTORE_MAX_AGE_MS - 60_000) / 1000
+  utimesSync(staleFile, staleAt, staleAt)
+
+  const listed = listPersistedSessions().map((s) => s.targetOrigin)
+  assert.ok(listed.includes(stale.targetOrigin))
+
+  const restorable = listRestorableSessions().map((s) => s.targetOrigin)
+  assert.ok(restorable.includes(fresh.targetOrigin))
+  assert.ok(!restorable.includes('http://localhost:8888'))
+  assert.ok(!restorable.includes(stale.targetOrigin))
 })

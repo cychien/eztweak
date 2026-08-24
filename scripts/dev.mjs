@@ -40,6 +40,13 @@ async function daemonOnPort() {
   }
 }
 
+/** A daemon that keeps crashing is almost always the edit under test, and a 4Hz
+ *  respawn loop buries the stack trace that says so. Give up after this many
+ *  crashes inside the window and wait for the next save to try again. */
+const CRASH_GIVE_UP_COUNT = 3
+const CRASH_WINDOW_MS = 5000
+let crashTimes = []
+
 function startDaemon() {
   daemon = spawn(process.execPath, [CLI, '__daemon'], {
     env: devEnv,
@@ -53,6 +60,15 @@ function startDaemon() {
       warn(`daemon exited (${code}) - 127.0.0.1:${DEV_CONTROL_PORT} is held by pid ${squatter.pid}`)
       warn('stop it with `npm run dev:cli stop`, then re-run `npm run dev`')
       await shutdown()
+      return
+    }
+    const now = Date.now()
+    crashTimes = [...crashTimes.filter((t) => now - t < CRASH_WINDOW_MS), now]
+    if (crashTimes.length >= CRASH_GIVE_UP_COUNT) {
+      daemon = null
+      crashTimes = []
+      warn(`daemon exited (${code}) ${CRASH_GIVE_UP_COUNT} times in a row - it does not boot`)
+      warn('fix the error above; the next successful build restarts it')
       return
     }
     warn(`daemon exited (${code}); restarting`)
@@ -98,31 +114,48 @@ async function waitForDaemon(timeoutMs = 10_000) {
   throw new Error(`dev daemon did not come up on 127.0.0.1:${DEV_CONTROL_PORT}`)
 }
 
+/** Resolves once the child is really gone. SIGTERM alone is not enough: a daemon
+ *  wedged by the edit under test never runs its handler, and the orphan it leaves
+ *  on the control port cannot be cleared on the next run either. */
+async function killDaemon(child, graceMs = 3000) {
+  if (!child || child.exitCode !== null || child.signalCode !== null) return
+  const dead = once(child, 'exit')
+  child.kill('SIGTERM')
+  const force = setTimeout(() => child.kill('SIGKILL'), graceMs)
+  try {
+    await dead
+  } finally {
+    clearTimeout(force)
+  }
+}
+
 /** Never overlaps two daemons: the replacement would find the dying one still
  *  listening in its range and adopt it instead of taking over. */
 async function restartDaemon() {
   const dying = daemon
   daemon = null
-  if (dying) {
-    const dead = once(dying, 'exit')
-    dying.kill('SIGTERM')
-    const force = setTimeout(() => dying.kill('SIGKILL'), 3000)
-    await dead
-    clearTimeout(force)
-  }
+  await killDaemon(dying)
   startDaemon()
   await waitForDaemon()
   log('daemon restarted - in-flight polls reconnect on their own')
 }
 
-let restartQueued = false
-async function onNodeRebuild() {
-  if (restartQueued) return
-  restartQueued = true
-  await delay(50)
-  restartQueued = false
-  if (shuttingDown) return
-  await restartDaemon().catch((err) => warn(`restart failed: ${err.message}`))
+let restartChain = Promise.resolve()
+let restartPending = false
+
+/** Coalesces the burst of rebuilds one save produces, then serialises what is
+ *  left. A plain pre-restart flag only debounces the window before a restart, so
+ *  two saves a blink apart would run `restartDaemon` concurrently. */
+function onNodeRebuild() {
+  if (restartPending) return restartChain
+  restartPending = true
+  restartChain = restartChain.then(async () => {
+    await delay(50)
+    restartPending = false
+    if (shuttingDown) return
+    await restartDaemon().catch((err) => warn(`restart failed: ${err.message}`))
+  })
+  return restartChain
 }
 
 async function shutdown() {
@@ -130,8 +163,7 @@ async function shutdown() {
   shuttingDown = true
   console.log('')
   log('shutting down')
-  daemon?.kill('SIGTERM')
-  await Promise.allSettled([disposeWatch?.(), vite?.close()])
+  await Promise.allSettled([killDaemon(daemon), disposeWatch?.(), vite?.close()])
   process.exit(0)
 }
 process.on('SIGINT', shutdown)
