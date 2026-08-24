@@ -44,6 +44,23 @@ export default defineConfig({
 
 Dev-only (`apply: 'serve'`) — it never touches production builds.
 
+## Development
+
+Working on eztweak itself takes one command:
+
+```
+npm run dev                 # watch src/, serve the playground fixture, start an isolated daemon,
+                            # open the review shell
+npm run dev -- --no-plugin  # the same page without eztweakSource(), to see fallback-only anchors
+npm run dev:agent           # second terminal: a stand-in agent that polls, prints anchors, replies
+npm run dev:cli status      # the eztweak CLI, pointed at the dev daemon instead of the real one
+```
+
+A client rebuild (`src/client/**`) only needs a browser reload; a rebuild the daemon loads
+restarts it, and in-flight polls reconnect on their own. Dev mode keeps its daemon registry and
+sessions in `.dev/`, so your own `~/.eztweak` is never touched. The review target is
+[`fixtures/playground`](fixtures/playground/README.md).
+
 ## Status
 
 Early. On the roadmap: diff-derived Keep/Undo, screenshots, layout-issue detection, ACP mode.

@@ -41,7 +41,6 @@ export function runCli(args, opts = {}) {
 
 export const delay = (ms) => new Promise((r) => setTimeout(r, ms))
 
-
 export function devTargetUrl() {
   try {
     return JSON.parse(readFileSync(TARGET_FILE, 'utf8')).url

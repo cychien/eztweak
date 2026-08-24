@@ -142,8 +142,8 @@ async function cmdPoll(rawUrl: string | undefined, reply: string | undefined): P
         )
       }
       await new Promise((r) => setTimeout(r, Math.min(4000, 400 * 2 ** (attempt - 1))))
-      // A restarted daemon serves the session on a fresh port, so the old one is
-      // dead for good — re-resolve instead of retrying a URL that can't recover.
+      // A restarted daemon only prefers the port this session last held, so the
+      // port may have moved - re-resolve instead of retrying a dead URL.
       port = await findSessionPort(target, { quiet: attempt <= POLL_RETRIES })
       continue
     }
