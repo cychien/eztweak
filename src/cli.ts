@@ -2,7 +2,13 @@ import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import open, { apps } from 'open'
-import { PKG_NAME, POLL_RETRIES, URL_PREFIX, assertControlPortEnv } from './constants.js'
+import {
+  DEFAULT_CONTROL_PORT,
+  PKG_NAME,
+  POLL_RETRIES,
+  URL_PREFIX,
+  assertControlPortEnv,
+} from './constants.js'
 import { daemonMain } from './daemon.js'
 import { ensureDaemon, findRunningDaemon } from './registry.js'
 import type { PollResult } from './protocol.js'
@@ -12,7 +18,7 @@ const pkg = JSON.parse(readFileSync(join(dirname(cliEntry), '../package.json'), 
   version: string
 }
 
-const HELP = `${PKG_NAME} — annotate your live dev app, feedback flows to your local agent
+const HELP = `${PKG_NAME} - annotate your live dev app, feedback flows to your local agent
 
 Usage:
   ${PKG_NAME} <url> [--reopen]
@@ -24,6 +30,17 @@ Usage:
   ${PKG_NAME} status | stop
       show session status / stop the background daemon
   ${PKG_NAME} --version | --help
+
+Environment:
+  ${PKG_NAME.toUpperCase()}_DATA_DIR       session state, daemon registry and log (default: ~/.${PKG_NAME})
+  ${PKG_NAME.toUpperCase()}_CONTROL_PORT   first port of the daemon's ten-port control range (default: ${DEFAULT_CONTROL_PORT})
+      Set both to run an isolated second instance: a starting daemon adopts any
+      live daemon inside its own control range, so a separate data dir alone
+      still lands you on the shared one.
+
+A restarted daemon picks its sessions back up from disk and re-binds each to the
+port it last held, so an open review shell only needs a reload and queued
+feedback is still there.
 
 Examples:
   ${PKG_NAME} http://localhost:5173/
