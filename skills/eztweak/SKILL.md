@@ -22,6 +22,8 @@ You do not need eztweak installed globally — invoke it as `npx -y eztweak ...`
 ## Workflow
 
 1. Make sure the dev server is running (e.g. `pnpm dev`). Never start a second instance if one is already up.
+   Run every `eztweak` command from the project's root - the session is scoped to that project, so
+   a different working directory starts a separate review of the same url.
 2. Run `npx -y eztweak <url>` with the full URL of the page to review
    (e.g. `npx -y eztweak http://localhost:5173/pricing`). This opens the review shell in the
    user's browser. If it refuses because the user previously ended the session, do not pass

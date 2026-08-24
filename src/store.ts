@@ -8,12 +8,17 @@ export function newId(): string {
   return randomBytes(6).toString('hex')
 }
 
-export function originKey(targetOrigin: string): string {
-  return createHash('sha1').update(targetOrigin).digest('hex').slice(0, 12)
+/** Origin alone is not an identity: dev servers default to the same port, so
+ *  two projects reviewed on `localhost:5173` would share one store and the
+ *  first one's undelivered feedback would be handed to the second one's agent. */
+export function sessionKey(targetOrigin: string, project: string): string {
+  return createHash('sha1').update(`${targetOrigin}\n${project}`).digest('hex').slice(0, 12)
 }
 
 export interface PersistedSession {
   targetOrigin: string
+  /** Absolute path of the project being reviewed on this origin. */
+  project: string
   state: 'active' | 'ended'
   endedBy?: SessionEndedBy
   createdAt: number
@@ -35,7 +40,11 @@ export function listPersistedSessions(): PersistedSession[] {
     try {
       const raw = readFileSync(join(SESSIONS_DIR, key, 'session.json'), 'utf8')
       const parsed = JSON.parse(raw) as PersistedSession
-      if (typeof parsed?.targetOrigin === 'string') sessions.push(parsed)
+      // Pre-`project` directories are inert: without knowing which project they
+      // belong to, reusing one is the very mix-up `sessionKey` exists to stop.
+      if (typeof parsed?.targetOrigin === 'string' && typeof parsed?.project === 'string') {
+        sessions.push(parsed)
+      }
     } catch {
       /* half-written or foreign directory - skip it */
     }
@@ -43,9 +52,19 @@ export function listPersistedSessions(): PersistedSession[] {
   return sessions
 }
 
-/** The sessions a starting daemon should rebuild proxies for. */
+/** The sessions a starting daemon should rebuild proxies for. Only one project
+ *  can hold a given origin at a time, so when several are on record for one
+ *  origin the newest is the one whose dev server is plausibly still there. */
 export function listRestorableSessions(): PersistedSession[] {
-  return listPersistedSessions().filter((s) => s.state === 'active')
+  const newestPerOrigin = new Map<string, PersistedSession>()
+  for (const session of listPersistedSessions()) {
+    if (session.state !== 'active') continue
+    const held = newestPerOrigin.get(session.targetOrigin)
+    if (!held || session.createdAt > held.createdAt) {
+      newestPerOrigin.set(session.targetOrigin, session)
+    }
+  }
+  return [...newestPerOrigin.values()]
 }
 
 /**
@@ -56,12 +75,16 @@ export function listRestorableSessions(): PersistedSession[] {
 export class SessionStore {
   readonly dir: string
 
-  constructor(readonly targetOrigin: string) {
-    this.dir = join(SESSIONS_DIR, originKey(targetOrigin))
+  constructor(
+    readonly targetOrigin: string,
+    readonly project: string,
+  ) {
+    this.dir = join(SESSIONS_DIR, sessionKey(targetOrigin, project))
     mkdirSync(this.dir, { recursive: true })
     if (!this.readJson<PersistedSession>('session.json')) {
       this.writeJson('session.json', {
         targetOrigin,
+        project,
         state: 'active',
         createdAt: Date.now(),
       } satisfies PersistedSession)

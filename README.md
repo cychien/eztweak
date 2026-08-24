@@ -60,6 +60,12 @@ from disk and re-binds it to the port it last held, so a review shell tab you al
 only needs a reload, and feedback you queued before the restart is still waiting. If that port has
 since been taken, the session moves to a free one and the CLI re-resolves it.
 
+A session belongs to one project on one origin, not to the origin alone. Dev servers all default
+to the same port, so reviewing a second project on `localhost:5173` would otherwise inherit the
+first one's conversation and hand its undelivered feedback to the wrong agent. The project is the
+nearest `.git` or `package.json` ancestor of the directory you run `eztweak` from, so switching
+projects on a port starts a clean review and switching back finds the old one intact.
+
 ## Development
 
 Working on eztweak itself takes one command:

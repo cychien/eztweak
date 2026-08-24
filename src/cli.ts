@@ -1,5 +1,5 @@
-import { readFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { existsSync, readFileSync } from 'node:fs'
+import { dirname, join, parse, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import open, { apps } from 'open'
 import {
@@ -42,10 +42,27 @@ A restarted daemon picks its sessions back up from disk and re-binds each to the
 port it last held, so an open review shell only needs a reload and queued
 feedback is still there.
 
+A session is scoped to the project you run this from (nearest .git or
+package.json), not to the url alone, so two projects sharing a dev-server port
+never see each other's review.
+
 Examples:
   ${PKG_NAME} http://localhost:5173/
   ${PKG_NAME} poll http://localhost:5173/ --agent-reply "改好了 hero 區塊，請再看一次"
 `
+
+/** Which project this review belongs to. Anchored at the repo (or package) root
+ *  rather than the raw cwd, so opening a session from a subdirectory resolves to
+ *  the same session as opening it from the top. */
+function projectRoot(): string {
+  let dir = resolve(process.cwd())
+  const { root } = parse(dir)
+  for (;;) {
+    if (existsSync(join(dir, '.git')) || existsSync(join(dir, 'package.json'))) return dir
+    if (dir === root) return resolve(process.cwd())
+    dir = dirname(dir)
+  }
+}
 
 function fail(message: string, hint?: string): never {
   console.error(`error: ${message}`)
@@ -123,7 +140,11 @@ async function cmdOpen(rawUrl: string | undefined, flags: Set<string>): Promise<
   const daemon = await ensureDaemon(cliEntry)
   const res = await controlFetch(daemon.port, '/control/sessions', {
     method: 'POST',
-    body: JSON.stringify({ url: target.href, reopen: flags.has('--reopen') }),
+    body: JSON.stringify({
+      url: target.href,
+      reopen: flags.has('--reopen'),
+      project: projectRoot(),
+    }),
   })
   const body = (await res.json()) as { shellUrl?: string; error?: string; hint?: string }
   if (!res.ok) fail(body.error ?? `daemon returned ${res.status}`, body.hint)
@@ -196,10 +217,16 @@ async function cmdStatus(): Promise<void> {
   }
   console.log(`daemon: running (pid ${daemon.pid}, control port ${daemon.port})`)
   const res = await controlFetch(daemon.port, '/control/sessions')
-  const sessions = (await res.json()) as { targetOrigin: string; port: number; state: string }[]
+  const sessions = (await res.json()) as {
+    targetOrigin: string
+    project: string
+    port: number
+    state: string
+  }[]
   if (sessions.length === 0) console.log('sessions: none')
   for (const s of sessions) {
     console.log(`session: ${s.targetOrigin} → 127.0.0.1:${s.port} (${s.state})`)
+    console.log(`         project: ${s.project}`)
   }
 }
 

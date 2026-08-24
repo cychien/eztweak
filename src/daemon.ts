@@ -85,9 +85,22 @@ class SessionRuntime {
   private agentBusy = false
   lastActivity = Date.now()
 
-  constructor(readonly targetOrigin: string) {
-    this.store = new SessionStore(targetOrigin)
+  constructor(
+    readonly targetOrigin: string,
+    readonly project: string,
+  ) {
+    this.store = new SessionStore(targetOrigin, project)
     this.bus.setMaxListeners(50)
+  }
+
+  /** Release the port and detach everyone attached, so the origin can be handed
+   *  to a different project's session without leaking a listener. */
+  async stop(): Promise<void> {
+    for (const resolve of this.pollWaiters) resolve(null)
+    this.pollWaiters.clear()
+    for (const client of this.sseClients) client.end()
+    this.sseClients.clear()
+    await new Promise<void>((resolve) => this.server.close(() => resolve()))
   }
 
   /** Someone is attached — keeps the idle reaper off this session. */
@@ -374,7 +387,7 @@ export async function daemonMain(version: string): Promise<void> {
    *  whose queued feedback is sitting right there on disk. */
   for (const persisted of listRestorableSessions()) {
     try {
-      const runtime = new SessionRuntime(persisted.targetOrigin)
+      const runtime = new SessionRuntime(persisted.targetOrigin, persisted.project)
       await runtime.start()
       sessions.set(persisted.targetOrigin, runtime)
     } catch (err) {
@@ -401,6 +414,7 @@ export async function daemonMain(version: string): Promise<void> {
     res.json(
       [...sessions.values()].map((s) => ({
         targetOrigin: s.targetOrigin,
+        project: s.project,
         port: s.port,
         state: s.store.session.state,
       })),
@@ -408,17 +422,27 @@ export async function daemonMain(version: string): Promise<void> {
   })
 
   control.post('/control/sessions', async (req, res) => {
-    const { url, reopen } = req.body ?? {}
+    const { url, reopen, project } = req.body ?? {}
     let parsed: URL
     try {
       parsed = new URL(String(url))
     } catch {
       return res.status(400).json({ error: `invalid url: ${url}` })
     }
+    if (typeof project !== 'string' || !project) {
+      return res.status(400).json({ error: 'missing project' })
+    }
     const origin = parsed.origin
     let runtime = sessions.get(origin)
+    // A dev server that was this origin's is gone the moment another project
+    // binds the port, so its review does not carry over to the new one.
+    if (runtime && runtime.project !== project) {
+      await runtime.stop()
+      sessions.delete(origin)
+      runtime = undefined
+    }
     if (!runtime) {
-      runtime = new SessionRuntime(origin)
+      runtime = new SessionRuntime(origin, project)
       await runtime.start()
       sessions.set(origin, runtime)
     }
