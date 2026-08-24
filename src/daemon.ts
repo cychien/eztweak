@@ -97,7 +97,6 @@ class SessionRuntime {
 
   touch(): void {
     this.lastActivity = Date.now()
-    this.store.touch()
   }
 
   snapshot(): SnapshotWire {

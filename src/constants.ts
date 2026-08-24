@@ -42,13 +42,6 @@ export function assertControlPortEnv(): void {
   controlPortRange()
 }
 
-/** How stale a session record on disk may be and still be restored when the
- *  daemon starts. Nothing marks a session `ended` when the daemon goes away, so
- *  without an upper bound every start would resurrect a proxy for every session
- *  ever opened, however long dead its dev server is. */
-const SESSION_RESTORE_MAX_AGE_DAYS = 7
-export const SESSION_RESTORE_MAX_AGE_MS = SESSION_RESTORE_MAX_AGE_DAYS * 24 * 60 * 60_000
-
 export const POLL_TIMEOUT_MS = 50_000
 /** Consecutive connection failures a `poll` rides out before giving up. Covers a
  *  daemon restart, which the CLI survives by re-resolving the session port. */
