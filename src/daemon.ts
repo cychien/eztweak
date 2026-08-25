@@ -18,6 +18,7 @@ import { toAgentItem, toConversationItem } from './label.js'
 import type { Annotation, PollResult, SessionEndedBy } from './protocol.js'
 import { SessionStore, listRestorableSessions, newId } from './store.js'
 import { writeRegistry, clearRegistry } from './registry.js'
+import { versionGate } from './version.js'
 
 const distDir = dirname(fileURLToPath(import.meta.url))
 const asset = (name: string) => readFileSync(join(distDir, name))
@@ -88,6 +89,7 @@ class SessionRuntime {
   constructor(
     readonly targetOrigin: string,
     readonly project: string,
+    private readonly version: string,
   ) {
     this.store = new SessionStore(targetOrigin, project)
     this.bus.setMaxListeners(50)
@@ -261,6 +263,12 @@ class SessionRuntime {
       res.json({ ok: true })
     })
 
+    // A reconnecting poll can land straight on this port after a daemon
+    // restart re-bound it, skipping the gated control lookup — so the agent
+    // endpoints enforce the version themselves. Shell routes stay open: the
+    // browser sends no version header.
+    api.use('/agent', versionGate(this.version))
+
     api.get('/agent/poll', async (req, res) => {
       const ack = req.query.ack
       if (typeof ack === 'string' && ack) {
@@ -387,7 +395,7 @@ export async function daemonMain(version: string): Promise<void> {
    *  whose queued feedback is sitting right there on disk. */
   for (const persisted of listRestorableSessions()) {
     try {
-      const runtime = new SessionRuntime(persisted.targetOrigin, persisted.project)
+      const runtime = new SessionRuntime(persisted.targetOrigin, persisted.project, version)
       await runtime.start()
       sessions.set(persisted.targetOrigin, runtime)
     } catch (err) {
@@ -409,6 +417,10 @@ export async function daemonMain(version: string): Promise<void> {
     if (stopping) return res.status(503).json({ ok: false, stopping: true })
     res.json({ ok: true, service: PKG_NAME, version, pid: process.pid })
   })
+
+  // Health and stop stay ungated: a mismatched CLI must still be able to see
+  // the daemon and replace it.
+  control.use('/control/sessions', versionGate(version))
 
   control.get('/control/sessions', (_req, res) => {
     res.json(
@@ -442,7 +454,7 @@ export async function daemonMain(version: string): Promise<void> {
       runtime = undefined
     }
     if (!runtime) {
-      runtime = new SessionRuntime(origin, project)
+      runtime = new SessionRuntime(origin, project, version)
       await runtime.start()
       sessions.set(origin, runtime)
     }

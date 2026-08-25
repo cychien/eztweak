@@ -9,8 +9,8 @@ run a CLI) as structured items that resolve to **exact source locations**. The a
 code, HMR updates the page in place, the user reviews the next round.
 
 ```
-$ npx -y eztweak http://localhost:5173/pricing   # opens the review shell
-$ npx -y eztweak poll http://localhost:5173/     # agent blocks here until you hit send
+$ npx -y eztweak@latest http://localhost:5173/pricing   # opens the review shell
+$ npx -y eztweak@latest poll http://localhost:5173/     # agent blocks here until you hit send
 ```
 
 - **Zero config.** A local daemon reverse-proxies your dev server and injects the annotation
@@ -25,7 +25,7 @@ $ npx -y eztweak poll http://localhost:5173/     # agent blocks here until you h
 
 ## Install
 
-Nothing to install - `npx -y eztweak` is enough. For agents, add the bundled skill:
+Nothing to install - `npx -y eztweak@latest` is enough. For agents, add the bundled skill:
 
 ```
 npx skills add cychien/eztweak --skill eztweak
@@ -43,6 +43,17 @@ export default defineConfig({
 ```
 
 Dev-only (`apply: 'serve'`) - it never touches production builds.
+
+## Updating
+
+- **CLI** - always invoke it as `npx -y eztweak@latest`. A bare `npx eztweak` reuses whatever
+  version npx cached and never checks for a newer one.
+- **Skill** - `npx skills update eztweak`.
+- **Daemon** - takes care of itself. All session and shell logic lives in a background daemon, so
+  opening a session with a different CLI version replaces the running daemon with that version.
+  Your sessions come back with it, under the same restore guarantee any daemon restart gets (see
+  Configuration). A CLI that reaches a daemon on another version is refused with a `409` that says
+  how to update, instead of speaking a mismatched protocol.
 
 ## Configuration
 

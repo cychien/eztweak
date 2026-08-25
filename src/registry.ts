@@ -8,6 +8,10 @@ export interface DaemonInfo {
   startedAt: number
 }
 
+export interface RunningDaemon extends DaemonInfo {
+  version: string
+}
+
 export function readRegistry(): DaemonInfo | null {
   try {
     return JSON.parse(readFileSync(REGISTRY_FILE, 'utf8')) as DaemonInfo
@@ -28,32 +32,43 @@ export function clearRegistry(): void {
 /** Confirms the port is serving *our* daemon, not just something that answers.
  *  A registry left behind by a killed daemon can otherwise point at whatever
  *  later took the port — including an older daemon from a previous build. */
-async function isHealthy(port: number, pid: number): Promise<boolean> {
+async function probe(port: number, pid: number): Promise<{ version: string } | null> {
   try {
     const res = await fetch(`http://127.0.0.1:${port}/control/health`, {
       signal: AbortSignal.timeout(1500),
     })
-    if (!res.ok) return false
-    const body = (await res.json()) as { ok?: boolean; pid?: number }
-    return body.ok === true && body.pid === pid
+    if (!res.ok) return null
+    const body = (await res.json()) as { ok?: boolean; pid?: number; version?: string }
+    if (body.ok !== true || body.pid !== pid) return null
+    return { version: body.version ?? 'unknown' }
   } catch {
-    return false
+    return null
   }
 }
 
-export async function findRunningDaemon(): Promise<DaemonInfo | null> {
+export async function findRunningDaemon(): Promise<RunningDaemon | null> {
   const info = readRegistry()
   if (!info) return null
-  if (await isHealthy(info.port, info.pid)) return info
+  const probed = await probe(info.port, info.pid)
+  if (probed) return { ...info, version: probed.version }
   clearRegistry()
   return null
 }
 
-/** Start the daemon (detached) if it is not already running; resolve to its info. */
-export async function ensureDaemon(cliEntry: string): Promise<DaemonInfo> {
-  const running = await findRunningDaemon()
-  if (running) return running
+/** `/control/stop` clears the registry before it responds, and a stopping
+ *  daemon's health check turns 503 so a starting one never adopts it. */
+async function stopDaemon(port: number): Promise<void> {
+  try {
+    await fetch(`http://127.0.0.1:${port}/control/stop`, {
+      method: 'POST',
+      signal: AbortSignal.timeout(1500),
+    })
+  } catch {
+    /* already gone */
+  }
+}
 
+async function spawnDaemon(cliEntry: string): Promise<RunningDaemon> {
   mkdirSync(DATA_DIR, { recursive: true })
   const log = openSync(DAEMON_LOG, 'a')
   const child = spawn(process.execPath, [cliEntry, '__daemon'], {
@@ -69,4 +84,19 @@ export async function ensureDaemon(cliEntry: string): Promise<DaemonInfo> {
     if (info) return info
   }
   throw new Error(`daemon failed to start within 8s (see ${DAEMON_LOG})`)
+}
+
+/** Resolve to a daemon running exactly `version`. All shell and session logic
+ *  lives in the daemon, so a leftover one from a previous version keeps serving
+ *  stale behavior forever — replace it instead of adopting it. Sessions survive:
+ *  the new daemon restores them from disk onto the ports they last held.
+ *  The retry covers a spawned daemon adopting a live older one inside its
+ *  control range, which `daemonMain` does without looking at versions. */
+export async function ensureDaemon(cliEntry: string, version: string): Promise<RunningDaemon> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const running = (await findRunningDaemon()) ?? (await spawnDaemon(cliEntry))
+    if (running.version === version) return running
+    await stopDaemon(running.port)
+  }
+  throw new Error(`a daemon running another version keeps taking over (see ${DAEMON_LOG})`)
 }
