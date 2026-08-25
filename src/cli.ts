@@ -11,6 +11,7 @@ import {
 } from './constants.js'
 import { daemonMain } from './daemon.js'
 import { ensureDaemon, findRunningDaemon } from './registry.js'
+import { VERSION_HEADER } from './version.js'
 import type { PollResult } from './protocol.js'
 
 const cliEntry = fileURLToPath(import.meta.url)
@@ -81,15 +82,25 @@ function parseTarget(raw: string | undefined): URL {
   }
 }
 
+const versionedHeaders = { 'content-type': 'application/json', [VERSION_HEADER]: pkg.version }
+
 async function controlFetch(
   daemonPort: number,
   path: string,
   init?: RequestInit,
 ): Promise<Response> {
   return fetch(`http://127.0.0.1:${daemonPort}${path}`, {
-    headers: { 'content-type': 'application/json' },
+    headers: versionedHeaders,
     ...init,
   })
+}
+
+/** A 409 is the daemon refusing a version skew — retrying cannot fix it, so it
+ *  is fatal even on paths that otherwise ride out failures. */
+async function failOnVersionSkew(res: Response): Promise<void> {
+  if (res.status !== 409) return
+  const body = (await res.json()) as { error?: string; hint?: string }
+  fail(body.error ?? 'version mismatch with the daemon', body.hint)
 }
 
 /** `quiet` keeps a mid-poll reconnect from exiting while retries remain. */
@@ -104,6 +115,7 @@ async function findSessionPort(target: URL, opts?: { quiet?: boolean }): Promise
     daemon.port,
     `/control/sessions/find?origin=${encodeURIComponent(target.origin)}`,
   )
+  await failOnVersionSkew(res)
   if (!res.ok) return bail(`no session for ${target.origin}`)
   const { port } = (await res.json()) as { port: number }
   return port
@@ -137,7 +149,7 @@ async function cmdOpen(rawUrl: string | undefined, flags: Set<string>): Promise<
       'start your dev server first, then re-run this command',
     )
   }
-  const daemon = await ensureDaemon(cliEntry)
+  const daemon = await ensureDaemon(cliEntry, pkg.version)
   const res = await controlFetch(daemon.port, '/control/sessions', {
     method: 'POST',
     body: JSON.stringify({
@@ -160,16 +172,20 @@ async function cmdPoll(rawUrl: string | undefined, reply: string | undefined): P
   if (reply?.trim()) {
     const res = await fetch(sessionApi(port, '/agent/reply'), {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: versionedHeaders,
       body: JSON.stringify({ message: reply.trim() }),
     })
+    await failOnVersionSkew(res)
     if (!res.ok) fail(`failed to deliver --agent-reply (${res.status})`)
   }
   let attempt = 0
   for (;;) {
     let result: PollResult | { type: 'timeout' }
     try {
-      const res = await fetch(sessionApi(port, '/agent/poll'))
+      const res = await fetch(sessionApi(port, '/agent/poll'), { headers: versionedHeaders })
+      // Reached when a poll reconnects straight to a session port that a
+      // restarted, different-version daemon re-bound — `find` never ran.
+      await failOnVersionSkew(res)
       result = (await res.json()) as PollResult | { type: 'timeout' }
       attempt = 0
     } catch {
@@ -189,7 +205,7 @@ async function cmdPoll(rawUrl: string | undefined, reply: string | undefined): P
     if (result.type === 'feedback') {
       await fetch(sessionApi(port, '/agent/ack'), {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: versionedHeaders,
         body: JSON.stringify({ batchId: result.batchId }),
       }).catch(() => {})
     }
@@ -203,7 +219,7 @@ async function cmdEnd(rawUrl: string | undefined): Promise<void> {
   const port = await findSessionPort(target)
   await fetch(sessionApi(port, '/end'), {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: versionedHeaders,
     body: JSON.stringify({ by: 'agent' }),
   })
   console.log(`session for ${target.origin} ended`)
@@ -215,8 +231,9 @@ async function cmdStatus(): Promise<void> {
     console.log('daemon: not running')
     return
   }
-  console.log(`daemon: running (pid ${daemon.pid}, control port ${daemon.port})`)
+  console.log(`daemon: running (v${daemon.version}, pid ${daemon.pid}, control port ${daemon.port})`)
   const res = await controlFetch(daemon.port, '/control/sessions')
+  await failOnVersionSkew(res)
   const sessions = (await res.json()) as {
     targetOrigin: string
     project: string

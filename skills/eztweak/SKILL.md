@@ -11,7 +11,7 @@ open a session, the user marks up the real page in their browser, and `eztweak p
 their feedback as structured items that resolve to source locations. You edit the source, the
 app's own HMR updates the page in place, you reply, and the loop continues.
 
-You do not need eztweak installed globally — invoke it as `npx -y eztweak ...`.
+You do not need eztweak installed globally — invoke it as `npx -y eztweak@latest ...`.
 
 ## When to use
 
@@ -24,11 +24,11 @@ You do not need eztweak installed globally — invoke it as `npx -y eztweak ...`
 1. Make sure the dev server is running (e.g. `pnpm dev`). Never start a second instance if one is already up.
    Run every `eztweak` command from the project's root - the session is scoped to that project, so
    a different working directory starts a separate review of the same url.
-2. Run `npx -y eztweak <url>` with the full URL of the page to review
-   (e.g. `npx -y eztweak http://localhost:5173/pricing`). This opens the review shell in the
+2. Run `npx -y eztweak@latest <url>` with the full URL of the page to review
+   (e.g. `npx -y eztweak@latest http://localhost:5173/pricing`). This opens the review shell in the
    user's browser. If it refuses because the user previously ended the session, do not pass
    `--reopen` unless the user explicitly asked to review again.
-3. Run `npx -y eztweak poll <url>` and wait. It blocks silently until the user sends feedback —
+3. Run `npx -y eztweak@latest poll <url>` and wait. It blocks silently until the user sends feedback —
    leave it running in the foreground, never kill it. If it dies or times out anyway, just re-run
    it; queued feedback is never lost.
    On the first poll after opening, prefer `--agent-reply "<one line: what you built and what to look at>"`
@@ -48,9 +48,9 @@ You do not need eztweak installed globally — invoke it as `npx -y eztweak ...`
    - `anchor.viewport` tells you which viewport the user was looking at — a `mobile` annotation
      is usually a responsive issue; fix it at that breakpoint, don't break desktop.
    - Apply every item in the batch in one pass. HMR shows your edits live; don't restart the dev server.
-6. After applying a batch, run `npx -y eztweak poll <url> --agent-reply "<what you changed, item by item, one short line each>"`
+6. After applying a batch, run `npx -y eztweak@latest poll <url> --agent-reply "<what you changed, item by item, one short line each>"`
    to report back in the browser and wait for the next round.
-7. When the user says they're satisfied (in chat or via the session), run `npx -y eztweak end <url>`.
+7. When the user says they're satisfied (in chat or via the session), run `npx -y eztweak@latest end <url>`.
 
 ## Rules
 
@@ -71,7 +71,7 @@ You do not need eztweak installed globally — invoke it as `npx -y eztweak ...`
 
 ## Commands
 
-- `npx -y eztweak <url> [--reopen]` — open or resume the review session for a dev server
-- `npx -y eztweak poll <url> [--agent-reply "<msg>"]` — deliver a reply, then block for feedback
-- `npx -y eztweak end <url>` — end the session as the agent (plain reopen stays allowed)
-- `npx -y eztweak status` / `stop` — inspect / stop the local daemon
+- `npx -y eztweak@latest <url> [--reopen]` — open or resume the review session for a dev server
+- `npx -y eztweak@latest poll <url> [--agent-reply "<msg>"]` — deliver a reply, then block for feedback
+- `npx -y eztweak@latest end <url>` — end the session as the agent (plain reopen stays allowed)
+- `npx -y eztweak@latest status` / `stop` — inspect / stop the local daemon
