@@ -2,11 +2,9 @@
 
 import Cancel01Icon from '@hugeicons/core-free-icons/Cancel01Icon'
 import CursorMagicSelection02Icon from '@hugeicons/core-free-icons/CursorMagicSelection02Icon'
+import KeyboardIcon from '@hugeicons/core-free-icons/KeyboardIcon'
 import Location01Icon from '@hugeicons/core-free-icons/Location01Icon'
-import Logout03Icon from '@hugeicons/core-free-icons/Logout03Icon'
 import Navigation03Icon from '@hugeicons/core-free-icons/Navigation03Icon'
-import Robot02Icon from '@hugeicons/core-free-icons/Robot02Icon'
-import UserIcon from '@hugeicons/core-free-icons/UserIcon'
 import { type IconNode, icon } from './icon.js'
 
 type Mode = 'off' | 'element' | 'point'
@@ -60,17 +58,25 @@ const VIEWPORTS: { id: string; label: string; width: number | null }[] = [
   { id: 'mobile', label: '390', width: 390 },
 ]
 
-const ANNOTATE_MODES: { id: Exclude<Mode, 'off'>; label: string; hint: string; svg: IconNode }[] = [
+const ANNOTATE_MODES: {
+  id: Exclude<Mode, 'off'>
+  label: string
+  hint: string
+  key: string
+  svg: IconNode
+}[] = [
   {
     id: 'element',
     label: '框選',
-    hint: '圈選整個元素或反白文字（⌘/Ctrl + I）',
+    hint: '圈選整個元素或反白文字',
+    key: 'E',
     svg: CursorMagicSelection02Icon as IconNode,
   },
   {
     id: 'point',
     label: '點選',
     hint: '在頁面上點一下就留言，agent 會自己解析點到的是什麼',
+    key: 'P',
     svg: Location01Icon as IconNode,
   },
 ]
@@ -104,28 +110,187 @@ const brand = h('div', 'ez-brand', 'Review')
 const target = h('span', 'ez-target')
 const agentStatus = h('div', 'ez-badge')
 
-const endBtn = h('button', 'ez-end-btn')
-endBtn.append(icon(Logout03Icon as IconNode, 14), h('span', undefined, '結束'))
-endBtn.title = '結束這次 review'
-endBtn.onclick = () => void endSession()
+// ---------------------------------------------------------------- shortcuts
+
+/** Matched against real key events and against ones the overlay forwards from
+ *  inside the page, so only the fields both can supply. */
+interface KeyChord {
+  key: string
+  metaKey: boolean
+  ctrlKey: boolean
+}
+
+interface Shortcut {
+  /** As printed in the panel and in the control's own tooltip. */
+  keys: string
+  label: string
+  match: (e: KeyChord) => boolean
+  run: () => void
+  /** Whether it still fires while focus is in a text field. Only the two that
+   *  act on what is being typed are. */
+  whileTyping?: boolean
+}
+
+/** Modifier-free letters and digits, because the browser has claimed most of the
+ *  useful combinations - Chrome's Cmd+1..9 switch tabs, and Cmd+T/W/R/L/N are
+ *  gone. That means guarding against typing rather than leaning on a modifier. */
+const viewportName = (v: (typeof VIEWPORTS)[number]) => (v.width ? `${v.label} 寬度` : v.label)
+
+const plain = (key: string) => (e: KeyChord) =>
+  !e.metaKey && !e.ctrlKey && e.key.toLowerCase() === key.toLowerCase()
+const cmd = (key: string) => (e: KeyChord) => (e.metaKey || e.ctrlKey) && e.key === key
+
+function isTyping(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false
+  return (
+    target.isContentEditable ||
+    target instanceof HTMLInputElement ||
+    target instanceof HTMLTextAreaElement
+  )
+}
+
+/** The one place shortcuts are declared: the key handler, the hover panel and
+ *  every tooltip are all generated from this, so the panel cannot come to
+ *  disagree with what the keys actually do. */
+const SHORTCUTS: Shortcut[] = [
+  ...ANNOTATE_MODES.map((m) => ({
+    keys: m.key,
+    label: m.label,
+    match: plain(m.key),
+    run: () => sendMode(annotateMode === m.id ? 'off' : m.id),
+  })),
+  ...VIEWPORTS.map((v, i) => ({
+    keys: String(i + 1),
+    label: viewportName(v),
+    match: plain(String(i + 1)),
+    run: () => setViewport(v.id),
+  })),
+  {
+    keys: 'N',
+    label: '寫補充說明',
+    match: plain('n'),
+    run: () => note.focus(),
+  },
+  {
+    keys: '⌘ ↵',
+    label: '送出給 agent',
+    match: cmd('Enter'),
+    run: () => void sendBatch(),
+    whileTyping: true,
+  },
+  {
+    keys: 'Esc',
+    label: '關掉輸入框，再一次離開標註模式',
+    match: plain('Escape'),
+    /** Blurring first is what makes the rest of the table reachable again: every
+     *  modifier-free key is withheld while a field has focus, so without this the
+     *  keyboard has no way back out of the composer. */
+    run: () => {
+      if (keysPinned) {
+        pinKeys(false)
+        return
+      }
+      const active = document.activeElement
+      if (isTyping(active)) {
+        if (active instanceof HTMLElement) active.blur()
+        return
+      }
+      escapeAnnotating()
+    },
+    whileTyping: true,
+  },
+]
+
+function runShortcut(e: KeyChord, typing: boolean): boolean {
+  for (const s of SHORTCUTS) {
+    if (typing && !s.whileTyping) continue
+    if (!s.match(e)) continue
+    s.run()
+    return true
+  }
+  return false
+}
+
+const keysBtn = h('button', 'ez-keys')
+keysBtn.append(icon(KeyboardIcon as IconNode, 14))
+keysBtn.title = '快捷鍵'
+keysBtn.setAttribute('aria-label', '快捷鍵')
+keysBtn.setAttribute('aria-expanded', 'false')
+
+/** Hover is enough to peek; a click pins the card so it can be read without
+ *  holding the pointer still, and it then stays until Escape or a click
+ *  elsewhere - the same contract as any other menu. */
+let keysPinned = false
+let keysHover = false
+let keysCloseTimer = 0
+
+/** Closing on a delay rather than on a bare `:hover`: the card is anchored to the
+ *  header row, so there is a gap between it and the button, and crossing that gap
+ *  leaves the wrapper. A grace period covers the gap and also a fast diagonal,
+ *  which a fixed bridge element between the two would miss. */
+const KEYS_CLOSE_MS = 140
+
+function paintKeys(): void {
+  const open = keysPinned || keysHover
+  keysWrap.toggleAttribute('data-open', open)
+  keysBtn.setAttribute('aria-expanded', String(open))
+}
+
+function pinKeys(next: boolean): void {
+  keysPinned = next
+  paintKeys()
+}
+
+keysBtn.onclick = () => pinKeys(!keysPinned)
+
+const keysPanel = h('div', 'ez-keys-panel')
+for (const s of SHORTCUTS) {
+  const row = h('div', 'ez-keys-row')
+  row.append(h('kbd', 'ez-kbd', s.keys), h('span', 'ez-keys-label', s.label))
+  keysPanel.appendChild(row)
+}
+
+const keysWrap = h('div', 'ez-keys-wrap')
+keysWrap.append(keysBtn, keysPanel)
+
+keysWrap.addEventListener('pointerenter', () => {
+  window.clearTimeout(keysCloseTimer)
+  keysHover = true
+  paintKeys()
+})
+
+keysWrap.addEventListener('pointerleave', () => {
+  window.clearTimeout(keysCloseTimer)
+  keysCloseTimer = window.setTimeout(() => {
+    keysHover = false
+    paintKeys()
+  }, KEYS_CLOSE_MS)
+})
+
+/** The button's own click is inside the wrap, so pinning it open never trips this
+ *  on the way back up the tree. */
+document.addEventListener('click', (e) => {
+  if (keysPinned && e.target instanceof Node && !keysWrap.contains(e.target)) pinKeys(false)
+})
 
 const headRow = h('div', 'ez-head-row')
-headRow.append(brand, h('div', 'ez-spacer'), agentStatus, endBtn)
+headRow.append(brand, h('div', 'ez-spacer'), keysWrap, agentStatus)
 
 const viewportGroup = h('div', 'ez-viewports')
-for (const v of VIEWPORTS) {
+VIEWPORTS.forEach((v, i) => {
   const btn = h('button', 'ez-vp-btn', v.label)
+  btn.title = `${viewportName(v)}（${i + 1}）`
   btn.dataset.vp = v.id
   if (v.id === viewport) btn.classList.add('ez-on')
   btn.onclick = () => setViewport(v.id)
   viewportGroup.appendChild(btn)
-}
+})
 
 const annotateGroup = h('div', 'ez-annotate-group')
 const annotateBtns = ANNOTATE_MODES.map((m) => {
   const btn = h('button', `ez-tool-btn ez-mode-${m.id}`)
   btn.append(icon(m.svg, 15), h('span', undefined, m.label))
-  btn.title = `${m.hint}・Esc 離開`
+  btn.title = `${m.hint}（${m.key}）・Esc 離開`
   btn.onclick = () => sendMode(annotateMode === m.id ? 'off' : m.id)
   annotateGroup.appendChild(btn)
   return { id: m.id, btn }
@@ -147,18 +312,24 @@ stage.appendChild(frameWrap)
 const sidebar = h('aside', 'ez-sidebar')
 const queueSection = h('section', 'ez-section ez-queue-section')
 const queueList = h('ul', 'ez-queue')
+const queueScroll = h('div', 'ez-fade ez-queue-scroll')
+queueScroll.appendChild(queueList)
 const note = h('textarea', 'ez-note') as HTMLTextAreaElement
 note.placeholder = '整體想法或補充說明（選填）'
+note.title = '寫補充說明（N）'
 note.rows = 2
 const sendBtn = h('button', 'ez-send')
 const sendLabel = h('span', undefined, '送出給 agent')
+sendBtn.title = '送出給 agent（⌘/Ctrl + Enter）'
 sendBtn.append(icon(Navigation03Icon as IconNode, 15), sendLabel)
 sendBtn.onclick = () => void sendBatch()
-queueSection.append(queueList, note, sendBtn)
+queueSection.append(queueScroll, note, sendBtn)
 
 const convSection = h('section', 'ez-section ez-conv-section')
 const convList = h('div', 'ez-conv')
-convSection.append(convList)
+const convScroll = h('div', 'ez-fade ez-conv-scroll')
+convScroll.appendChild(convList)
+convSection.append(convScroll)
 
 sidebar.append(sideHead, banner, convSection, queueSection)
 root.append(stage, sidebar)
@@ -193,22 +364,6 @@ async function sendBatch(): Promise<void> {
   if (res.ok) note.value = ''
 }
 
-async function endSession(): Promise<void> {
-  const pending = snapshot?.annotations.length ?? 0
-  if (pending > 0) {
-    if (confirm(`還有 ${pending} 則標註未送出，一併送出後結束？`)) {
-      await api('/send', { method: 'POST', body: JSON.stringify({ note: note.value }) })
-    } else if (!confirm('直接結束，放棄未送出的標註？')) {
-      return
-    }
-  }
-  await api('/end', { method: 'POST', body: JSON.stringify({ by: 'user' }) })
-  // The CLI opens the shell in a fresh window, so its history has a single
-  // entry and the browser lets the page close itself. If it ever refuses, the
-  // "Review 已結束" banner is what the user is left with.
-  window.close()
-}
-
 function annotationLabel(a: AnnotationWire): string {
   const parts: string[] = []
   if (a.anchor.source) parts.push(a.anchor.source)
@@ -218,8 +373,10 @@ function annotationLabel(a: AnnotationWire): string {
   return parts.join(' · ') || a.anchor.page || ''
 }
 
-function buildBubble(entry: ConversationWire): HTMLElement {
-  const bubble = h('div', 'ez-bubble')
+/** Only the user's turns are boxed. The agent's are plain text, so the sender
+ *  is the only thing that has to say who is speaking. */
+function buildSaid(entry: ConversationWire, isUser: boolean): HTMLElement {
+  const said = h('div', isUser ? 'ez-bubble' : 'ez-said')
   const items = entry.items ?? []
 
   if (items.length) {
@@ -237,7 +394,7 @@ function buildBubble(entry: ConversationWire): HTMLElement {
       li.append(h('span', 'ez-bi-num', `${i + 1}.`), body)
       list.appendChild(li)
     })
-    bubble.appendChild(list)
+    said.appendChild(list)
 
     if (collapsed) {
       const more = h('button', 'ez-bubble-more', `還有 ${items.length - ITEM_LIMIT} 則`)
@@ -245,15 +402,50 @@ function buildBubble(entry: ConversationWire): HTMLElement {
         expandedBatches.add(key)
         render()
       }
-      bubble.appendChild(more)
+      said.appendChild(more)
     }
   }
 
   if (entry.text) {
-    bubble.appendChild(h('div', items.length ? 'ez-bubble-note' : undefined, entry.text))
+    said.appendChild(h('div', items.length ? 'ez-bubble-note' : undefined, entry.text))
   }
-  return bubble
+  return said
 }
+
+const QUEUE_VISIBLE = 2
+
+/** A pixel cap would be wrong: an item is as tall as its comment. Measure the
+ *  first `QUEUE_VISIBLE` instead, so exactly that many show whatever they hold. */
+function capQueue(): void {
+  const items = [...queueList.children] as HTMLElement[]
+  queueScroll.toggleAttribute('data-filled', items.length > 0)
+  if (items.length > QUEUE_VISIBLE) {
+    const gap = parseFloat(getComputedStyle(queueList).rowGap) || 0
+    const budget =
+      items.slice(0, QUEUE_VISIBLE).reduce((sum, li) => sum + li.offsetHeight, 0) +
+      gap * (QUEUE_VISIBLE - 1)
+    queueList.style.maxHeight = `${budget}px`
+  } else {
+    queueList.style.maxHeight = ''
+  }
+  paintQueueFades()
+}
+
+/** Marks which direction still has content, so `.ez-fade` can show that edge.
+ *  Returns the painter so the caller can also run it after a re-render, when no
+ *  scroll event fires but the overflow has changed. */
+function watchFades(wrapper: HTMLElement, scroller: HTMLElement): () => void {
+  const paint = () => {
+    const slack = scroller.scrollHeight - scroller.clientHeight
+    wrapper.toggleAttribute('data-more-above', scroller.scrollTop > 1)
+    wrapper.toggleAttribute('data-more-below', scroller.scrollTop < slack - 1)
+  }
+  scroller.addEventListener('scroll', paint)
+  return paint
+}
+
+const paintQueueFades = watchFades(queueScroll, queueList)
+const paintConvFades = watchFades(convScroll, convList)
 
 function render(): void {
   if (!snapshot) return
@@ -271,7 +463,6 @@ function render(): void {
   }
   for (const { btn } of annotateBtns) btn.disabled = ended
   sendBtn.disabled = ended
-  endBtn.style.display = ended ? 'none' : ''
 
   if (s.agentBusy) {
     agentStatus.className = 'ez-badge ez-working'
@@ -303,6 +494,7 @@ function render(): void {
     li.append(head, h('div', 'ez-qi-comment', a.comment))
     queueList.appendChild(li)
   })
+  capQueue()
 
   convList.textContent = ''
   let prevRole: string | null = null
@@ -315,32 +507,28 @@ function render(): void {
     const grouped = entry.role === prevRole
     const item = h('div', `ez-msg ez-msg-${entry.role}${grouped ? ' ez-msg-cont' : ''}`)
     const isUser = entry.role === 'user'
-    const avatar = h('div', 'ez-avatar')
-    avatar.append(icon((isUser ? UserIcon : Robot02Icon) as IconNode, 16))
-    avatar.title = isUser ? '你' : 'Agent'
-    item.append(avatar, buildBubble(entry))
+    item.append(buildSaid(entry, isUser))
     convList.appendChild(item)
     prevRole = entry.role
   }
 
   if (s.agentBusy) {
     const row = h('div', 'ez-msg ez-msg-agent')
-    const avatar = h('div', 'ez-avatar')
-    avatar.append(icon(Robot02Icon as IconNode, 16))
-    const dots = h('div', 'ez-bubble ez-thinking')
+    const dots = h('div', 'ez-thinking')
     dots.setAttribute('role', 'status')
     dots.setAttribute('aria-label', 'Agent 修改中')
     for (let i = 0; i < 3; i++) dots.appendChild(h('span', 'ez-dot'))
-    row.append(avatar, dots)
+    row.append(dots)
     convList.appendChild(row)
   }
 
   convList.scrollTop = convList.scrollHeight
+  paintConvFades()
 }
 
 window.addEventListener('message', (e: MessageEvent) => {
   if (e.origin !== location.origin) return
-  const data = e.data as { type?: string; mode?: Mode }
+  const data = e.data as { type?: string; mode?: Mode; chord?: KeyChord }
   if (data?.type === 'ez:mode') {
     annotateMode = data.mode ?? 'off'
     for (const { id, btn } of annotateBtns) btn.classList.toggle('ez-on', annotateMode === id)
@@ -349,6 +537,25 @@ window.addEventListener('message', (e: MessageEvent) => {
     sendMode(annotateMode)
     iframe.contentWindow?.postMessage({ type: 'ez:viewport', preset: viewport }, location.origin)
   }
+  if (data?.type === 'ez:key') {
+    // Already screened by the overlay for its own popup and the host page's
+    // fields, so nothing here is being typed into.
+    if (data.chord) runShortcut(data.chord, false)
+  }
+})
+
+/** Forwarded, not decided here: whether Escape takes back a popup or the whole
+ *  mode is the overlay's call, and only it can see whether a popup is open. */
+function escapeAnnotating(): void {
+  if (annotateMode === 'off') return
+  iframe.contentWindow?.postMessage({ type: 'ez:escape' }, location.origin)
+}
+
+/** The shell is the only listener for the table, and the overlay forwards keys it
+ *  did not consume - so a shortcut works whether focus is in the sidebar or out
+ *  on the page, without the two documents keeping separate lists. */
+document.addEventListener('keydown', (e) => {
+  if (runShortcut(e, isTyping(e.target))) e.preventDefault()
 })
 
 const events = new EventSource(`${API}/events`)

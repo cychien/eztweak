@@ -181,26 +181,78 @@ function describe(element: Element): string {
 
 // ---------------------------------------------------------------- highlight
 
+const BADGE_GAP = 4
+/** Width of the frame's outer white ring, which is drawn outside the box. */
+const FRAME_RING = 1
+
+/** An element flush against the viewport loses the side of the frame that falls
+ *  outside it - the ring first, then the mark itself. Holding the frame a ring's
+ *  width inside instead costs a pixel of accuracy on that edge only, and unlike
+ *  the pin the frame is a derived outline, not the annotation's coordinate. */
+function insetToViewport(rect: DOMRect): {
+  top: number
+  left: number
+  width: number
+  height: number
+} {
+  const top = Math.max(FRAME_RING, rect.top)
+  const left = Math.max(FRAME_RING, rect.left)
+  const right = Math.min(window.innerWidth - FRAME_RING, rect.right)
+  const bottom = Math.min(window.innerHeight - FRAME_RING, rect.bottom)
+  return { top, left, width: Math.max(0, right - left), height: Math.max(0, bottom - top) }
+}
+
+/** Point mode keeps resolving an element — the anchor is built from it — but draws
+ *  nothing for it: the pin is the subject, and a frame plus a label would only
+ *  compete with it. */
 function paintHighlight(): void {
-  if (!highlightTarget) {
+  if (!highlightTarget || mode === 'point') {
     ui.highlight.style.display = 'none'
     ui.badge.style.display = 'none'
     return
   }
   const rect = highlightTarget.getBoundingClientRect()
-  ui.highlight.classList.toggle('ez-highlight-soft', mode === 'point')
+  const frame = insetToViewport(rect)
   Object.assign(ui.highlight.style, {
     display: 'block',
-    top: `${rect.top}px`,
-    left: `${rect.left}px`,
-    width: `${rect.width}px`,
-    height: `${rect.height}px`,
+    top: `${frame.top}px`,
+    left: `${frame.left}px`,
+    width: `${frame.width}px`,
+    height: `${frame.height}px`,
   })
+  // With a popup open the panel is the subject. The frame keeps repainting - it
+  // still says which element the panel belongs to, and a scroll has to keep it
+  // there - but the label would only sit behind the panel.
+  if (ui.popup) {
+    ui.badge.style.display = 'none'
+    return
+  }
   ui.badge.textContent = describe(highlightTarget)
+  // Measured, not assumed: the label wraps to no fixed height and its width
+  // depends on the source path, so both edges have to be resolved before it can
+  // be placed.
+  ui.badge.style.display = 'block'
+  placeBadge(rect, ui.badge.offsetWidth, ui.badge.offsetHeight)
+}
+
+/** Above the frame by preference, flipped below it when the element sits against
+ *  the top of the viewport. Clamping into the frame instead — which is what a
+ *  plain `Math.max` does — buries the label in the element it is describing. */
+function placeBadge(rect: DOMRect, width: number, height: number): void {
+  const above = rect.top - height - BADGE_GAP
+  const below = rect.bottom + BADGE_GAP
+  const floor = BADGE_GAP
+  const ceiling = Math.max(floor, window.innerHeight - height - BADGE_GAP)
+  const top =
+    above >= floor
+      ? above
+      : below <= ceiling
+        ? below
+        : Math.min(Math.max(rect.top + BADGE_GAP, floor), ceiling)
+  const right = Math.max(floor, window.innerWidth - width - BADGE_GAP)
   Object.assign(ui.badge.style, {
-    display: 'block',
-    top: `${Math.max(4, rect.top - 26)}px`,
-    left: `${Math.max(4, rect.left)}px`,
+    top: `${top}px`,
+    left: `${Math.min(Math.max(rect.left, floor), right)}px`,
   })
 }
 
@@ -253,6 +305,27 @@ function dismiss(): void {
   movePin(null)
 }
 
+/** Leaving the mode as well as the popup. Staying armed with nothing open would
+ *  let the next ordinary click on the page start another annotation.
+ *  `dismiss()` runs first because `setMode` short-circuits when the mode is
+ *  already what it is being set to, and would then close nothing. */
+function exitToIdle(): void {
+  dismiss()
+  setMode('off')
+}
+
+/** Escape unwinds one layer per press: the popup is a layer above the mode, so a
+ *  press with one open only takes that back and leaves the user still armed to
+ *  mark the next thing. This lives here, not in the shell, because only the
+ *  overlay knows whether a popup is open - the shell forwards the key instead of
+ *  deciding, or it would drop the mode whenever focus happened to be in the
+ *  sidebar with a popup still up. */
+function escape(): void {
+  if (mode === 'off') return
+  if (ui.popup) dismiss()
+  else exitToIdle()
+}
+
 /** `anchor` is re-evaluated on every repaint, so the popup tracks its subject
  *  through scrolls and reflows instead of freezing where it opened. */
 function openPopup(anchor: () => DOMRect, onSave: (comment: string) => void): void {
@@ -260,7 +333,7 @@ function openPopup(anchor: () => DOMRect, onSave: (comment: string) => void): vo
   const popup = el('div', 'ez-popup')
 
   const input = el('textarea', 'ez-input') as HTMLTextAreaElement
-  input.placeholder = '想怎麼調整？（⌘+Enter 儲存）'
+  input.placeholder = '想怎麼調整？(⌘+Enter 儲存)'
   input.rows = 3
 
   const actions = el('div', 'ez-actions')
@@ -277,13 +350,16 @@ function openPopup(anchor: () => DOMRect, onSave: (comment: string) => void): vo
       return
     }
     onSave(comment)
+    // Stays in the current mode: the next annotation is usually right there.
     dismiss()
   }
   save.onclick = submit
   cancel.onclick = dismiss
   input.onkeydown = (e) => {
     if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') submit()
-    if (e.key === 'Escape') dismiss()
+    // No Escape branch: the document listener captures keydown, so it has already
+    // unwound one layer by the time this runs. Handling it here too spent both
+    // layers - popup and mode - on a single press.
     e.stopPropagation()
   }
 
@@ -292,6 +368,9 @@ function openPopup(anchor: () => DOMRect, onSave: (comment: string) => void): vo
   ui.popup = popup
   popupRect = anchor
   paintPopup()
+  // The click painted the highlight before this popup existed, so the label is
+  // still up; repaint now that `ui.popup` can be seen.
+  paintHighlight()
   input.focus()
 }
 
@@ -315,31 +394,62 @@ async function saveAnnotation(
 // ---------------------------------------------------------------- markers
 
 let markerRaf = 0
+const MARKER_SIZE = 20
+
+function resolveSelector(selector: string | undefined): Element | null {
+  if (!selector) return null
+  try {
+    return document.querySelector(selector)
+  } catch {
+    return null
+  }
+}
+
+/** Viewport coordinates for a marker. A point annotation re-derives its spot from
+ *  the anchored element's *current* rect via the stored fractional offset, so the
+ *  marker follows the layout across viewports; the absolute page coordinate is
+ *  only trusted when the element is gone, and only inside the layout it was
+ *  recorded in. */
+function markerPosition(a: AnnotationWire): { top: number; left: number } | null {
+  const target = resolveSelector(a.anchor.selector)
+  const rect = target?.getBoundingClientRect()
+  const live = rect && (rect.width > 0 || rect.height > 0) ? rect : null
+  if (a.kind === 'point' && a.anchor.point) {
+    if (live) {
+      return {
+        top: live.top + a.anchor.point.rel.y * live.height,
+        left: live.left + a.anchor.point.rel.x * live.width,
+      }
+    }
+    if (a.anchor.viewport && window.innerWidth !== a.anchor.viewport.width) return null
+    return { top: a.anchor.point.y - window.scrollY, left: a.anchor.point.x - window.scrollX }
+  }
+  return live ? { top: live.top, left: live.left } : null
+}
 
 function renderMarkers(): void {
   ui.markers.textContent = ''
   const relevant = annotations.filter((a) => a.anchor.page === location.pathname)
   relevant.forEach((a, i) => {
-    let at: { top: number; left: number } | null = null
-    if (a.kind === 'point' && a.anchor.point) {
-      at = { top: a.anchor.point.y, left: a.anchor.point.x }
-    } else if (a.anchor.selector) {
-      let target: Element | null = null
-      try {
-        target = document.querySelector(a.anchor.selector)
-      } catch {
-        /* selector no longer valid */
-      }
-      if (!target) return
-      const rect = target.getBoundingClientRect()
-      if (rect.width === 0 && rect.height === 0) return
-      at = { top: rect.top + window.scrollY, left: rect.left + window.scrollX }
-    }
+    const at = markerPosition(a)
     if (!at) return
     const marker = el('div', 'ez-marker')
     marker.textContent = String(i + 1)
     marker.title = a.comment
-    Object.assign(marker.style, { top: `${at.top - 10}px`, left: `${at.left - 10}px` })
+    // Centred on its anchor, so an anchor on a viewport edge would leave half the
+    // dot outside. Nudge it whole only while the anchor itself is on screen - an
+    // anchor scrolled away takes its marker with it, clamping would pin every
+    // off-screen marker to the edges instead.
+    const r = MARKER_SIZE / 2
+    let top = at.top - r
+    let left = at.left - r
+    const onScreen =
+      at.top >= 0 && at.top <= window.innerHeight && at.left >= 0 && at.left <= window.innerWidth
+    if (onScreen) {
+      top = Math.min(Math.max(top, 2), window.innerHeight - MARKER_SIZE - 2)
+      left = Math.min(Math.max(left, 2), window.innerWidth - MARKER_SIZE - 2)
+    }
+    Object.assign(marker.style, { top: `${top}px`, left: `${left}px` })
     ui.markers.appendChild(marker)
   })
 }
@@ -362,7 +472,9 @@ function setMode(next: Mode): void {
   if (ended && next !== 'off') return
   if (mode === next) return
   mode = next
-  document.documentElement.classList.toggle('ez-annotating', next !== 'off')
+  const root = document.documentElement
+  if (next === 'off') root.removeAttribute('data-ez-mode')
+  else root.setAttribute('data-ez-mode', next)
   dismiss()
   ui.selectionBubble?.remove()
   ui.selectionBubble = null
@@ -449,15 +561,44 @@ function onMouseUp(): void {
   }, 0)
 }
 
+function isTyping(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false
+  return (
+    target.isContentEditable ||
+    target instanceof HTMLInputElement ||
+    target instanceof HTMLTextAreaElement
+  )
+}
+
+/** Only while the popup is open, not for the whole mode: with a mode armed and
+ *  nothing chosen yet, scrolling is exactly how the user reaches the thing they
+ *  want to mark. Once the popup is up they are composing in a text field, and a
+ *  page sliding underneath drags the panel and its subject along with it.
+ *
+ *  The events are blocked rather than the host's `overflow` or body position
+ *  being rewritten: this overlay is a guest in someone else's document, and a
+ *  teardown mid-scroll would strand those styles on their page. Our own chrome
+ *  is exempt so a long comment can still be scrolled inside the field. */
+function onScrollAttempt(e: Event): void {
+  if (!ui.popup || isOwnUi(e.target)) return
+  e.preventDefault()
+}
+
 function onKeyDown(e: KeyboardEvent): void {
-  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'i') {
-    e.preventDefault()
-    setMode(mode === 'off' ? 'element' : 'off')
+  if (e.key === 'Escape') {
+    escape()
+    return
   }
-  if (e.key === 'Escape' && mode !== 'off') {
-    if (ui.popup) dismiss()
-    else setMode('off')
-  }
+  // Everything else belongs to the shell's shortcut table, so it is forwarded
+  // rather than duplicated here - one list, working from either document.
+  // Screened first: with a popup open its own keys win (Cmd+Enter must save the
+  // annotation, not send the batch), and a field on the host page means the user
+  // is typing into their own app.
+  if (ui.popup || isTyping(e.target)) return
+  window.parent?.postMessage(
+    { type: 'ez:key', chord: { key: e.key, metaKey: e.metaKey, ctrlKey: e.ctrlKey } },
+    location.origin,
+  )
 }
 
 // ---------------------------------------------------------------- boot
@@ -471,6 +612,9 @@ function boot(): void {
   document.addEventListener('click', onClick, true)
   document.addEventListener('mouseup', onMouseUp, true)
   document.addEventListener('keydown', onKeyDown, true)
+  // `passive: false` is the point - a passive listener may not preventDefault.
+  document.addEventListener('wheel', onScrollAttempt, { passive: false, capture: true })
+  document.addEventListener('touchmove', onScrollAttempt, { passive: false, capture: true })
   window.addEventListener('scroll', scheduleRepaint, { passive: true, capture: true })
   window.addEventListener('resize', scheduleRepaint, { passive: true })
   new MutationObserver(scheduleRepaint).observe(document.body, {
@@ -482,6 +626,7 @@ function boot(): void {
     if (e.origin !== location.origin) return
     const data = e.data as { type?: string; mode?: Mode; preset?: string }
     if (data?.type === 'ez:set-mode') setMode(data.mode ?? 'off')
+    if (data?.type === 'ez:escape') escape()
     if (data?.type === 'ez:viewport') viewportPreset = data.preset
   })
 
