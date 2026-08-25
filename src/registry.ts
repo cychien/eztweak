@@ -89,7 +89,9 @@ async function spawnDaemon(cliEntry: string): Promise<RunningDaemon> {
 /** Resolve to a daemon running exactly `version`. All shell and session logic
  *  lives in the daemon, so a leftover one from a previous version keeps serving
  *  stale behavior forever — replace it instead of adopting it. Sessions survive:
- *  the new daemon restores them from disk onto the ports they last held. */
+ *  the new daemon restores them from disk onto the ports they last held.
+ *  The retry covers a spawned daemon adopting a live older one inside its
+ *  control range, which `daemonMain` does without looking at versions. */
 export async function ensureDaemon(cliEntry: string, version: string): Promise<RunningDaemon> {
   for (let attempt = 0; attempt < 2; attempt++) {
     const running = (await findRunningDaemon()) ?? (await spawnDaemon(cliEntry))
