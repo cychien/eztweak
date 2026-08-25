@@ -51,9 +51,9 @@ Dev-only (`apply: 'serve'`) - it never touches production builds.
 - **Skill** - `npx skills update eztweak`.
 - **Daemon** - takes care of itself. All session and shell logic lives in a background daemon, so
   opening a session with a different CLI version replaces the running daemon with that version.
-  Sessions survive the swap (they are restored from disk onto the ports they last held); an open
-  review shell tab only needs a reload. A CLI that reaches a daemon on another version is refused
-  with a `409` that says how to update, instead of speaking a mismatched protocol.
+  Your sessions come back with it, under the same restore guarantee any daemon restart gets (see
+  Configuration). A CLI that reaches a daemon on another version is refused with a `409` that says
+  how to update, instead of speaking a mismatched protocol.
 
 ## Configuration
 
