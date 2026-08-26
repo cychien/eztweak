@@ -33,13 +33,13 @@ function printExtras(carrier, indent) {
   for (const file of carrier.attachments ?? []) {
     console.log(`${indent}${dim('file'.padEnd(11))}${file.path} ${dim(`(${file.mime}, ${file.size}B)`)}`)
   }
-  ;(carrier.references ?? []).forEach((r, i) => {
+  for (const r of carrier.references ?? []) {
     const a = r.anchor ?? {}
     const where = [a.source, a.components?.length && `<${a.components.join(' ← ')}>`, a.page]
       .filter(Boolean)
       .join(' · ')
-    console.log(`${indent}${dim(`ref ${i + 1}`.padEnd(11))}${r.label} ${dim(`→ ${where}`)}`)
-  })
+    console.log(`${indent}${dim(`ref ${r.n}`.padEnd(11))}${r.label} ${dim(`→ ${where}`)}`)
+  }
 }
 
 const url = process.argv[2] ?? devTargetUrl()

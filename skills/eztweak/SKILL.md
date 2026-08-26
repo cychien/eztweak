@@ -53,11 +53,15 @@ You do not need eztweak installed globally — invoke it as `npx -y eztweak@late
      specific than the sentence next to it. The batch itself can carry `attachments` too: those
      came with the note and apply to the whole round.
    - `references` (when present) are *other* elements the comment points at — "make this match that
-     one". Each is `{anchor, label}` with the same layered anchor as an item, so `anchor.source` is a
-     `file:line` you can open. `[ref 1]` in the `comment` (and in `label`) means `references[0]`, so
-     the marker's position in the sentence is the user telling you which side of the comparison is
-     which. A reference's `anchor.page` may differ from the item's — they are allowed to point across
-     pages. The batch can carry `references` too, attached to the note rather than any one item.
+     one". Each is `{n, anchor, label}` with the same layered anchor as an item, so `anchor.source` is
+     a `file:line` you can open. `[ref n]` in the `comment` (and in `label`) names the reference whose
+     `n` field equals that number - it is **not** an index into the array, so match on `n` and never
+     on position. `n` is assigned when the user picked the element and is stable for the life of the
+     comment, so gaps are normal: deleting one reference does not renumber the rest, and a lone
+     `[ref 2]` with a single-entry `references` array is the expected shape, not a bug. Where the
+     marker sits in the sentence is the user telling you which side of the comparison is which. A
+     reference's `anchor.page` may differ from the item's — they are allowed to point across pages.
+     The batch can carry `references` too, attached to the note rather than any one item.
    - Apply every item in the batch in one pass. HMR shows your edits live; don't restart the dev server.
 6. After applying a batch, run `npx -y eztweak@latest poll <url> --agent-reply "<what you changed, item by item, one short line each>"`
    to report back in the browser and wait for the next round.

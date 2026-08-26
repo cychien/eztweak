@@ -423,7 +423,7 @@ function escape(): void {
 function openPopup(
   subject: DraftSubject,
   anchor: () => DOMRect,
-  onSave: (comment: string, attachments: string[], references: RefWire[]) => void,
+  onSave: (comment: string, attachments: string[], references: RefWire[]) => Promise<void>,
 ): void {
   closePopup()
   popupSubject = subject
@@ -462,7 +462,7 @@ function openPopup(
   const input = attach.editable
   ui.popupAttach = attach
 
-  const submit = () => {
+  const submit = async () => {
     if (attach.pending() > 0) return
     const comment = attach.text()
     const attachments = attach.ids()
@@ -473,17 +473,31 @@ function openPopup(
       input.focus()
       return
     }
-    onSave(comment, attachments, references)
-    // Handed off: the annotation owns these files now, so the close below must
-    // not delete them.
+    // Handed off before the request, not after: the annotation names these files
+    // the moment it lands, and a dismiss arriving mid-flight would delete them.
     ui.popupAttach = null
+    save.disabled = true
+    try {
+      await onSave(comment, attachments, references)
+    } catch {
+      // Nothing was recorded, so the composer is taken back whole - text, files
+      // and references still in it - rather than the remark being lost in silence.
+      if (ui.popup !== popup) return
+      ui.popupAttach = attach
+      save.disabled = false
+      showPopupNotice(['沒有送出成功，請再試一次'])
+      return
+    }
+    // A dismiss during the request already took this popup down, and whatever is
+    // open now is not this submit's to close.
+    if (ui.popup !== popup) return
     // Stays in the current mode: the next annotation is usually right there.
     dismiss()
   }
-  save.onclick = submit
+  save.onclick = () => void submit()
   cancel.onclick = dismiss
   input.onkeydown = (e) => {
-    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') submit()
+    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') void submit()
     // No Escape branch: the document listener captures keydown, so it has already
     // unwound one layer by the time this runs. Handling it here too spent both
     // layers - popup and mode - on a single press.
@@ -519,12 +533,13 @@ async function saveAnnotation(
 ): Promise<void> {
   const anchor =
     extra?.anchor ?? (element ? buildAnchor(element, extra?.selectedText, extra?.pin) : null)
-  if (!anchor) return
-  await fetch(`${API}/annotations`, {
+  if (!anchor) throw new Error('no anchor to save against')
+  const res = await fetch(`${API}/annotations`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ kind, comment, attachments, references, anchor }),
   })
+  if (!res.ok) throw new Error(`annotation rejected (${res.status})`)
 }
 
 // ---------------------------------------------------------------- restore
@@ -591,6 +606,7 @@ function staleRect(rect: AnchorWire['rect']): DOMRect {
 
 function showPopupNotice(lines: string[]): void {
   if (!ui.popup || lines.length === 0) return
+  ui.popup.querySelector('.ez-popup-notice')?.remove()
   const notice = el('div', 'ez-popup-notice')
   notice.textContent = lines.join('　')
   ui.popup.prepend(notice)
@@ -649,7 +665,7 @@ function rebuildPopup(draft: DraftWire, subject: DraftSubject, target: Element |
     subject,
     target ? () => target.getBoundingClientRect() : () => staleRect(subject.anchor.rect),
     (comment, files, refs) =>
-      void saveAnnotation(subject.kind, target, comment, files, refs, {
+      saveAnnotation(subject.kind, target, comment, files, refs, {
         selectedText: subject.selectedText,
         pin: subject.pin,
         // Keeps the recorded viewport too: it says what the user was actually
@@ -1025,13 +1041,13 @@ function onClick(e: MouseEvent): void {
     const atPin = () =>
       new DOMRect(pin.x - window.scrollX - 6, pin.y - window.scrollY - 6, 12, 12)
     openPopup(subjectOf('point', target, { pin }), atPin, (comment, files, refs) =>
-      void saveAnnotation('point', target, comment, files, refs, { pin }),
+      saveAnnotation('point', target, comment, files, refs, { pin }),
     )
   } else {
     openPopup(
       subjectOf('element', target),
       () => target.getBoundingClientRect(),
-      (comment, files, refs) => void saveAnnotation('element', target, comment, files, refs),
+      (comment, files, refs) => saveAnnotation('element', target, comment, files, refs),
     )
   }
 }
@@ -1067,7 +1083,7 @@ function onMouseUp(): void {
         subjectOf('text', container, { selectedText: text }),
         () => range.getBoundingClientRect(),
         (comment, files, refs) =>
-          void saveAnnotation('text', container, comment, files, refs, { selectedText: text }),
+          saveAnnotation('text', container, comment, files, refs, { selectedText: text }),
       )
     }
     document.body.appendChild(bubble)
@@ -1094,9 +1110,9 @@ function isTyping(target: EventTarget | null): boolean {
  *  teardown mid-scroll would strand those styles on their page. Our own chrome
  *  is exempt so a long comment can still be scrolled inside the field. */
 function onScrollAttempt(e: Event): void {
-  // `popupLive`, not `ui.popup`: with the popup suspended, scrolling to the
-  // element being pointed at is the entire task.
-  if (!popupLive() || isOwnUi(e.target)) return
+  // Never during a pick: reaching the element being pointed at is the entire
+  // task, and a pick from the note box leaves a live popup on the page.
+  if (pick || !popupLive() || isOwnUi(e.target)) return
   e.preventDefault()
 }
 

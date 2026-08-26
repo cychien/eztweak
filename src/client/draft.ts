@@ -121,9 +121,10 @@ export function splitComment(text: string): CommentPart[] {
  *  A file chip contributes nothing - its name is the file's, not the user's
  *  words, and the agent gets the files as their own field. A resolved reference
  *  contributes `[ref N]`, because unlike a file its *position* is the whole
- *  point: the sentence is "make this match [ref 1]". N is 1-based document
- *  order, counted in this same pass as `draftRefs`, so the marker in the comment
- *  can never drift from the reference it names. */
+ *  point: the sentence is "make this match [ref 1]". N is the number stored on
+ *  the node, the same identity `draftRefs` reports, so the marker in the comment
+ *  can never drift from the reference it names - and never the node's position,
+ *  which would renumber the rest when one chip is deleted. */
 export function draftText(body: DraftNode[]): string {
   const out: string[] = []
   for (const node of body) {
