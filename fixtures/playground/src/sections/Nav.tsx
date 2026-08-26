@@ -1,4 +1,11 @@
-const LINKS = ['產品', '定價', '客戶案例', '文件']
+/** `更新紀錄` is a real href to a second document, so the review shell can be
+ *  driven across an actual page load. The rest stay anchors. */
+const LINKS = [
+  { label: '產品', href: '#top' },
+  { label: '定價', href: '#top' },
+  { label: '更新紀錄', href: '/changelog.html' },
+  { label: '文件', href: '#top' },
+]
 
 export function Nav() {
   return (
@@ -9,8 +16,8 @@ export function Nav() {
       </a>
       <nav className="nav-links">
         {LINKS.map((link) => (
-          <a key={link} href="#top">
-            {link}
+          <a key={link.label} href={link.href}>
+            {link.label}
           </a>
         ))}
       </nav>

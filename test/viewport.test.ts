@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { shortAnchor, toAgentItem, viewportTag } from '../src/label.js'
+import { shortAnchor, viewportTag } from '../src/label.js'
 import type { Annotation } from '../src/protocol.js'
+import { agentItem } from './helpers/files.js'
 
 const base: Annotation = { id: 'x', kind: 'element', comment: 'c', createdAt: 1, anchor: {} }
 
 test('the agent payload always carries the viewport it was annotated at', () => {
-  const item = toAgentItem({
+  const item = agentItem({
     ...base,
     anchor: { text: '立即報名', viewport: { width: 390, height: 844, preset: 'mobile' } },
   })

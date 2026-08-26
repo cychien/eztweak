@@ -17,7 +17,9 @@ $ npx -y eztweak@latest poll http://localhost:5173/     # agent blocks here unti
   overlay. No code changes, no build plugins required, works with any framework.
 - **Anchored feedback.** Annotations carry a layered anchor: `file:line` (with the optional Vite
   plugin), React component chain, `data-section`, CSS selector, text, viewport. Agents stop
-  guessing which part of the page you meant.
+  guessing which part of the page you meant. Paste or drop a screenshot into any comment and the
+  agent gets a path to it; `/element` points a comment at a second element, so "make this match
+  that one" arrives as a `file:line` too.
 - **Built for the loop.** Batch annotations, send once; the agent's `poll` is a blocking CLI call
   that prints structured JSON - the same portable contract as an AXI. HMR keeps iterations
   in place; the review chrome lives outside the app frame, so it survives your agent's syntax errors.
@@ -54,6 +56,29 @@ Dev-only (`apply: 'serve'`) - it never touches production builds.
   Your sessions come back with it, under the same restore guarantee any daemon restart gets (see
   Configuration). A CLI that reaches a daemon on another version is refused with a `409` that says
   how to update, instead of speaking a mismatched protocol.
+
+## The comment box
+
+Typing `/` in either comment box opens a command menu - arrow keys and Enter, or click. A slash
+mid-word stays a slash, so urls and paths are left alone. Two commands:
+
+- **`/file`** opens the system file picker and drops what you choose in as an attachment, where the
+  slash was.
+- **`/element`** points the comment at a *second* element - "make this match that one". The page
+  stays live while you choose, so a plain click still follows links and opens menus and only
+  ⌘/Ctrl+click picks; the comment box steps aside and comes back when you are done. You can cross to
+  another page to find what you meant, and eztweak brings you back to finish the comment. The
+  element arrives as a chip carrying the same layered anchor an annotation gets, so the agent is
+  handed a `file:line` instead of a description, and `[ref 1]` in the comment text says exactly where
+  in the sentence you meant it.
+
+Either comment box also takes an image or file, pasted or dropped in. Attachments become inline chips
+in the text itself, so a comment can point at a file mid sentence, and backspace deletes one the
+way it deletes a character. They are names, not previews - the box is for the comment, and a
+thumbnail takes the room it needs. The bytes go straight to the session directory, capped at 8 MB
+per file, and the batch hands the agent an absolute path per attachment so it opens the screenshot
+instead of being handed base64. Deleting a queued annotation deletes its files with it; anything
+attached and then abandoned is collected a day later.
 
 ## Configuration
 
@@ -96,7 +121,7 @@ sessions in `.dev/`, so your own `~/.eztweak` is never touched. The review targe
 
 ## Status
 
-Early. On the roadmap: diff-derived Keep/Undo, screenshots, layout-issue detection, ACP mode.
+Early. On the roadmap: diff-derived Keep/Undo, layout-issue detection, ACP mode.
 
 ## License
 

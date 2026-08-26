@@ -1,21 +1,43 @@
 /** Annotation overlay injected into the proxied app (guest side). Framework-free. */
 
 import Add01Icon from '@hugeicons/core-free-icons/Add01Icon'
+import AlignSelectionIcon from '@hugeicons/core-free-icons/AlignSelectionIcon'
 import TextSelectIcon from '@hugeicons/core-free-icons/TextSelectIcon'
+import { type AttachController, attachify } from './attach.js'
+import { GRACE_MS, draftExpired, draftPendingNames, normalizeDraft } from './draft.js'
+import type { AnchorWire, DraftSubject, DraftWire, RefWire } from './draft.js'
 import { type IconNode, icon } from './icon.js'
+import { modLabel } from './pick.js'
+import { shortAnchor } from '../label.js'
 
 type Mode = 'off' | 'element' | 'point'
 
-interface AnchorWire {
-  source?: string
-  components?: string[]
-  section?: string
-  selector?: string
-  text?: string
-  point?: { x: number; y: number; rel: { x: number; y: number } }
-  rect?: { x: number; y: number; width: number; height: number }
-  viewport?: { width: number; height: number; preset?: string }
-  page?: string
+/** A pick in flight: the user typed `/element` and has gone off to point at
+ *  something. Deliberately *not* a `Mode`. `setMode` dismisses the popup, which
+ *  discards its uploads, and it echoes to the shell's toolbar - both wrong here.
+ *  A pick also has to be possible with no mode armed at all, because the shell's
+ *  note box can start one. So it is a second axis, mirrored onto the document as
+ *  `data-ez-pick` beside `data-ez-mode`. */
+interface Pick {
+  id: string
+  host: 'popup' | 'note'
+  /** True while a popup of ours is hidden on this pick's behalf. */
+  suspended: boolean
+  /** The frame the popup's own subject had. Hovering during a pick moves the one
+   *  highlight there is, so without this it would be left on whatever the mouse
+   *  last crossed. */
+  prevHighlight: Element | null
+  /** Where the composer this pick answers into is waiting, when that is not the
+   *  page we are on. Only the shell knows it after a navigation. */
+  returnTo?: string
+  /** Stamped once: the expiry a restore checks is measured from the moment the
+   *  draft was taken, not from the last time an upload nudged it. */
+  draftAt: number
+  /** The view being suspended. Reaching the element to point at means scrolling
+   *  away from the one the comment is about, so coming back has to put the page
+   *  where it was - otherwise the popup returns anchored to something off screen
+   *  and gets clamped into a corner, detached from its own subject. */
+  scroll: { x: number; y: number }
 }
 
 interface AnnotationWire {
@@ -46,6 +68,21 @@ let ended = false
 let viewportPreset: string | undefined
 let annotations: AnnotationWire[] = []
 let hoverTarget: Element | null = null
+let pick: Pick | null = null
+/** Last pointer position seen in this document, tracked unconditionally - even
+ *  with no mode armed, because a pick from the shell's note box starts that way.
+ *  Arming needs it: without it there is no frame until the user happens to move
+ *  the mouse, and a pick whose target is already under the cursor would look
+ *  like the command did nothing. */
+let lastPointer: { x: number; y: number } | null = null
+/** Whether the pick modifier is being held right now. The modifier is what turns
+ *  a click into a pick, so it is also what turns the page into a picker: without
+ *  it held, the page looks and behaves exactly like itself, which is what lets a
+ *  plain click still follow a link. */
+let modHeld = false
+/** What the open popup is anchored to, as data. A live node cannot survive the
+ *  navigation a cross-page pick invites, and a save still has to be precise. */
+let popupSubject: DraftSubject | null = null
 /** Live subjects of the overlay chrome. Kept so scrolling can repaint them
  *  against the element's *current* position instead of stranding them where
  *  the click happened. Pin and popup anchors are page coordinates. */
@@ -58,8 +95,22 @@ const ui = {
   badge: el('div', 'ez-badge'),
   pin: el('div', 'ez-pin'),
   markers: el('div', 'ez-markers'),
+  /** Shown only while picking: a wash at the edges of the viewport, and a pill
+   *  saying what the modifier does. The page stays clickable underneath, so the
+   *  chrome is the only thing telling the user this moment is different. */
+  veil: el('div', 'ez-pick-veil'),
+  banner: el('div', 'ez-pick-banner'),
   popup: null as HTMLElement | null,
+  /** Lives beside the popup: its uploads are only ever discarded with it. */
+  popupAttach: null as AttachController | null,
   selectionBubble: null as HTMLElement | null,
+}
+
+/** True only when a popup is both open and *live*. Every existing "is a popup
+ *  open" test meant this; a suspended one is open, on screen it is not, and
+ *  treating it as open would swallow the very clicks the pick needs. */
+function popupLive(): boolean {
+  return Boolean(ui.popup) && !pick?.suspended
 }
 
 function el(tag: string, className: string): HTMLElement {
@@ -206,7 +257,9 @@ function insetToViewport(rect: DOMRect): {
  *  nothing for it: the pin is the subject, and a frame plus a label would only
  *  compete with it. */
 function paintHighlight(): void {
-  if (!highlightTarget || mode === 'point') {
+  // A pick is always framing an element, even from point mode: what it is about
+  // to hand over is the element, not a coordinate.
+  if (!highlightTarget || (mode === 'point' && !pick)) {
     ui.highlight.style.display = 'none'
     ui.badge.style.display = 'none'
     return
@@ -223,7 +276,7 @@ function paintHighlight(): void {
   // With a popup open the panel is the subject. The frame keeps repainting - it
   // still says which element the panel belongs to, and a scroll has to keep it
   // there - but the label would only sit behind the panel.
-  if (ui.popup) {
+  if (popupLive()) {
     ui.badge.style.display = 'none'
     return
   }
@@ -257,7 +310,9 @@ function placeBadge(rect: DOMRect, width: number, height: number): void {
 }
 
 function paintPin(): void {
-  if (!pinPage) {
+  // Hidden outright while picking, not just left unpainted: the pin belongs to
+  // the annotation being composed, and the page underneath is now the subject.
+  if (!pinPage || pick) {
     ui.pin.style.display = 'none'
     return
   }
@@ -288,14 +343,40 @@ function moveHighlight(element: Element | null): void {
   paintHighlight()
 }
 
+/** The popup's subject as data, taken when it opens. A live node cannot survive
+ *  the navigation a cross-page pick invites, and a save has to stay precise even
+ *  when the node it named is gone.
+ *
+ *  Deliberately a second `buildAnchor` call rather than one shared with the save:
+ *  they answer at different moments. This records where the thing was when the
+ *  user pointed at it; the save records where it is when they commit. */
+function subjectOf(
+  kind: DraftSubject['kind'],
+  element: Element,
+  extra?: { selectedText?: string; pin?: { x: number; y: number } },
+): DraftSubject {
+  return {
+    kind,
+    page: location.pathname,
+    anchor: buildAnchor(element, extra?.selectedText, extra?.pin),
+    ...(extra?.selectedText ? { selectedText: extra.selectedText } : {}),
+    ...(extra?.pin ? { pin: extra.pin } : {}),
+  }
+}
+
 // ---------------------------------------------------------------- popup
 
 /** Removes the popup only. The target highlight and pin stay put — they are what
  *  tells the user which thing they're commenting on. Use `dismiss()` to drop both. */
 function closePopup(): void {
+  // Only ever reached with the popup being abandoned: a save hands its files to
+  // the annotation and clears this first, so nothing here can delete them.
+  ui.popupAttach?.discard()
+  ui.popupAttach = null
   ui.popup?.remove()
   ui.popup = null
   popupRect = null
+  popupSubject = null
 }
 
 function dismiss(): void {
@@ -321,6 +402,17 @@ function exitToIdle(): void {
  *  deciding, or it would drop the mode whenever focus happened to be in the
  *  sidebar with a popup still up. */
 function escape(): void {
+  // The slash menu is a layer above the popup, and this runs from the document's
+  // capture phase - ahead of the composer's own key handling - so it has to take
+  // the press here or the popup would close out from under an open menu.
+  if (ui.popupAttach?.closeSlash()) return
+  // A pick is a layer above the popup: taking it back hands the composer straight
+  // back, still holding everything typed into it. Checked ahead of the mode
+  // because a pick from the note box runs with no mode armed.
+  if (pick) {
+    cancelPick('escape')
+    return
+  }
   if (mode === 'off') return
   if (ui.popup) dismiss()
   else exitToIdle()
@@ -328,42 +420,99 @@ function escape(): void {
 
 /** `anchor` is re-evaluated on every repaint, so the popup tracks its subject
  *  through scrolls and reflows instead of freezing where it opened. */
-function openPopup(anchor: () => DOMRect, onSave: (comment: string) => void): void {
+function openPopup(
+  subject: DraftSubject,
+  anchor: () => DOMRect,
+  onSave: (comment: string, attachments: string[], references: RefWire[]) => Promise<void>,
+): void {
   closePopup()
+  popupSubject = subject
   const popup = el('div', 'ez-popup')
 
-  const input = el('textarea', 'ez-input') as HTMLTextAreaElement
-  input.placeholder = '想怎麼調整？(⌘+Enter 儲存)'
-  input.rows = 3
-
   const actions = el('div', 'ez-actions')
-  const save = el('button', 'ez-btn ez-btn-primary')
+  const save = el('button', 'ez-btn ez-btn-primary') as HTMLButtonElement
   save.append(icon(Add01Icon as IconNode, 14), document.createTextNode('加入待送清單'))
   const cancel = el('button', 'ez-btn')
   cancel.textContent = '取消'
   actions.append(cancel, save)
 
-  const submit = () => {
-    const comment = input.value.trim()
-    if (!comment) {
+  // The button's disabled state cannot carry this: ⌘+Enter never consults it,
+  // and an upload settling repaints it from `pending()` mid-request.
+  let saving = false
+
+  const attach = attachify({
+    api: API,
+    mk: el,
+    className: 'ez-input',
+    placeholder: '想怎麼調整？輸入 / 用指令 (⌘+Enter 儲存)',
+    onChange: () => {
+      save.disabled = saving || attach.pending() > 0
+      // The shell is holding a copy of this box in case the page it sits on goes
+      // away. An upload landing is the only thing that can change a suspended
+      // one, so this is where that copy is refreshed.
+      if (pick?.suspended) postDraft()
+    },
+    commands: [
+      {
+        id: 'element',
+        label: 'Element',
+        hint: `選取頁面元素`,
+        keywords: ['element', 'pick', 'ref', 'reference', '元素', '指定', '參考', '框選'],
+        icon: AlignSelectionIcon as IconNode,
+        run: () => void armPick('popup', newPickId()),
+      },
+    ],
+  })
+  const input = attach.editable
+  ui.popupAttach = attach
+
+  const submit = async () => {
+    if (saving || attach.pending() > 0) return
+    const comment = attach.text()
+    const attachments = attach.ids()
+    const references = attach.refs()
+    // A pasted screenshot, or an element pointed at, can be the whole remark, so
+    // text is only required when nothing came with it.
+    if (!comment && attachments.length === 0 && references.length === 0) {
       input.focus()
       return
     }
-    onSave(comment)
+    // Handed off before the request, not after: the annotation names these files
+    // the moment it lands, and a dismiss arriving mid-flight would delete them.
+    ui.popupAttach = null
+    save.disabled = true
+    saving = true
+    try {
+      await onSave(comment, attachments, references)
+    } catch {
+      // Nothing was recorded, so the composer is taken back whole - text, files
+      // and references still in it - rather than the remark being lost in silence.
+      if (ui.popup !== popup) return
+      ui.popupAttach = attach
+      save.disabled = false
+      showPopupNotice(['沒有送出成功，請再試一次'])
+      return
+    } finally {
+      saving = false
+    }
+    // A dismiss during the request already took this popup down, and whatever is
+    // open now is not this submit's to close.
+    if (ui.popup !== popup) return
     // Stays in the current mode: the next annotation is usually right there.
     dismiss()
   }
-  save.onclick = submit
+  save.onclick = () => void submit()
   cancel.onclick = dismiss
   input.onkeydown = (e) => {
-    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') submit()
+    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') void submit()
     // No Escape branch: the document listener captures keydown, so it has already
     // unwound one layer by the time this runs. Handling it here too spent both
     // layers - popup and mode - on a single press.
     e.stopPropagation()
   }
 
-  popup.append(input, actions)
+  popup.append(attach.wrap, actions)
+  popup.setAttribute('data-ez-subject', subject.kind)
   document.body.appendChild(popup)
   ui.popup = popup
   popupRect = anchor
@@ -376,19 +525,163 @@ function openPopup(anchor: () => DOMRect, onSave: (comment: string) => void): vo
 
 async function saveAnnotation(
   kind: AnnotationWire['kind'],
-  element: Element,
+  element: Element | null,
   comment: string,
-  extra?: { selectedText?: string; pin?: { x: number; y: number } },
+  attachments: string[],
+  references: RefWire[],
+  extra?: {
+    selectedText?: string
+    pin?: { x: number; y: number }
+    /** Used verbatim when the element is gone. Keeping what was recorded beats
+     *  both guessing and giving up: `source`, `components` and `text` are still
+     *  exactly as precise as they were when the user pointed at the thing. */
+    anchor?: AnchorWire
+  },
 ): Promise<void> {
-  await fetch(`${API}/annotations`, {
+  const anchor =
+    extra?.anchor ?? (element ? buildAnchor(element, extra?.selectedText, extra?.pin) : null)
+  if (!anchor) throw new Error('no anchor to save against')
+  const res = await fetch(`${API}/annotations`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({
-      kind,
-      comment,
-      anchor: buildAnchor(element, extra?.selectedText, extra?.pin),
-    }),
+    body: JSON.stringify({ kind, comment, attachments, references, anchor }),
   })
+  if (!res.ok) throw new Error(`annotation rejected (${res.status})`)
+}
+
+// ---------------------------------------------------------------- restore
+
+/** Only when the anchor recorded a `source` does a selector hit have to prove
+ *  itself, and only against that. Never against the text: the agent may have
+ *  changed exactly the words the user was commenting on, which is the likeliest
+ *  reason the comment exists. */
+function corroborates(hit: Element, anchor: AnchorWire): boolean {
+  if (!anchor.source) return true
+  return hit.closest(`[${SOURCE_ATTR}]`)?.getAttribute(SOURCE_ATTR) === anchor.source
+}
+
+function bySource(source: string): Element | null {
+  // Walked and compared rather than built into an attribute selector: the value
+  // is a file path from a build plugin, not something to interpolate into CSS.
+  for (const node of document.querySelectorAll(`[${SOURCE_ATTR}]`)) {
+    if (node.getAttribute(SOURCE_ATTR) === source) return node
+  }
+  return null
+}
+
+/** The tightest element that still contains the text - the smallest container is
+ *  the most specific one that can be said to hold it. */
+function byText(needle: string): Element | null {
+  let best: Element | null = null
+  let bestLength = Number.POSITIVE_INFINITY
+  for (const node of document.body.querySelectorAll('*')) {
+    if (isOwnUi(node)) continue
+    const text = (node.textContent ?? '').replace(/\s+/g, ' ')
+    if (!text.includes(needle) || text.length >= bestLength) continue
+    best = node
+    bestLength = text.length
+  }
+  return best
+}
+
+/** The live node a recorded subject names, or null when the page has moved on.
+ *  `cssPath` is positional, so an edit between leaving and coming back can
+ *  invalidate it - which is why the recorded `source` gets a second try. */
+function resolveSubject(subject: DraftSubject): Element | null {
+  const anchor = subject.anchor
+  const hit = resolveSelector(anchor.selector)
+  if (hit && corroborates(hit, anchor)) return hit
+  if (anchor.source) {
+    const found = bySource(anchor.source)
+    if (found) return found
+  }
+  if (subject.selectedText) {
+    const found = byText(subject.selectedText)
+    if (found) return found
+  }
+  // A selector hit that failed to corroborate is still a better guess than
+  // nothing: the positional path is a fallback layer, not a peer of `source`.
+  return hit
+}
+
+function staleRect(rect: AnchorWire['rect']): DOMRect {
+  if (!rect) {
+    return new DOMRect(window.innerWidth / 2 - 6, window.innerHeight / 2 - 6, 12, 12)
+  }
+  return new DOMRect(rect.x - window.scrollX, rect.y - window.scrollY, rect.width, rect.height)
+}
+
+function showPopupNotice(lines: string[]): void {
+  if (!ui.popup || lines.length === 0) return
+  ui.popup.querySelector('.ez-popup-notice')?.remove()
+  const notice = el('div', 'ez-popup-notice')
+  notice.textContent = lines.join('　')
+  ui.popup.prepend(notice)
+  paintPopup()
+}
+
+/** How long to keep looking for the subject before calling it gone.
+ *
+ *  The overlay announces itself at `DOMContentLoaded`, and a client-rendered app
+ *  has nothing but an empty root div at that point - so the first look for the
+ *  subject usually happens before the page it lives on exists. Waiting a few
+ *  frames is the difference between restoring onto the real element and telling
+ *  the user their element is gone while they are looking straight at it. */
+const SETTLE_MS = 800
+
+/** Resolve as soon as the subject appears, or give up once the page has had long
+ *  enough to render. Polled on frames rather than watched: the observer would
+ *  have to be torn down on every exit path, and this answers on the first frame
+ *  in the case that is not a client-rendered mount. */
+function whenSubjectSettles(subject: DraftSubject, done: (target: Element | null) => void): void {
+  const deadline = Date.now() + SETTLE_MS
+  const attempt = (): void => {
+    const target = resolveSubject(subject)
+    if (target || Date.now() >= deadline) {
+      done(target)
+      return
+    }
+    requestAnimationFrame(attempt)
+  }
+  attempt()
+}
+
+/** Rebuild a popup that did not survive the navigation its own pick invited. */
+function restoreDraft(draft: DraftWire): void {
+  const subject = draft.subject
+  if (!subject) return
+  // Past the grace window the sweep has taken the files these chips name, so a
+  // restore would only build a composer whose save is certain to be rejected.
+  if (draftExpired(draft, Date.now(), GRACE_MS)) {
+    post({ type: 'ez:draft-expired', pickId: draft.id })
+    return
+  }
+  whenSubjectSettles(subject, (target) => rebuildPopup(draft, subject, target))
+}
+
+function rebuildPopup(draft: DraftWire, subject: DraftSubject, target: Element | null): void {
+  restoreView(subject.scroll, target)
+  const lines: string[] = []
+  if (!target) lines.push('原本的元素已經不在頁面上，這則標註會用當時的位置送出')
+  const lost = draftPendingNames(draft.body)
+  if (lost.length) lines.push(`上傳中的檔案（${lost.join('、')}）沒有跟著回來，請重新貼一次`)
+
+  moveHighlight(target)
+  if (subject.pin) movePin(subject.pin)
+  openPopup(
+    subject,
+    target ? () => target.getBoundingClientRect() : () => staleRect(subject.anchor.rect),
+    (comment, files, refs) =>
+      saveAnnotation(subject.kind, target, comment, files, refs, {
+        selectedText: subject.selectedText,
+        pin: subject.pin,
+        // Keeps the recorded viewport too: it says what the user was actually
+        // looking at when they framed this, which a repaint would overwrite.
+        ...(target ? {} : { anchor: subject.anchor }),
+      }),
+  )
+  ui.popupAttach?.restore(draft.body)
+  showPopupNotice(lines)
 }
 
 // ---------------------------------------------------------------- markers
@@ -429,6 +722,7 @@ function markerPosition(a: AnnotationWire): { top: number; left: number } | null
 
 function renderMarkers(): void {
   ui.markers.textContent = ''
+  if (pick) return
   const relevant = annotations.filter((a) => a.anchor.page === location.pathname)
   relevant.forEach((a, i) => {
     const at = markerPosition(a)
@@ -466,11 +760,226 @@ function scheduleRepaint(): void {
   })
 }
 
+// ---------------------------------------------------------------- picking
+
+/** Every modifier a browser reads on a link is already spoken for - new tab,
+ *  download, new window - so a pick cannot borrow one to *pass a click through*.
+ *  It takes the modifier for itself instead: the plain click stays the page's, and
+ *  the modified one never reaches the browser's own handling because we cancel it. */
+const MOD_LABEL = modLabel(navigator.userAgent)
+const PICKING_LABEL = '選取中…'
+
+let pickSeq = 0
+const newPickId = (): string => `p${++pickSeq}-${Date.now().toString(36)}`
+
+function post(message: Record<string, unknown>): void {
+  window.parent?.postMessage(message, location.origin)
+}
+
+/** The popup goes inert: hidden, blurred, unpainted. Everything it owns - its
+ *  controller, its uploads, its anchor closure - stays exactly where it is.
+ *
+ *  Hidden rather than rebuilt, and hidden while staying *in* the document. A
+ *  rebuild would produce new chip nodes, and `attachify`'s upload deletes its own
+ *  file when it lands to find its chip detached - so serialising here would throw
+ *  away the screenshot the user pasted a second ago. */
+function suspendPopup(): boolean {
+  if (!ui.popup) return false
+  ui.popup.setAttribute('data-ez-hidden', '')
+  return true
+}
+
+/** Puts the viewport back, then makes sure the subject is actually on screen - the
+ *  recorded offset can stop holding it if the page reflowed while the user was
+ *  away.
+ *
+ *  `instant` is not decoration: plenty of pages set `scroll-behavior: smooth`,
+ *  and a scroll still animating when the popup is placed puts it somewhere its
+ *  subject is not. */
+function restoreView(scroll: { x: number; y: number } | undefined, target: Element | null): void {
+  if (scroll) window.scrollTo({ left: scroll.x, top: scroll.y, behavior: 'instant' })
+  if (!target) return
+  const rect = target.getBoundingClientRect()
+  if (rect.bottom > 0 && rect.top < window.innerHeight) return
+  target.scrollIntoView({ block: 'center', behavior: 'instant' })
+}
+
+function resumePopup(view?: Pick): void {
+  if (!ui.popup) return
+  // Before the paint, so the popup is placed against where its subject now is.
+  if (view) restoreView(view.scroll, view.prevHighlight)
+  ui.popup.removeAttribute('data-ez-hidden')
+  paintPopup()
+  paintHighlight()
+  // Focus before the caret is placed, or the browser puts it back at the start.
+  ui.popupAttach?.editable.focus()
+}
+
+function paintPickChrome(): void {
+  const on = Boolean(pick)
+  ui.veil.style.display = on ? 'block' : 'none'
+  ui.banner.style.display = on ? 'flex' : 'none'
+  if (!pick) return
+  const back = pick.returnTo && pick.returnTo !== location.pathname ? pick.returnTo : null
+  ui.banner.textContent = ''
+  const text = el('span', 'ez-pick-text')
+  text.textContent = back
+    ? `${MOD_LABEL} + 點擊要指定的元素・完成後回到 ${back}`
+    : `${MOD_LABEL} + 點擊要指定的元素`
+  const cancel = el('button', 'ez-pick-cancel')
+  cancel.textContent = '取消'
+  cancel.onclick = () => cancelPick('escape')
+  ui.banner.append(icon(AlignSelectionIcon as IconNode, 14), text, cancel)
+}
+
+function currentDraft(): DraftWire | null {
+  if (!pick || pick.host !== 'popup' || !ui.popupAttach || !popupSubject) return null
+  return {
+    id: pick.id,
+    host: 'popup',
+    createdAt: pick.draftAt,
+    // Read now rather than at popup-open: this is the view the user is leaving.
+    subject: { ...popupSubject, scroll: { x: window.scrollX, y: window.scrollY } },
+    body: normalizeDraft(ui.popupAttach.snapshot()),
+  }
+}
+
+/** "If I do not survive this navigation, rebuild me from here." Re-sent whenever
+ *  the suspended box changes, which is only ever an upload landing. */
+function postDraft(): void {
+  const draft = currentDraft()
+  if (draft) post({ type: 'ez:draft', pickId: draft.id, draft })
+}
+
+function armPick(host: 'popup' | 'note', id: string, returnTo?: string): boolean {
+  if (ended || pick) return false
+  // A popup-host pick does *not* require a popup here. On a re-arm after the app
+  // navigated, this document never saw one - the shell is holding it - and the
+  // pick still has to run so its answer can be posted back. That case is the
+  // whole reason the shell owns the draft, so refusing it would defeat the point.
+  const attach = host === 'popup' ? ui.popupAttach : null
+  pick = {
+    id,
+    host,
+    suspended: false,
+    prevHighlight: highlightTarget,
+    returnTo,
+    draftAt: Date.now(),
+    scroll: { x: window.scrollX, y: window.scrollY },
+  }
+  // Announced before anything is sent about it. The shell adopts a pick it did
+  // not start when it hears this, and until it has, a draft would arrive for a
+  // transaction it knows nothing about and be dropped as stale.
+  post({ type: 'ez:pick-armed', pickId: id, host })
+  if (attach) {
+    // While the box is still focused and the caret is still where the slash was.
+    attach.beginRef(PICKING_LABEL)
+    pick.suspended = suspendPopup()
+    postDraft()
+  }
+  document.documentElement.setAttribute('data-ez-pick', '')
+  // Nothing is framed yet: until the modifier goes down the page is still just a
+  // page, and drawing on it would promise a pick that a plain click will not make.
+  hoverTarget = null
+  moveHighlight(null)
+  paintPickChrome()
+  scheduleRepaint()
+  return true
+}
+
+/** Frames whatever the cursor is already over. The affordance cannot wait for a
+ *  `mousemove` that may never come: pressing the modifier while already hovering
+ *  the thing you want is the normal way to use this. */
+function frameUnderPointer(): void {
+  const at = lastPointer
+  const target = at ? document.elementFromPoint(at.x, at.y) : null
+  hoverTarget = target && !isOwnUi(target) ? target : null
+  moveHighlight(hoverTarget)
+}
+
+/** Held or released. Drives both the frame and the cursor, so the two can never
+ *  disagree about whether the next click would pick something. */
+function setModHeld(next: boolean): void {
+  if (modHeld === next) return
+  modHeld = next
+  if (!pick) return
+  document.documentElement.toggleAttribute('data-ez-pick-hot', next)
+  if (next) {
+    frameUnderPointer()
+    return
+  }
+  hoverTarget = null
+  moveHighlight(null)
+}
+
+const isModKey = (key: string): boolean => key === 'Meta' || key === 'Control'
+
+/** Clears the state and puts back what picking borrowed. Does not touch the
+ *  composer - the callers differ on what should happen to it. */
+function endPick(): Pick {
+  const done = pick!
+  pick = null
+  document.documentElement.removeAttribute('data-ez-pick')
+  document.documentElement.removeAttribute('data-ez-pick-hot')
+  hoverTarget = null
+  moveHighlight(done.prevHighlight)
+  paintPickChrome()
+  scheduleRepaint()
+  return done
+}
+
+function landPick(e: MouseEvent): void {
+  if (!pick) return
+  // `e.target`, the way the hover frame resolves it - not `elementFromPoint`,
+  // which point mode needs because a pin is a coordinate. What the user gets has
+  // to be the element the frame was drawn around; anything else hands over
+  // something they were not looking at.
+  const target =
+    e.target instanceof Element ? e.target : document.elementFromPoint(e.clientX, e.clientY)
+  if (!target || isOwnUi(target)) return
+  const anchor = buildAnchor(target)
+  const ref: RefWire = { anchor, label: shortAnchor(anchor) || describe(target) }
+  const done = endPick()
+  // The live composer is right here, hidden: nothing has to cross a boundary and
+  // the shell's copy of the draft is discarded unused.
+  if (done.host === 'popup' && done.suspended) {
+    resumePopup(done)
+    ui.popupAttach?.resolveRef(ref)
+    post({ type: 'ez:draft-done', pickId: done.id })
+    return
+  }
+  // The composer is elsewhere - the shell's note box, or a popup stranded on the
+  // page this pick started from. The shell owns the answer from here.
+  post({ type: 'ez:picked', pickId: done.id, ref, page: location.pathname })
+}
+
+/** `abort` means the shell asked, so it is not told again. */
+function cancelPick(reason: 'escape' | 'mode' | 'ended' | 'abort'): void {
+  if (!pick) return
+  const done = endPick()
+  if (done.host === 'popup') {
+    ui.popupAttach?.cancelRef()
+    if (done.suspended) resumePopup(done)
+  }
+  // `resumed` is what tells the shell whether its copy of the draft is stale: a
+  // popup handed back here is the real one, and the shell must not try to rebuild
+  // it somewhere else.
+  if (reason !== 'abort') {
+    post({ type: 'ez:pick-cancelled', pickId: done.id, reason, resumed: done.suspended })
+  }
+}
+
 // ---------------------------------------------------------------- mode
 
 function setMode(next: Mode): void {
   if (ended && next !== 'off') return
+  // Before the cancel, not after: the shell replays the current mode on every
+  // `ez:ready`, and a set that changes nothing must not disturb a live pick.
   if (mode === next) return
+  // Belt. `dismiss()` below discards the popup's uploads, and a suspended popup
+  // is one the user is still composing in - it must be handed back first, so what
+  // gets dropped is a popup they can see.
+  cancelPick('mode')
   mode = next
   const root = document.documentElement
   if (next === 'off') root.removeAttribute('data-ez-mode')
@@ -484,7 +993,13 @@ function setMode(next: Mode): void {
 // ---------------------------------------------------------------- events
 
 function onMouseMove(e: MouseEvent): void {
-  if (mode === 'off' || ui.popup || isOwnUi(e.target)) return
+  lastPointer = { x: e.clientX, y: e.clientY }
+  // Read off the move, not only off key events: a keyup lost to a focus change
+  // would otherwise leave the page stuck looking like a picker.
+  if (pick) setModHeld(e.metaKey || e.ctrlKey)
+  if (isOwnUi(e.target)) return
+  if (pick && !modHeld) return
+  if (!pick && (mode === 'off' || ui.popup)) return
   const target = e.target instanceof Element ? e.target : null
   if (target !== hoverTarget) {
     hoverTarget = target
@@ -493,7 +1008,21 @@ function onMouseMove(e: MouseEvent): void {
 }
 
 function onClick(e: MouseEvent): void {
-  if (mode === 'off' || isOwnUi(e.target)) return
+  if (isOwnUi(e.target)) return
+  // Checked before the mode, because a pick started from the shell's note box
+  // runs with no mode armed at all.
+  if (pick) {
+    // The plain click belongs to the page: reaching the element to point at can
+    // mean following a link, opening a menu, filling something in. Only the
+    // modified click is ours, and cancelling it here is what keeps the browser
+    // from acting on it too.
+    if (!e.metaKey && !e.ctrlKey) return
+    e.preventDefault()
+    e.stopPropagation()
+    landPick(e)
+    return
+  }
+  if (mode === 'off') return
   if (ui.popup) return
   const selection = window.getSelection()
   if (selection && !selection.isCollapsed) return // handled by selection bubble
@@ -518,16 +1047,22 @@ function onClick(e: MouseEvent): void {
     // rather than off the (possibly page-wide) element it resolved to.
     const atPin = () =>
       new DOMRect(pin.x - window.scrollX - 6, pin.y - window.scrollY - 6, 12, 12)
-    openPopup(atPin, (comment) => void saveAnnotation('point', target, comment, { pin }))
+    openPopup(subjectOf('point', target, { pin }), atPin, (comment, files, refs) =>
+      saveAnnotation('point', target, comment, files, refs, { pin }),
+    )
   } else {
-    openPopup(() => target.getBoundingClientRect(), (comment) =>
-      void saveAnnotation('element', target, comment),
+    openPopup(
+      subjectOf('element', target),
+      () => target.getBoundingClientRect(),
+      (comment, files, refs) => saveAnnotation('element', target, comment, files, refs),
     )
   }
 }
 
 function onMouseUp(): void {
-  if (mode === 'off' || ui.popup) return
+  // Suppressed for the duration of a pick: a plain drag now selects text in the
+  // host page, and offering to annotate it would answer a question nobody asked.
+  if (pick || mode === 'off' || ui.popup) return
   setTimeout(() => {
     ui.selectionBubble?.remove()
     ui.selectionBubble = null
@@ -552,8 +1087,10 @@ function onMouseUp(): void {
       bubble.remove()
       ui.selectionBubble = null
       openPopup(
+        subjectOf('text', container, { selectedText: text }),
         () => range.getBoundingClientRect(),
-        (comment) => void saveAnnotation('text', container, comment, { selectedText: text }),
+        (comment, files, refs) =>
+          saveAnnotation('text', container, comment, files, refs, { selectedText: text }),
       )
     }
     document.body.appendChild(bubble)
@@ -580,11 +1117,17 @@ function isTyping(target: EventTarget | null): boolean {
  *  teardown mid-scroll would strand those styles on their page. Our own chrome
  *  is exempt so a long comment can still be scrolled inside the field. */
 function onScrollAttempt(e: Event): void {
-  if (!ui.popup || isOwnUi(e.target)) return
+  // Never during a pick: reaching the element being pointed at is the entire
+  // task, and a pick from the note box leaves a live popup on the page.
+  if (pick || !popupLive() || isOwnUi(e.target)) return
   e.preventDefault()
 }
 
 function onKeyDown(e: KeyboardEvent): void {
+  if (isModKey(e.key)) {
+    setModHeld(true)
+    return
+  }
   if (e.key === 'Escape') {
     escape()
     return
@@ -594,24 +1137,30 @@ function onKeyDown(e: KeyboardEvent): void {
   // Screened first: with a popup open its own keys win (Cmd+Enter must save the
   // annotation, not send the batch), and a field on the host page means the user
   // is typing into their own app.
-  if (ui.popup || isTyping(e.target)) return
-  window.parent?.postMessage(
-    { type: 'ez:key', chord: { key: e.key, metaKey: e.metaKey, ctrlKey: e.ctrlKey } },
-    location.origin,
-  )
+  // A pick swallows everything else. Forwarded, a bare `E` would reach the
+  // shell's table, toggle the mode, and take the suspended popup - and its
+  // uploads - down with it.
+  if (pick || ui.popup || isTyping(e.target)) return
+  post({ type: 'ez:key', chord: { key: e.key, metaKey: e.metaKey, ctrlKey: e.ctrlKey } })
 }
 
 // ---------------------------------------------------------------- boot
 
 function boot(): void {
-  document.body.append(ui.highlight, ui.badge, ui.pin, ui.markers)
+  document.body.append(ui.highlight, ui.badge, ui.pin, ui.markers, ui.veil, ui.banner)
   moveHighlight(null)
   movePin(null)
+  paintPickChrome()
 
   document.addEventListener('mousemove', onMouseMove, true)
   document.addEventListener('click', onClick, true)
   document.addEventListener('mouseup', onMouseUp, true)
   document.addEventListener('keydown', onKeyDown, true)
+  document.addEventListener('keyup', (e) => {
+    if (isModKey(e.key)) setModHeld(false)
+  }, true)
+  // A window that loses focus mid-hold never delivers the keyup.
+  window.addEventListener('blur', () => setModHeld(false))
   // `passive: false` is the point - a passive listener may not preventDefault.
   document.addEventListener('wheel', onScrollAttempt, { passive: false, capture: true })
   document.addEventListener('touchmove', onScrollAttempt, { passive: false, capture: true })
@@ -624,10 +1173,23 @@ function boot(): void {
 
   window.addEventListener('message', (e: MessageEvent) => {
     if (e.origin !== location.origin) return
-    const data = e.data as { type?: string; mode?: Mode; preset?: string }
+    const data = e.data as {
+      type?: string
+      mode?: Mode
+      preset?: string
+      pickId?: string
+      host?: 'popup' | 'note'
+      returnTo?: string
+      draft?: DraftWire
+    }
     if (data?.type === 'ez:set-mode') setMode(data.mode ?? 'off')
     if (data?.type === 'ez:escape') escape()
     if (data?.type === 'ez:viewport') viewportPreset = data.preset
+    if (data?.type === 'ez:pick' && data.pickId) {
+      armPick(data.host ?? 'note', data.pickId, data.returnTo)
+    }
+    if (data?.type === 'ez:pick-abort') cancelPick('abort')
+    if (data?.type === 'ez:restore' && data.draft) restoreDraft(data.draft)
   })
 
   const events = new EventSource(`${API}/events`)
@@ -635,11 +1197,19 @@ function boot(): void {
     const snapshot = JSON.parse(e.data) as SnapshotWire
     annotations = snapshot.annotations
     ended = snapshot.state === 'ended'
-    if (ended) setMode('off')
+    // Explicit, not left to `setMode`: a pick from the note box runs with the mode
+    // already off, so the set would change nothing and cancel nothing.
+    if (ended) {
+      cancelPick('ended')
+      setMode('off')
+    }
     scheduleRepaint()
   }
 
-  window.parent?.postMessage({ type: 'ez:ready' }, location.origin)
+  // The page comes with it: the shell only knows the path it was opened on, which
+  // goes stale the moment the app navigates, and a pick has to be re-armed and a
+  // draft restored against where the iframe actually is.
+  post({ type: 'ez:ready', page: location.pathname })
 }
 
 if (document.readyState === 'loading') {

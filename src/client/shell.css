@@ -30,8 +30,9 @@
   --radius: 8px;
 
   /* Annotation marks - the numbered pin on the page and its counterpart in the
-     queue - are the one thing here that carries colour, so a number always reads
-     as "there is feedback attached to this". Everything else stays monochrome.
+     queue - are the only colour in the chrome, so a number always reads as
+     "there is feedback attached to this". The two chip colours below sit inside a
+     comment's text, not in the chrome, which stays monochrome otherwise.
      Derived, not picked, but note the deliberate deviation: white numerals clear
      4.5:1 only below Y=0.1833, which is darker than this. Held to the 3:1 floor
      instead, the fill can run up to Y=0.30, and Y=0.28 is where sRGB gives an
@@ -42,6 +43,27 @@
      lowering it is the only way to reach 4.5:1. */
   --mark: #e56d41;
   --mark-foreground: #fff;
+
+  /* Attachments get a green kept soft enough to sit beside the warm surfaces
+     without fighting them. The chip carries no border, so the fill alone has to
+     separate it from --paper-sunken, which it is close to in luminance - hue is
+     what does that work, and why the chroma cannot drop much below this. The ink
+     clears 4.5:1 on the fill with room to spare (5.7:1), which 11px text at 500
+     needs. */
+  --attach: #cee7c1;
+  --attach-ink: #3d5c36;
+
+  /* Picked elements. The third and last chip colour, and it has to be a third:
+     a reference is not an attachment, and it is not the thing being annotated
+     either, so it can borrow neither --attach nor --mark. Matched to the green's
+     weight rather than picked by eye - 5.87:1 ink on fill against the green's
+     5.69, and 1.31 fill against --paper against the green's 1.26 - so two chips
+     of different kinds sitting in one sentence read as equals. --ref-accent is
+     the full-strength counterpart, for the frame and the chrome shown while
+     picking; it never appears behind text, so it is not held to a text ratio. */
+  --ref: #f4d3e2;
+  --ref-ink: #7b3a5c;
+  --ref-accent: #cf5f92;
 }
 
 * {
@@ -61,8 +83,7 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
-button,
-textarea {
+button {
   font-family: inherit;
 }
 
@@ -745,11 +766,38 @@ textarea {
   word-break: break-word;
 }
 
-.ez-note {
-  width: 100%;
+.ez-attach {
+  margin-bottom: 8px;
+}
+
+/* The field, not the editable, carries the chrome, so the drop target and the
+   focus ring cover the whole box the user is aiming at. */
+.ez-attach-field {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 7px 9px;
+  background: var(--panel);
+  transition:
+    border-color 0.12s ease,
+    background 0.12s ease;
+}
+
+/* Dragging a file over it. One step down the palette's own surface ramp, not the
+   attachment green: the box is saying "in here", and a colour would read as a
+   claim about the file rather than about the target. */
+.ez-attach-field[data-drop] {
+  background: var(--paper-sunken);
+}
+
+/* A contenteditable, not a textarea: attachment chips are elements, and they
+   sit in the run of the text itself. Growing with its content is the natural
+   behaviour here - the cap is what keeps it from pushing the queue off screen. */
+.ez-note {
+  display: block;
+  position: relative;
+  min-height: 40px;
+  max-height: 160px;
+  overflow-y: auto;
   /* Not the `font` shorthand: its family slot rejects `inherit`, which makes the
      browser drop the whole declaration and fall back to the UA font. */
   font-family: inherit;
@@ -757,14 +805,21 @@ textarea {
   font-weight: 400;
   line-height: 1.5;
   color: var(--foreground);
-  background: var(--panel);
-  resize: vertical;
+  white-space: pre-wrap;
+  word-break: break-word;
   outline: none;
-  margin-bottom: 8px;
 }
 
-.ez-note::placeholder {
+/* `:empty` will not do: the browser leaves a stray <br> behind after the last
+   character is deleted, so emptiness is decided in JS and flagged here.
+   Taken out of flow, or the generated content would sit in the line box ahead of
+   the caret and park it at the end of the placeholder. */
+.ez-note[data-empty]::before {
+  content: attr(data-placeholder);
+  position: absolute;
+  inset: 0 0 auto 0;
   color: var(--ink-ghost);
+  pointer-events: none;
 }
 
 /* On a near-white ground no alpha of ink reaches the 3:1 a focus indicator owes
@@ -773,8 +828,146 @@ textarea {
    border and the two fused into one ~3px band. Keep the colour, keep the border a
    hairline, and sit the ring flush against it at offset 0 - one two-tone edge,
    sharing the border's radius. */
-.ez-note:focus-visible {
+.ez-attach-field:focus-within {
   border-color: var(--ring);
   outline: 3px solid var(--ring-halo);
   outline-offset: 0;
 }
+
+/* ------------------------------------------------------- attachment chips */
+
+/* Inline, so a chip sits in the run of the sentence it belongs to rather than in
+   a tray above it. `contenteditable=false` on the element is what makes the
+   caret treat it as one character - which is also why it needs no close button:
+   backspace takes the whole chip. */
+.ez-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  max-width: 180px;
+  vertical-align: baseline;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--attach);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.55;
+  color: var(--attach-ink);
+  white-space: nowrap;
+  user-select: none;
+}
+
+/* The name is the only part that may give up room; without this the flex line
+   takes it out of the icon instead and a long filename squashes the glyph. */
+.ez-chip-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.ez-chip svg {
+  flex-shrink: 0;
+}
+
+/* A picked element rather than a file. Same shape, different colour: the kind of
+   thing a chip stands for has to be readable without reading it. */
+.ez-chip-ref {
+  background: var(--ref);
+  color: var(--ref-ink);
+}
+
+/* Still uploading. Dimmed rather than spinner'd: it resolves in a blink on a
+   local daemon, and a spinner that flashes is louder than the wait it reports. */
+.ez-chip-pending {
+  opacity: 0.55;
+}
+
+/* Read-only echoes in the queue and the thread, where they are the only thing on
+   their line and so need the row a chip inside a sentence does not. */
+.ez-file-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.ez-attach-error {
+  margin-top: 4px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: oklch(52% 0.2 25);
+}
+
+/* ------------------------------------------------------- slash menu */
+
+/* The shortcut card's language: white panel, hairline edge, depth carried by a
+   layered shadow. Positioned in JS against the slash the user just typed. */
+.ez-slash-menu {
+  position: fixed;
+  z-index: 20;
+  min-width: 240px;
+  max-width: 300px;
+  padding: 4px 4px 5px;
+  border-radius: 10px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  box-shadow:
+    0 12px 32px oklch(0% 0 0 / 0.12),
+    0 2px 8px oklch(0% 0 0 / 0.06);
+}
+
+/* A grouping caption, the way Notion labels the block it is showing. Small,
+   muted and out of the way - it names the list without competing with it. */
+.ez-slash-head {
+  padding: 7px 10px 5px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.4;
+  color: var(--ink-faint);
+}
+
+.ez-slash-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  color: var(--foreground);
+}
+
+/* One highlight for both the arrow keys and the pointer, so there is never a
+   second "which one would Enter pick" to read. */
+.ez-slash-item[data-active] {
+  background: var(--muted);
+}
+
+/* The glyph is what the eye lands on when scanning, so it keeps its size no
+   matter how long the label beside it runs. */
+.ez-slash-item svg {
+  flex-shrink: 0;
+  color: var(--ink-muted);
+}
+
+/* `line-height: 1` so the box is the text's own, not the text plus the leading
+   the line box would add below it - that extra space sits under the baseline
+   only, and centring against it lifts the label off the icon's centre. */
+.ez-slash-label {
+  font-size: 13px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+/* Held against the far edge, and allowed to ellipsize before the label does:
+   the name is what the user is aiming at. */
+.ez-slash-hint {
+  margin-left: auto;
+  padding-left: 14px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--ink-faint);
+}
+

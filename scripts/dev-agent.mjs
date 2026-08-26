@@ -23,6 +23,24 @@ function describe(item, index) {
   for (const [key, value] of rows) {
     if (value) console.log(`   ${dim(key.padEnd(11))}${value}`)
   }
+  printExtras(item, '   ')
+}
+
+/** What the user handed over alongside the anchor. Both are what a real agent
+ *  would act on - a path it has to open, and an element the comment points at -
+ *  so a loop that does not show them cannot be used to check they arrived. */
+function printExtras(carrier, indent) {
+  ;(carrier.attachments ?? []).forEach((file, i) => {
+    const key = `file ${i + 1}`
+    console.log(`${indent}${dim(key.padEnd(11))}${file.path} ${dim(`(${file.mime}, ${file.size}B)`)}`)
+  })
+  for (const r of carrier.references ?? []) {
+    const a = r.anchor ?? {}
+    const where = [a.source, a.components?.length && `<${a.components.join(' ← ')}>`, a.page]
+      .filter(Boolean)
+      .join(' · ')
+    console.log(`${indent}${dim(`ref ${r.n}`.padEnd(11))}${r.label} ${dim(`→ ${where}`)}`)
+  }
 }
 
 const url = process.argv[2] ?? devTargetUrl()
@@ -40,6 +58,7 @@ for (;;) {
 
   console.log(`\n${bold(`── batch ${result.batchId ?? ''}`)} (${result.items.length} items)`)
   if (result.note) console.log(dim(`note: ${result.note}`))
+  printExtras(result, '')
   result.items.forEach(describe)
 
   reply = result.items.map((item, i) => `#${i + 1} ${item.label} → 假裝改好了`).join('\n')

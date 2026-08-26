@@ -15,6 +15,12 @@ Every anchor layer in `Anchor` (`src/protocol.ts`) has a section that exercises 
 | Stats | `stats` | `anchor.viewport` - three columns that break at 390 and must be fixed at that breakpoint only |
 | Nav / Hero / Features / FAQ / Footer | each named | `anchor.section` and `anchor.selector` on everyday markup |
 
+`changelog.html` is a second document, linked from the nav's 更新紀錄 as a real
+href rather than a client-side route. The overlay is injected per HTML response,
+so crossing between the two pages is what destroys and rebuilds it - the only way
+to exercise anything that has to survive a navigation, such as an `/element` pick
+that continues on the other page.
+
 `vite.config.ts` loads `eztweakSource()` straight from `src/`, so annotations
 carry `anchor.source` as `file:line`. Run `npm run dev -- --no-plugin` to serve the
 same page through `vite.noplugin.config.ts` instead and see what an agent gets
