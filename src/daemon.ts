@@ -4,17 +4,19 @@ import type { Server } from 'node:http'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { Socket } from 'node:net'
-import express, { type Response, Router } from 'express'
+import express, { type ErrorRequestHandler, type Response, Router } from 'express'
 import { createProxyMiddleware, responseInterceptor } from 'http-proxy-middleware'
 import {
   IDLE_STOP_MS,
+  MAX_ATTACHMENT_BYTES,
   PKG_NAME,
   POLL_TIMEOUT_MS,
   URL_PREFIX,
   controlPortRange,
 } from './constants.js'
+import { attachmentIds, parseReferences } from './anchor.js'
 import { injectOverlay, wantsHtml } from './inject.js'
-import { toAgentItem, toConversationItem } from './label.js'
+import { toAgentAttachments, toAgentItem, toConversationItem } from './label.js'
 import type { Annotation, PollResult, SessionEndedBy } from './protocol.js'
 import { SessionStore, listRestorableSessions, newId } from './store.js'
 import { writeRegistry, clearRegistry } from './registry.js'
@@ -22,6 +24,18 @@ import { versionGate } from './version.js'
 
 const distDir = dirname(fileURLToPath(import.meta.url))
 const asset = (name: string) => readFileSync(join(distDir, name))
+
+/** The client percent-encodes it, because a filename is free to hold bytes no
+ *  HTTP header may carry. A value that survived that unencoded is still a usable
+ *  name - the store sanitizes either way. */
+function decodeAttachmentName(raw: string | undefined): string {
+  if (!raw) return ''
+  try {
+    return decodeURIComponent(raw)
+  } catch {
+    return raw
+  }
+}
 
 const SHELL_HTML = `<!doctype html>
 <html lang="en">
@@ -92,6 +106,9 @@ class SessionRuntime {
     private readonly version: string,
   ) {
     this.store = new SessionStore(targetOrigin, project)
+    // Session start is the one moment no composer can be holding a fresh upload,
+    // which is what makes an unreferenced attachment safe to judge by age alone.
+    this.store.sweepAttachments()
     this.bus.setMaxListeners(50)
   }
 
@@ -149,12 +166,15 @@ class SessionRuntime {
     if (!batch) return null
     this.store.markDelivered(batch.batchId)
     this.agentBusy = true
+    const attachments = toAgentAttachments(batch.attachments, this.store)
     return {
       type: 'feedback',
       batchId: batch.batchId,
       url: this.targetOrigin,
       note: batch.note,
-      items: batch.items.map(toAgentItem),
+      items: batch.items.map((a) => toAgentItem(a, this.store)),
+      ...(attachments ? { attachments } : {}),
+      ...(batch.references?.length ? { references: batch.references } : {}),
     }
   }
 
@@ -181,11 +201,33 @@ class SessionRuntime {
 
   private apiRouter(): Router {
     const api = Router()
-    api.use(express.json({ limit: '2mb' }))
     api.use((_req, _res, next) => {
       this.touch()
       next()
     })
+
+    // Ahead of the JSON parser on purpose: a pasted .json file arrives as
+    // `application/json`, and behind it would be parsed as a request body and
+    // held to the JSON limit instead of the attachment one.
+    api.post(
+      '/attachments',
+      express.raw({ type: () => true, limit: MAX_ATTACHMENT_BYTES }),
+      (req, res) => {
+        const bytes = req.body
+        if (!Buffer.isBuffer(bytes) || bytes.byteLength === 0) {
+          return res.status(400).json({ error: 'attachment body is empty' })
+        }
+        const mime = (req.get('content-type') ?? '').split(';')[0]?.trim()
+        const attachment = this.store.addAttachment(
+          decodeAttachmentName(req.get('x-ez-name')),
+          mime || 'application/octet-stream',
+          bytes,
+        )
+        res.json(attachment)
+      },
+    )
+
+    api.use(express.json({ limit: '2mb' }))
 
     api.get('/state', (_req, res) => res.json(this.snapshot()))
 
@@ -206,20 +248,44 @@ class SessionRuntime {
     })
 
     api.post('/annotations', (req, res) => {
-      const { kind, comment, anchor } = req.body ?? {}
-      if (!comment || !kind || typeof anchor !== 'object') {
-        return res.status(400).json({ error: 'kind, comment and anchor are required' })
+      const { kind, comment, anchor, attachments, references } = req.body ?? {}
+      if (!kind || typeof anchor !== 'object' || anchor === null) {
+        return res.status(400).json({ error: 'kind and anchor are required' })
+      }
+      const ids = attachmentIds(attachments)
+      if (!ids) return res.status(400).json({ error: 'attachments must be an array of ids' })
+      const files = this.store.getAttachments(ids)
+      if (!files) return res.status(400).json({ error: 'unknown attachment id' })
+      const refs = parseReferences(references)
+      if (!refs) return res.status(400).json({ error: 'references must be an array of anchors' })
+      // A pasted screenshot can be the whole point the user is making, so a
+      // comment is only required when nothing came with it.
+      if (!comment && files.length === 0) {
+        return res.status(400).json({ error: 'comment or attachment is required' })
       }
       const annotation: Annotation = {
         id: newId(),
         kind,
-        comment: String(comment),
+        comment: comment ? String(comment) : '',
         anchor,
         createdAt: Date.now(),
+        ...(files.length ? { attachments: files } : {}),
+        ...(refs.length ? { references: refs } : {}),
       }
       this.store.addAnnotation(annotation)
       this.broadcast()
       res.json(annotation)
+    })
+
+    api.delete('/attachments/:id', (req, res) => {
+      switch (this.store.removeAttachment(req.params.id)) {
+        case 'unknown':
+          return res.status(404).json({ error: 'attachment not found' })
+        case 'referenced':
+          return res.status(409).json({ error: 'attachment belongs to queued or sent feedback' })
+        default:
+          return res.json({ ok: true })
+      }
     })
 
     api.patch('/annotations/:id', (req, res) => {
@@ -237,7 +303,13 @@ class SessionRuntime {
     })
 
     api.post('/send', (req, res) => {
-      const batch = this.store.sendBatch(req.body?.note ?? null)
+      const ids = attachmentIds(req.body?.attachments)
+      if (!ids) return res.status(400).json({ error: 'attachments must be an array of ids' })
+      const files = this.store.getAttachments(ids)
+      if (!files) return res.status(400).json({ error: 'unknown attachment id' })
+      const refs = parseReferences(req.body?.references)
+      if (!refs) return res.status(400).json({ error: 'references must be an array of anchors' })
+      const batch = this.store.sendBatch(req.body?.note ?? null, files, refs)
       if (!batch) return res.status(400).json({ error: 'nothing to send' })
       this.store.appendConversation({
         role: 'user',
@@ -245,6 +317,12 @@ class SessionRuntime {
         ts: Date.now(),
         batchId: batch.batchId,
         items: batch.items.map(toConversationItem),
+        ...(batch.attachments?.length
+          ? { attachments: batch.attachments.map((a) => a.name) }
+          : {}),
+        ...(batch.references?.length
+          ? { references: batch.references.map((r) => ({ n: r.n, label: r.label })) }
+          : {}),
       })
       this.wakePollers()
       res.json({ batchId: batch.batchId })
@@ -296,6 +374,17 @@ class SessionRuntime {
       this.broadcast()
       res.json({ ok: true })
     })
+
+    // Body parsers reject by throwing, and Express's default handler answers an
+    // HTML error page, which the composer - expecting JSON - could only report
+    // as a generic failure.
+    api.use(((err, _req, res, next) => {
+      if (res.headersSent) return next(err)
+      if ((err as { type?: string })?.type === 'entity.too.large') {
+        return res.status(413).json({ error: 'attachment is too large' })
+      }
+      next(err)
+    }) satisfies ErrorRequestHandler)
 
     return api
   }

@@ -7,14 +7,29 @@
    These belong on the page being annotated, not on our own chrome. `cursor`
    inherits, so excluding the overlay here isn't enough — each interactive root
    below declares its own, and descendants (button icons) inherit from it. */
-[data-ez-mode='element'],
-[data-ez-mode='element'] *:not([data-ez-ui], [data-ez-ui] *) {
+/* Both are suspended for the duration of a pick. While one is out, a plain click
+   belongs to the page - it may be the link that gets the user to the element they
+   mean - so the page has to look like itself, cursors included. Excluded rather
+   than fought with a later `!important`: equal-weight rules are settled by source
+   order, and depending on that for something this easy to reorder is how it comes
+   apart later. */
+[data-ez-mode='element']:not([data-ez-pick]),
+[data-ez-mode='element']:not([data-ez-pick]) *:not([data-ez-ui], [data-ez-ui] *) {
   cursor: pointer !important;
 }
 
-[data-ez-mode='point'],
-[data-ez-mode='point'] *:not([data-ez-ui], [data-ez-ui] *) {
+[data-ez-mode='point']:not([data-ez-pick]),
+[data-ez-mode='point']:not([data-ez-pick]) *:not([data-ez-ui], [data-ez-ui] *) {
   cursor: crosshair !important;
+}
+
+/* Only while the modifier is down. That key is what makes the next click a pick,
+   so it is also what makes the page look pickable - the cursor and the frame
+   appear and disappear together, and neither ever promises a pick that a plain
+   click would not make. */
+[data-ez-pick-hot],
+[data-ez-pick-hot] *:not([data-ez-ui], [data-ez-ui] *) {
+  cursor: pointer !important;
 }
 
 .ez-popup {
@@ -48,6 +63,13 @@
   --ez-ring: #b3b3b3;
   --ez-ring-halo: color-mix(in oklab, var(--ez-ink) 12%, transparent);
   --ez-mark: #e56d41;
+  /* Mirrors the shell's attachment sage. See the note on --attach there. */
+  --ez-attach: #cee7c1;
+  --ez-attach-ink: #3d5c36;
+  /* Mirrors the shell's picked-element pink. See the note on --ref there. */
+  --ez-ref: #f4d3e2;
+  --ez-ref-ink: #7b3a5c;
+  --ez-ref-accent: #cf5f92;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans TC', sans-serif;
 }
 
@@ -169,11 +191,33 @@
   padding: 8px;
 }
 
-.ez-input {
-  width: 100%;
+/* The field, not the editable, carries the chrome, so the drop target and the
+   focus ring cover the whole box the user is aiming at. */
+.ez-attach-field {
   border: 1px solid var(--ez-paper-edge);
   border-radius: 10px;
   padding: 7px 9px;
+  background: var(--ez-paper-sunken);
+  transition:
+    border-color 0.12s ease,
+    background 0.12s ease;
+}
+
+/* Dragging a file over it. One step down the palette's own surface ramp, not the
+   attachment green: the box is saying "in here", and a colour would read as a
+   claim about the file rather than about the target. */
+.ez-attach-field[data-drop] {
+  background: var(--ez-paper-edge);
+}
+
+/* A contenteditable, not a textarea: attachment chips are elements, and they sit
+   in the run of the text itself. */
+.ez-input {
+  display: block;
+  position: relative;
+  min-height: 58px;
+  max-height: 180px;
+  overflow-y: auto;
   /* Not the `font` shorthand: its family slot rejects `inherit`, which makes the
      browser drop the whole declaration and fall back to the UA font. */
   font-family: inherit;
@@ -181,19 +225,24 @@
   font-weight: 400;
   line-height: 1.5;
   color: var(--ez-ink);
-  background: var(--ez-paper-sunken);
-  /* The browser's resize grip cannot be styled, and a diagonal-hatch corner is
-     the loudest thing in an otherwise hairline panel. */
-  resize: none;
+  white-space: pre-wrap;
+  word-break: break-word;
   outline: none;
   /* Keeps a long comment's own scroll from chaining out to the page once it hits
      an end - the page is meant to be still while the popup is open. */
   overscroll-behavior: contain;
-  transition: border-color 0.12s ease;
 }
 
-.ez-input::placeholder {
+/* `:empty` will not do: the browser leaves a stray <br> behind after the last
+   character is deleted, so emptiness is decided in JS and flagged here.
+   Taken out of flow, or the generated content would sit in the line box ahead of
+   the caret and park it at the end of the placeholder. */
+.ez-input[data-empty]::before {
+  content: attr(data-placeholder);
+  position: absolute;
+  inset: 0 0 auto 0;
   color: var(--ez-ink-faint);
+  pointer-events: none;
 }
 
 /* The field is autofocused on open, so this is the state the user always sees:
@@ -204,17 +253,147 @@
    border's radius and reads as one two-tone edge - pushed outward it became a
    second, rounder rectangle floating clear of the field. A low-alpha ring looked
    calmer but measured 1.15:1 against the surface, which is not an indicator. */
-.ez-input:focus {
+.ez-attach-field:focus-within {
   border-color: var(--ez-ring);
   outline: 3px solid var(--ez-ring-halo);
   outline-offset: 0;
 }
 
+/* ------------------------------------------------------- attachment chips */
+
+/* Inline, so a chip sits in the run of the sentence it belongs to rather than in
+   a tray above it. `contenteditable=false` on the element is what makes the
+   caret treat it as one character - which is also why it needs no close button:
+   backspace takes the whole chip. */
+.ez-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  max-width: 180px;
+  vertical-align: baseline;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--ez-attach);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.55;
+  color: var(--ez-attach-ink);
+  white-space: nowrap;
+  user-select: none;
+  cursor: default;
+}
+
+/* The name is the only part that may give up room; without this the flex line
+   takes it out of the icon instead and a long filename squashes the glyph. */
+.ez-chip-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.ez-chip svg {
+  flex-shrink: 0;
+}
+
+/* A picked element rather than a file. Same shape, different colour: the kind of
+   thing a chip stands for has to be readable without reading it. */
+.ez-chip-ref {
+  background: var(--ez-ref);
+  color: var(--ez-ref-ink);
+}
+
+/* Still uploading. Dimmed rather than spinner'd: it resolves in a blink on a
+   local daemon, and a spinner that flashes is louder than the wait it reports. */
+.ez-chip-pending {
+  opacity: 0.55;
+}
+
+.ez-attach-error {
+  margin-top: 4px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: oklch(52% 0.2 25);
+}
+
+/* ------------------------------------------------------- slash menu */
+
+/* Sits above the popup that owns it - the popup is 2147483603. */
+.ez-slash-menu {
+  position: fixed;
+  z-index: 2147483604;
+  min-width: 240px;
+  max-width: 300px;
+  padding: 4px 4px 5px;
+  border-radius: 10px;
+  background: #fff;
+  border: 1px solid var(--ez-paper-edge);
+  cursor: auto;
+  box-shadow:
+    0 12px 32px oklch(0% 0 0 / 0.12),
+    0 2px 8px oklch(0% 0 0 / 0.06);
+}
+
+/* A grouping caption, the way Notion labels the block it is showing. Small,
+   muted and out of the way - it names the list without competing with it. */
+.ez-slash-head {
+  padding: 7px 10px 5px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.4;
+  color: var(--ez-ink-faint);
+}
+
+.ez-slash-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  color: var(--ez-ink);
+}
+
+/* One highlight for both the arrow keys and the pointer, so there is never a
+   second "which one would Enter pick" to read. */
+.ez-slash-item[data-active] {
+  background: var(--ez-paper-sunken);
+}
+
+/* The glyph is what the eye lands on when scanning, so it keeps its size no
+   matter how long the label beside it runs. */
+.ez-slash-item svg {
+  flex-shrink: 0;
+  color: var(--ez-ink-muted);
+}
+
+/* `line-height: 1` so the box is the text's own, not the text plus the leading
+   the line box would add below it - that extra space sits under the baseline
+   only, and centring against it lifts the label off the icon's centre. */
+.ez-slash-label {
+  font-size: 13px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+/* Held against the far edge, and allowed to ellipsize before the label does:
+   the name is what the user is aiming at. */
+.ez-slash-hint {
+  margin-left: auto;
+  padding-left: 14px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--ez-ink-faint);
+}
+
+
 .ez-actions {
   display: flex;
   justify-content: flex-end;
   gap: 6px;
-  margin-top: 2px;
+  margin-top: 6px;
 }
 
 .ez-btn {
@@ -245,4 +424,116 @@
 .ez-btn-primary:hover {
   background: var(--ez-ink);
   opacity: 0.88;
+}
+
+/* ---------------------------------------------------------------- picking */
+
+/* Suspended, not closed. Hidden while staying in the document, because the
+   composer inside it is still holding the user's text and its uploads are still
+   in flight against nodes that have to stay connected. */
+.ez-popup[data-ez-hidden] {
+  display: none;
+}
+
+/* A pick frames elements too, but it is not about to annotate one - it is about
+   to hand one to a comment. Same frame, the other colour, so the two never read
+   as the same act. Placed after the frame's own rule, which is what settles the
+   equal-specificity tie. */
+[data-ez-pick] .ez-highlight {
+  border-color: var(--ez-ref-accent);
+  background: color-mix(in oklab, var(--ez-ref-accent) 10%, transparent);
+}
+
+[data-ez-pick] .ez-badge {
+  background: var(--ez-ref-accent);
+}
+
+/* The page underneath stays fully usable, so nothing about the page itself says
+   this moment is different. A wash pulled in from the edges does, without taking
+   a single pixel away from the content or intercepting one click.
+
+   Only a wash - no line around the viewport. A hard border reads as chrome the
+   page has grown, and it competes with the frame drawn around the element the
+   user is actually choosing. This has to register at the edge of attention and
+   nowhere else, so it is kept faint enough to be felt rather than looked at. */
+.ez-pick-veil {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483597;
+  pointer-events: none;
+  display: none;
+  box-shadow: inset 0 0 64px -18px color-mix(in oklab, var(--ez-ref-accent) 62%, transparent);
+}
+
+/* The dark pill the overlay already uses for anything it floats over a page it
+   knows nothing about - see .ez-badge and .ez-select-btn. The pink is carried by
+   the icon alone: a pink banner would compete with the wash it is explaining.
+
+   Anchored to the bottom, not the top. A page puts its nav, its logo and its
+   primary button along the top edge, which is exactly the band a user is most
+   likely to be pointing at - and unlike the popup, this pill has no subject to
+   stay near, so it can simply get out of the way. Nothing else the overlay draws
+   lives down here while a pick is out: the popup is suspended and the text
+   selection bubble is suppressed. */
+.ez-pick-banner {
+  position: fixed;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 2147483605;
+  display: none;
+  align-items: center;
+  gap: 8px;
+  max-width: calc(100vw - 24px);
+  padding: 7px 8px 7px 12px;
+  border-radius: 999px;
+  background: var(--ez-ink);
+  box-shadow:
+    0 0 0 1px oklch(100% 0 0 / 0.25),
+    0 6px 20px oklch(0% 0 0 / 0.3);
+  color: #fff;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+.ez-pick-banner svg {
+  flex-shrink: 0;
+  color: var(--ez-ref-accent);
+}
+
+.ez-pick-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.ez-pick-cancel {
+  flex-shrink: 0;
+  padding: 3px 9px;
+  border: 0;
+  border-radius: 999px;
+  background: oklch(100% 0 0 / 0.14);
+  color: inherit;
+  font: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.ez-pick-cancel:hover {
+  background: oklch(100% 0 0 / 0.24);
+}
+
+/* Said once, at the top of a popup that came back from another page: the user
+   needs to know their comment is about to be filed against a recorded position
+   rather than a live element, or that a file did not make it back. Warm rather
+   than red - nothing has failed, it is just less precise than it was. */
+.ez-popup-notice {
+  margin-bottom: 8px;
+  padding: 7px 9px;
+  border-radius: 6px;
+  background: oklch(96% 0.045 85);
+  color: oklch(43% 0.1 70);
+  font-size: 11.5px;
+  line-height: 1.55;
 }

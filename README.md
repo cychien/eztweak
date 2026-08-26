@@ -17,7 +17,8 @@ $ npx -y eztweak@latest poll http://localhost:5173/     # agent blocks here unti
   overlay. No code changes, no build plugins required, works with any framework.
 - **Anchored feedback.** Annotations carry a layered anchor: `file:line` (with the optional Vite
   plugin), React component chain, `data-section`, CSS selector, text, viewport. Agents stop
-  guessing which part of the page you meant.
+  guessing which part of the page you meant. Paste or drop a screenshot into any comment and the
+  agent gets a path to it.
 - **Built for the loop.** Batch annotations, send once; the agent's `poll` is a blocking CLI call
   that prints structured JSON - the same portable contract as an AXI. HMR keeps iterations
   in place; the review chrome lives outside the app frame, so it survives your agent's syntax errors.
@@ -70,6 +71,27 @@ Sessions outlive the daemon that served them. On start, the daemon picks each se
 from disk and re-binds it to the port it last held, so a review shell tab you already have open
 only needs a reload, and feedback you queued before the restart is still waiting. If that port has
 since been taken, the session moves to a free one and the CLI re-resolves it.
+
+Typing `/` in either comment box opens a command menu - arrow keys and Enter, or click. A slash
+mid-word stays a slash, so urls and paths are left alone. Two commands:
+
+- **`/file`** opens the system file picker and drops what you choose in as an attachment, where the
+  slash was.
+- **`/element`** points the comment at a *second* element - "make this match that one". The page
+  stays live while you choose, so a plain click still follows links and opens menus and only
+  ⌘/Ctrl+click picks; the comment box steps aside and comes back when you are done. You can cross to
+  another page to find what you meant, and eztweak brings you back to finish the comment. The
+  element arrives as a chip carrying the same layered anchor an annotation gets, so the agent is
+  handed a `file:line` instead of a description, and `[ref 1]` in the comment text says exactly where
+  in the sentence you meant it.
+
+Either comment box also takes an image or file, pasted or dropped in. Attachments become inline chips
+in the text itself, so a comment can point at a file mid sentence, and backspace deletes one the
+way it deletes a character. They are names, not previews - the box is for the comment, and a
+thumbnail takes the room it needs. The bytes go straight to the session directory, capped at 8 MB
+per file, and the batch hands the agent an absolute path per attachment so it opens the screenshot
+instead of being handed base64. Deleting a queued annotation deletes its files with it; anything
+attached and then abandoned is collected a day later.
 
 A session belongs to one project on one origin, not to the origin alone. Dev servers all default
 to the same port, so reviewing a second project on `localhost:5173` would otherwise inherit the

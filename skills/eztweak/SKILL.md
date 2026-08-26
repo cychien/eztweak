@@ -47,6 +47,17 @@ You do not need eztweak installed globally — invoke it as `npx -y eztweak@late
      that element as 0–1 fractions, which disambiguates a pin on a wide container).
    - `anchor.viewport` tells you which viewport the user was looking at — a `mobile` annotation
      is usually a responsive issue; fix it at that breakpoint, don't break desktop.
+   - `attachments` (when present) are files the user pasted or dropped into that item's box, each
+     `{name, mime, size, path}`. `path` is an absolute local file — **read it before you edit**.
+     A pasted screenshot is usually the user showing you what they mean, and is often more
+     specific than the sentence next to it. The batch itself can carry `attachments` too: those
+     came with the note and apply to the whole round.
+   - `references` (when present) are *other* elements the comment points at — "make this match that
+     one". Each is `{anchor, label}` with the same layered anchor as an item, so `anchor.source` is a
+     `file:line` you can open. `[ref 1]` in the `comment` (and in `label`) means `references[0]`, so
+     the marker's position in the sentence is the user telling you which side of the comparison is
+     which. A reference's `anchor.page` may differ from the item's — they are allowed to point across
+     pages. The batch can carry `references` too, attached to the note rather than any one item.
    - Apply every item in the batch in one pass. HMR shows your edits live; don't restart the dev server.
 6. After applying a batch, run `npx -y eztweak@latest poll <url> --agent-reply "<what you changed, item by item, one short line each>"`
    to report back in the browser and wait for the next round.
