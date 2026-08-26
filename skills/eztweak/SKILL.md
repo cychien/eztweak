@@ -50,8 +50,10 @@ You do not need eztweak installed globally — invoke it as `npx -y eztweak@late
    - `attachments` (when present) are files the user pasted or dropped into that item's box, each
      `{name, mime, size, path}`. `path` is an absolute local file — **read it before you edit**.
      A pasted screenshot is usually the user showing you what they mean, and is often more
-     specific than the sentence next to it. The batch itself can carry `attachments` too: those
-     came with the note and apply to the whole round.
+     specific than the sentence next to it. `[file n]` in the `comment` (and in `label`) is
+     `attachments[n-1]`, so where the marker sits is the user telling you which file that part of
+     the sentence is about. The batch itself can carry `attachments` too: those came with the note
+     and apply to the whole round.
    - `references` (when present) are *other* elements the comment points at — "make this match that
      one". Each is `{n, anchor, label}` with the same layered anchor as an item, so `anchor.source` is
      a `file:line` you can open. `[ref n]` in the `comment` (and in `label`) names the reference whose

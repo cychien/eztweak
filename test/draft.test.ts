@@ -29,11 +29,9 @@ const ref = (source: string, n = 1, label = source): DraftNode => ({
 })
 const picking: DraftNode = { t: 'ref', n: 0, anchor: null, label: '選取中…' }
 
-test('a file chip contributes nothing to the comment', () => {
+test('a file chip is marked where it sits', () => {
   const body = [text('看這個 '), file('a1', 'shot.png'), text(`${NBSP}的間距`)]
-  // Two spaces, not one: the chip sat between the user's space and its own NBSP
-  // spacer. Preserves what `text()` has always produced.
-  assert.equal(draftText(body), '看這個  的間距')
+  assert.equal(draftText(body), '看這個 [file 1] 的間距')
   assert.deepEqual(draftFileIds(body), ['a1'])
 })
 
@@ -44,7 +42,7 @@ test('a reference is a numbered marker where it stands', () => {
   assert.equal(draftText(body), '這裡的間距要跟 [ref 1] 一樣')
 })
 
-test('markers are numbered in document order, past interleaved files', () => {
+test('references and files number independently of each other', () => {
   const body = [
     ref('src/a.tsx:1', 1),
     text(' 和 '),
@@ -52,7 +50,7 @@ test('markers are numbered in document order, past interleaved files', () => {
     text(' 還有 '),
     ref('src/b.tsx:2', 2),
   ]
-  assert.equal(draftText(body), '[ref 1] 和  還有 [ref 2]')
+  assert.equal(draftText(body), '[ref 1] 和 [file 1] 還有 [ref 2]')
   assert.deepEqual(
     draftRefs(body).map((r) => r.anchor.source),
     ['src/a.tsx:1', 'src/b.tsx:2'],
@@ -127,9 +125,12 @@ test('a snapshot split anywhere normalizes to the same draft', () => {
   assert.equal(draftText(split), draftText(whole))
 })
 
-test('a chip-only body still reads as empty text', () => {
-  assert.equal(draftText([file('a1', 'shot.png')]), '')
-  assert.equal(draftText([file('a1', 'shot.png'), text(NBSP)]), '')
+// A comment that is nothing but a pasted file still says where the file went,
+// which is all it had to say.
+test('a file-only body reads as its marker', () => {
+  assert.equal(draftText([file('a1', 'shot.png')]), '[file 1]')
+  assert.equal(draftText([file('a1', 'shot.png'), text(NBSP)]), '[file 1]')
+  assert.equal(draftText([file('', 'uploading.png')]), '', 'but not one still in flight')
 })
 
 test('a restore drops the uploads it cannot resume, and keeps the rest in place', () => {
@@ -251,4 +252,48 @@ test('the writer and the reader agree on the format', () => {
 
 test('text that merely looks like a marker is left alone', () => {
   assert.deepEqual(splitComment('see [ref] or [ref x]'), [{ t: 'text', v: 'see [ref] or [ref x]' }])
+})
+
+// A comment can point at a file mid sentence, which is what the README promises,
+// so where the chip sat is part of what the user said. Positional rather than an
+// identity: a file chip reads its own name, so no number on screen can renumber
+// under the user, and the markers come out of the same walk as the id list.
+test('a file is marked where it sits, numbered by document order', () => {
+  const body = [text('比對 '), file('a1', 'x.csv'), text(' 和 '), file('a2', 'y.png')]
+  assert.equal(draftText(body), '比對 [file 1] 和 [file 2]')
+  assert.deepEqual(draftFileIds(body), ['a1', 'a2'])
+})
+
+test('file markers and the id list cannot disagree', () => {
+  const body = [file('a1', 'x'), text(' '), ref('r', 4), text(' '), file('a2', 'y')]
+  const ids = draftFileIds(body)
+  const markers = draftText(body).match(/\[file (\d+)\]/g)!
+  assert.deepEqual(markers, ['[file 1]', '[file 2]'])
+  markers.forEach((m, i) => assert.equal(Number(m.match(/\d+/)![0]) - 1, i))
+  assert.deepEqual(ids, ['a1', 'a2'])
+})
+
+// Deleting a file renumbers the rest, and that is fine: nothing on screen shows
+// the number, and both halves are recomputed together at send time.
+test('deleting a file renumbers the survivors consistently', () => {
+  const body = [file('a1', 'x'), text(' '), file('a2', 'y')]
+  const after = body.filter((n) => !(n.t === 'file' && n.id === 'a1'))
+  assert.equal(draftText(after), '[file 1]')
+  assert.deepEqual(draftFileIds(after), ['a2'])
+})
+
+test('an upload still in flight is neither marked nor listed', () => {
+  const body = [file('', 'uploading.png'), text(' '), file('a1', 'done.png')]
+  assert.equal(draftText(body), '[file 1]')
+  assert.deepEqual(draftFileIds(body), ['a1'])
+})
+
+test('both kinds of marker split out of one comment', () => {
+  assert.deepEqual(splitComment('A [ref 2] B [file 1] C'), [
+    { t: 'text', v: 'A ' },
+    { t: 'ref', n: 2 },
+    { t: 'text', v: ' B ' },
+    { t: 'file', n: 1 },
+    { t: 'text', v: ' C' },
+  ])
 })

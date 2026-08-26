@@ -9,7 +9,7 @@ import Location01Icon from '@hugeicons/core-free-icons/Location01Icon'
 import Navigation03Icon from '@hugeicons/core-free-icons/Navigation03Icon'
 import { attachify } from './attach.js'
 import type { DraftWire, RefWire } from './draft.js'
-import { refChipText, refMarker, splitComment } from './draft.js'
+import { fileMarker, refChipText, refMarker, splitComment } from './draft.js'
 import { modLabel, reducePick } from './pick.js'
 import type { PickEffect, PickEvent, PickState } from './pick.js'
 import { type IconNode, icon } from './icon.js'
@@ -551,11 +551,12 @@ function buildSaid(entry: ConversationWire, isUser: boolean): HTMLElement {
       const body = h('div', 'ez-bi-body')
       // An item can be a pasted file and nothing else, and an empty div would
       // still take a line.
-      if (item.comment || item.references?.length) {
-        body.append(commentEl(item.comment, item.references))
+      const rendered = commentEl(item.comment, item.references, item.attachments)
+      if (item.comment || item.references?.length || item.attachments?.length) {
+        body.append(rendered.box)
       }
       if (item.where) body.append(h('span', 'ez-bi-where', item.where))
-      const files = fileChips(item.attachments)
+      const files = fileChips(rendered.unplacedFiles)
       if (files) body.append(files)
       li.append(h('span', 'ez-bi-num', `${i + 1}.`), body)
       list.appendChild(li)
@@ -572,12 +573,16 @@ function buildSaid(entry: ConversationWire, isUser: boolean): HTMLElement {
     }
   }
 
-  if (entry.text || entry.references?.length) {
-    said.appendChild(
-      commentEl(entry.text, entry.references, items.length ? 'ez-bubble-note' : undefined),
-    )
+  const note = commentEl(
+    entry.text,
+    entry.references,
+    entry.attachments,
+    items.length ? 'ez-bubble-note' : undefined,
+  )
+  if (entry.text || entry.references?.length || entry.attachments?.length) {
+    said.appendChild(note.box)
   }
-  const noteFiles = fileChips(entry.attachments)
+  const noteFiles = fileChips(note.unplacedFiles)
   if (noteFiles) said.appendChild(noteFiles)
   return said
 }
@@ -595,10 +600,9 @@ function chipEl(name: string, glyph: IconNode, kind?: 'ref', title?: string): HT
 const refChipEl = (n: number, label: string) =>
   chipEl(refChipText(n), AlignSelectionIcon as IconNode, 'ref', label)
 
-/** Files get a row of their own: where a file was pasted says nothing, so there
- *  is nothing to put it back into. */
-function fileChips(names: string[] | undefined): HTMLElement | null {
-  if (!names?.length) return null
+/** Only for files the comment did not place - see `commentEl`. */
+function fileChips(names: string[]): HTMLElement | null {
+  if (!names.length) return null
   const row = h('div', 'ez-file-chips')
   for (const name of names) row.appendChild(chipEl(name, File02Icon as IconNode))
   return row
@@ -608,15 +612,40 @@ function fileChips(names: string[] | undefined): HTMLElement | null {
  *  *is* a position in the sentence - "make this match that one" - so showing the
  *  raw `[ref 1]` and the chip somewhere else asks the reader to do the joining
  *  the marker was carrying for them. */
-function commentEl(text: string, refs: RefEcho[] | undefined, className?: string): HTMLElement {
+/** The comment, with every chip rendered where its marker stood. A reference and
+ *  an attachment are both positions in a sentence - "make this match that one",
+ *  "check this csv against that screenshot" - so showing the raw marker and the
+ *  chip somewhere else asks the reader to do the joining the marker was carrying
+ *  for them.
+ *
+ *  Returns the file names it could not place, for the caller to show as a row:
+ *  older logs and older annotations have no `[file n]` markers at all. */
+function commentEl(
+  text: string,
+  refs: RefEcho[] | undefined,
+  files: string[] | undefined,
+  className?: string,
+): { box: HTMLElement; unplacedFiles: string[] } {
   const box = h('div', className)
   const numbered = new Map(
     (refs ?? []).flatMap((r) => (typeof r === 'string' ? [] : [[r.n, r.label] as const])),
   )
-  const placed = new Set<number>()
+  const names = files ?? []
+  const placedRefs = new Set<number>()
+  const placedFiles = new Set<number>()
   for (const part of splitComment(text)) {
     if (part.t === 'text') {
       box.appendChild(document.createTextNode(part.v))
+      continue
+    }
+    if (part.t === 'file') {
+      const name = names[part.n - 1]
+      if (name === undefined) {
+        box.appendChild(document.createTextNode(fileMarker(part.n)))
+        continue
+      }
+      placedFiles.add(part.n)
+      box.appendChild(chipEl(name, File02Icon as IconNode))
       continue
     }
     const label = numbered.get(part.n)
@@ -626,7 +655,7 @@ function commentEl(text: string, refs: RefEcho[] | undefined, className?: string
       box.appendChild(document.createTextNode(refMarker(part.n)))
       continue
     }
-    placed.add(part.n)
+    placedRefs.add(part.n)
     box.appendChild(refChipEl(part.n, label))
   }
   // Anything the text did not name still has to be seen. A legacy echo has no
@@ -634,11 +663,11 @@ function commentEl(text: string, refs: RefEcho[] | undefined, className?: string
   for (const r of refs ?? []) {
     if (typeof r === 'string') {
       box.appendChild(chipEl(r, AlignSelectionIcon as IconNode, 'ref'))
-    } else if (!placed.has(r.n)) {
+    } else if (!placedRefs.has(r.n)) {
       box.appendChild(refChipEl(r.n, r.label))
     }
   }
-  return box
+  return { box, unplacedFiles: names.filter((_, i) => !placedFiles.has(i + 1)) }
 }
 
 const QUEUE_VISIBLE = 2
@@ -738,10 +767,14 @@ function render(): void {
     del.onclick = () => void api(`/annotations/${a.id}`, { method: 'DELETE' })
     head.append(del)
     li.append(head)
-    if (a.comment || a.references?.length) {
-      li.append(commentEl(a.comment, a.references, 'ez-qi-comment'))
-    }
-    const files = fileChips(a.attachments?.map((f) => f.name))
+    const row = commentEl(
+      a.comment,
+      a.references,
+      a.attachments?.map((f) => f.name),
+      'ez-qi-comment',
+    )
+    if (a.comment || a.references?.length || a.attachments?.length) li.append(row.box)
+    const files = fileChips(row.unplacedFiles)
     if (files) li.append(files)
     queueList.appendChild(li)
   })

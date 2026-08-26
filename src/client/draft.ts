@@ -98,9 +98,23 @@ export const refMarker = (n: number): string => `[ref ${n}]`
  *  descriptive label goes in the chip's tooltip, where it answers "which one was
  *  that again" without crowding the line. */
 export const refChipText = (n: number): string => `選取元素 ${n}`
-const MARKER = /\[ref (\d+)\]/g
 
-export type CommentPart = { t: 'text'; v: string } | { t: 'ref'; n: number }
+/** How an attachment appears in the comment text. Files are marked for the same
+ *  reason references are: a comment can point at one mid sentence, so *where* it
+ *  sat is part of what the user said - "check this csv against that screenshot"
+ *  is two files and a relationship between them.
+ *
+ *  Unlike a reference the number is positional, not an identity. A file chip
+ *  reads its own name, so nothing on screen carries a number the user could
+ *  watch renumber; the markers and the id list come out of one walk at send time,
+ *  so they cannot disagree. `[file n]` is therefore the id at index n-1. */
+export const fileMarker = (n: number): string => `[file ${n}]`
+const MARKER = /\[(ref|file) (\d+)\]/g
+
+export type CommentPart =
+  | { t: 'text'; v: string }
+  | { t: 'ref'; n: number }
+  | { t: 'file'; n: number }
 
 /** A comment split at its markers, so a reader can render the reference inline
  *  rather than leaving `[ref 1]` showing. */
@@ -109,7 +123,7 @@ export function splitComment(text: string): CommentPart[] {
   let at = 0
   for (const match of text.matchAll(MARKER)) {
     if (match.index > at) out.push({ t: 'text', v: text.slice(at, match.index) })
-    out.push({ t: 'ref', n: Number(match[1]) })
+    out.push({ t: match[1] === 'file' ? 'file' : 'ref', n: Number(match[2]) })
     at = match.index + match[0].length
   }
   if (at < text.length) out.push({ t: 'text', v: text.slice(at) })
@@ -127,9 +141,12 @@ export function splitComment(text: string): CommentPart[] {
  *  which would renumber the rest when one chip is deleted. */
 export function draftText(body: DraftNode[]): string {
   const out: string[] = []
+  // Counted in this pass, so the numbering matches `draftFileIds` by construction.
+  let file = 0
   for (const node of body) {
     if (node.t === 'text') out.push(node.v)
     else if (node.t === 'ref' && node.anchor) out.push(refMarker(node.n))
+    else if (node.t === 'file' && node.id) out.push(fileMarker(++file))
   }
   return out.join('').replaceAll(NBSP, ' ').trim()
 }
@@ -157,8 +174,9 @@ export function nextRefNumber(body: DraftNode[]): number {
   return max + 1
 }
 
-/** Attachment ids in document order. A chip whose upload has not landed has no
- *  id yet, so it is not one. */
+/** Attachment ids in document order - the order `draftText`'s `[file n]` markers
+ *  count, so `[file n]` is the id at index n-1. A chip whose upload has not
+ *  landed has no id yet, so it is neither marked nor listed. */
 export function draftFileIds(body: DraftNode[]): string[] {
   return body.flatMap((n) => (n.t === 'file' && n.id ? [n.id] : []))
 }

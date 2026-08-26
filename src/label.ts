@@ -65,7 +65,10 @@ export function toAgentItem(a: Annotation, files: AttachmentLocator): AgentItem 
   // files because they are anchors too, and because the comment's own `[ref N]`
   // markers need something to resolve against.
   a.references?.forEach((r) => parts.push(`[ref ${r.n}: ${referenceLabel(r)}]`))
-  if (a.attachments?.length) parts.push(`[files: ${a.attachments.map((x) => x.name).join(', ')}]`)
+  // Numbered, not a bare list: the comment carries `[file n]` where the user put
+  // it, and n is this array's position - so a comment about two files says which
+  // is which instead of leaving the agent to guess from a comma-separated set.
+  a.attachments?.forEach((x, i) => parts.push(`[file ${i + 1}: ${x.name}]`))
   const attachments = toAgentAttachments(a.attachments, files)
   return {
     id: a.id,

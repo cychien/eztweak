@@ -71,13 +71,19 @@ const file = (id: string, name: string) => ({
   createdAt: 1,
 })
 
-test('attachments are named in the label and resolved to absolute paths', () => {
+// Numbered one by one, not a comma-separated set: the comment carries `[file n]`
+// where the user put it, so with two screenshots the agent can tell which one a
+// sentence is talking about instead of guessing from a list.
+test('attachments are numbered in the label and resolved to absolute paths', () => {
   const item = agentItem({
     ...base,
     anchor: { source: 'src/pages/home.tsx:42' },
     attachments: [file('aaa', 'shot.png'), file('bbb', 'notes.txt')],
   })
-  assert.equal(item.label, 'src/pages/home.tsx:42 · [files: shot.png, notes.txt]')
+  assert.equal(
+    item.label,
+    'src/pages/home.tsx:42 · [file 1: shot.png] · [file 2: notes.txt]',
+  )
   assert.deepEqual(
     item.attachments?.map((a) => a.path),
     ['/tmp/session/attachments/aaa-shot.png', '/tmp/session/attachments/bbb-notes.txt'],
@@ -113,7 +119,7 @@ test('references land after the viewport and before the files', () => {
   })
   assert.equal(
     item.label,
-    'src/a.tsx:12 · @1440x900 · [ref 1: src/b.tsx:88 · <Row>] · [files: shot.png]',
+    'src/a.tsx:12 · @1440x900 · [ref 1: src/b.tsx:88 · <Row>] · [file 1: shot.png]',
   )
 })
 
@@ -167,4 +173,20 @@ test('the conversation log echoes the number and the label, not the anchor', () 
 test('an annotation with no references says so by omission', () => {
   assert.equal(agentItem(base).references, undefined)
   assert.equal(toConversationItem(base).references, undefined)
+})
+
+// The reason the numbering exists: two screenshots in one comment, and the
+// sentence saying which is which.
+test('two files in one comment are each named by their own number', () => {
+  const item = agentItem({
+    ...base,
+    comment: '這張 [file 1] 的間距要跟 [file 2] 一樣',
+    attachments: [file('a', 'before.png'), file('b', 'after.png')],
+  })
+  assert.equal(item.label, '[file 1: before.png] · [file 2: after.png]')
+  assert.deepEqual(
+    item.attachments?.map((a) => a.name),
+    ['before.png', 'after.png'],
+    'and n is this array position, so [file 2] is attachments[1]',
+  )
 })

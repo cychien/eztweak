@@ -30,9 +30,10 @@ function describe(item, index) {
  *  would act on - a path it has to open, and an element the comment points at -
  *  so a loop that does not show them cannot be used to check they arrived. */
 function printExtras(carrier, indent) {
-  for (const file of carrier.attachments ?? []) {
-    console.log(`${indent}${dim('file'.padEnd(11))}${file.path} ${dim(`(${file.mime}, ${file.size}B)`)}`)
-  }
+  ;(carrier.attachments ?? []).forEach((file, i) => {
+    const key = `file ${i + 1}`
+    console.log(`${indent}${dim(key.padEnd(11))}${file.path} ${dim(`(${file.mime}, ${file.size}B)`)}`)
+  })
   for (const r of carrier.references ?? []) {
     const a = r.anchor ?? {}
     const where = [a.source, a.components?.length && `<${a.components.join(' ← ')}>`, a.page]
