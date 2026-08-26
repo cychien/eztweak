@@ -486,14 +486,19 @@ async function api(path: string, init?: RequestInit): Promise<Response> {
   return fetch(`${API}${path}`, { headers: { 'content-type': 'application/json' }, ...init })
 }
 
+/** Not the button's disabled state: ⌘+Enter reaches `sendBatch` without it, and
+ *  every repaint would otherwise clear it while the request is in flight - a
+ *  second send would name the same files as the first. */
+let sending = false
+
 /** The one owner of the button's state: `render()` runs on every snapshot, and
  *  an upload settling has to be able to repaint it between two of them. */
 function paintSendState(): void {
-  sendBtn.disabled = snapshot?.state === 'ended' || noteAttach.pending() > 0
+  sendBtn.disabled = sending || snapshot?.state === 'ended' || noteAttach.pending() > 0
 }
 
 async function sendBatch(): Promise<void> {
-  if (noteAttach.pending() > 0) return
+  if (sending || noteAttach.pending() > 0) return
   const count = snapshot?.annotations.length ?? 0
   const attachments = noteAttach.ids()
   const references = noteAttach.refs()
@@ -502,14 +507,21 @@ async function sendBatch(): Promise<void> {
   // Called off before the box is emptied: an answer arriving after the reset
   // would land in a composer that no longer holds the comment it belonged to.
   abortPick('sent')
+  sending = true
   sendBtn.disabled = true
-  const res = await api('/send', {
-    method: 'POST',
-    body: JSON.stringify({ note: text, attachments, references }),
-  })
-  // Reset, not discard: the batch owns these files now.
-  if (res.ok) noteAttach.reset()
-  paintSendState()
+  try {
+    const res = await api('/send', {
+      method: 'POST',
+      body: JSON.stringify({ note: text, attachments, references }),
+    })
+    // Reset, not discard: the batch owns these files now.
+    if (res.ok) noteAttach.reset()
+  } finally {
+    // Restored even when the request threw: the note and its chips are still
+    // there, so the send has to stay retryable.
+    sending = false
+    paintSendState()
+  }
 }
 
 function annotationLabel(a: AnnotationWire): string {

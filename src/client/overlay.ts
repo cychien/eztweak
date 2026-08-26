@@ -436,13 +436,17 @@ function openPopup(
   cancel.textContent = '取消'
   actions.append(cancel, save)
 
+  // The button's disabled state cannot carry this: ⌘+Enter never consults it,
+  // and an upload settling repaints it from `pending()` mid-request.
+  let saving = false
+
   const attach = attachify({
     api: API,
     mk: el,
     className: 'ez-input',
     placeholder: '想怎麼調整？輸入 / 用指令 (⌘+Enter 儲存)',
     onChange: () => {
-      save.disabled = attach.pending() > 0
+      save.disabled = saving || attach.pending() > 0
       // The shell is holding a copy of this box in case the page it sits on goes
       // away. An upload landing is the only thing that can change a suspended
       // one, so this is where that copy is refreshed.
@@ -463,7 +467,7 @@ function openPopup(
   ui.popupAttach = attach
 
   const submit = async () => {
-    if (attach.pending() > 0) return
+    if (saving || attach.pending() > 0) return
     const comment = attach.text()
     const attachments = attach.ids()
     const references = attach.refs()
@@ -477,6 +481,7 @@ function openPopup(
     // the moment it lands, and a dismiss arriving mid-flight would delete them.
     ui.popupAttach = null
     save.disabled = true
+    saving = true
     try {
       await onSave(comment, attachments, references)
     } catch {
@@ -487,6 +492,8 @@ function openPopup(
       save.disabled = false
       showPopupNotice(['沒有送出成功，請再試一次'])
       return
+    } finally {
+      saving = false
     }
     // A dismiss during the request already took this popup down, and whatever is
     // open now is not this submit's to close.
