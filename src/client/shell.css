@@ -30,8 +30,9 @@
   --radius: 8px;
 
   /* Annotation marks - the numbered pin on the page and its counterpart in the
-     queue - are the one thing here that carries colour, so a number always reads
-     as "there is feedback attached to this". Everything else stays monochrome.
+     queue - are the only colour in the chrome, so a number always reads as
+     "there is feedback attached to this". The two chip colours below sit inside a
+     comment's text, not in the chrome, which stays monochrome otherwise.
      Derived, not picked, but note the deliberate deviation: white numerals clear
      4.5:1 only below Y=0.1833, which is darker than this. Held to the 3:1 floor
      instead, the fill can run up to Y=0.30, and Y=0.28 is where sRGB gives an

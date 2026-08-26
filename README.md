@@ -18,7 +18,8 @@ $ npx -y eztweak@latest poll http://localhost:5173/     # agent blocks here unti
 - **Anchored feedback.** Annotations carry a layered anchor: `file:line` (with the optional Vite
   plugin), React component chain, `data-section`, CSS selector, text, viewport. Agents stop
   guessing which part of the page you meant. Paste or drop a screenshot into any comment and the
-  agent gets a path to it.
+  agent gets a path to it; `/element` points a comment at a second element, so "make this match
+  that one" arrives as a `file:line` too.
 - **Built for the loop.** Batch annotations, send once; the agent's `poll` is a blocking CLI call
   that prints structured JSON - the same portable contract as an AXI. HMR keeps iterations
   in place; the review chrome lives outside the app frame, so it survives your agent's syntax errors.
@@ -56,21 +57,7 @@ Dev-only (`apply: 'serve'`) - it never touches production builds.
   Configuration). A CLI that reaches a daemon on another version is refused with a `409` that says
   how to update, instead of speaking a mismatched protocol.
 
-## Configuration
-
-| Variable | Default | What it moves |
-| --- | --- | --- |
-| `EZTWEAK_DATA_DIR` | `~/.eztweak` | Session state, the daemon registry, and the daemon log |
-| `EZTWEAK_CONTROL_PORT` | `4400` | First port of the ten-port range the daemon searches for its control server |
-
-Set both together to run a second, fully isolated instance: a starting daemon adopts any live
-daemon it finds inside its own control range, so moving the data dir alone still lands you on the
-shared daemon. `npm run dev` sets both.
-
-Sessions outlive the daemon that served them. On start, the daemon picks each session back up
-from disk and re-binds it to the port it last held, so a review shell tab you already have open
-only needs a reload, and feedback you queued before the restart is still waiting. If that port has
-since been taken, the session moves to a free one and the CLI re-resolves it.
+## The comment box
 
 Typing `/` in either comment box opens a command menu - arrow keys and Enter, or click. A slash
 mid-word stays a slash, so urls and paths are left alone. Two commands:
@@ -92,6 +79,22 @@ thumbnail takes the room it needs. The bytes go straight to the session director
 per file, and the batch hands the agent an absolute path per attachment so it opens the screenshot
 instead of being handed base64. Deleting a queued annotation deletes its files with it; anything
 attached and then abandoned is collected a day later.
+
+## Configuration
+
+| Variable | Default | What it moves |
+| --- | --- | --- |
+| `EZTWEAK_DATA_DIR` | `~/.eztweak` | Session state, the daemon registry, and the daemon log |
+| `EZTWEAK_CONTROL_PORT` | `4400` | First port of the ten-port range the daemon searches for its control server |
+
+Set both together to run a second, fully isolated instance: a starting daemon adopts any live
+daemon it finds inside its own control range, so moving the data dir alone still lands you on the
+shared daemon. `npm run dev` sets both.
+
+Sessions outlive the daemon that served them. On start, the daemon picks each session back up
+from disk and re-binds it to the port it last held, so a review shell tab you already have open
+only needs a reload, and feedback you queued before the restart is still waiting. If that port has
+since been taken, the session moves to a free one and the CLI re-resolves it.
 
 A session belongs to one project on one origin, not to the origin alone. Dev servers all default
 to the same port, so reviewing a second project on `localhost:5173` would otherwise inherit the
@@ -118,7 +121,7 @@ sessions in `.dev/`, so your own `~/.eztweak` is never touched. The review targe
 
 ## Status
 
-Early. On the roadmap: diff-derived Keep/Undo, screenshots, layout-issue detection, ACP mode.
+Early. On the roadmap: diff-derived Keep/Undo, layout-issue detection, ACP mode.
 
 ## License
 
