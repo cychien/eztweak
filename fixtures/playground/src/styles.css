@@ -680,3 +680,58 @@ p {
     gap: 6px;
   }
 }
+
+/* changelog (second document) */
+
+.changelog {
+  padding: 64px 0 88px;
+}
+
+.changelog-title {
+  margin-top: 10px;
+  font-size: 34px;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+}
+
+.changelog-list {
+  display: grid;
+  gap: 18px;
+  margin-top: 36px;
+  padding: 0;
+  list-style: none;
+}
+
+.changelog-item {
+  display: grid;
+  grid-template-columns: 88px 1fr;
+  gap: 20px;
+  padding: 22px 24px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.changelog-version {
+  color: var(--muted);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.changelog-item h2 {
+  margin-bottom: 6px;
+  font-size: 17px;
+  font-weight: 600;
+}
+
+.changelog-item p {
+  color: var(--muted);
+  font-size: 15px;
+}
+
+@media (max-width: 700px) {
+  .changelog-item {
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+}
