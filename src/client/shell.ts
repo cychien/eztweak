@@ -13,6 +13,12 @@ import { fileMarker, refChipText, refMarker, splitComment } from './draft.js'
 import { modLabel, reducePick } from './pick.js'
 import type { PickEffect, PickEvent, PickState } from './pick.js'
 import { type IconNode, icon } from './icon.js'
+import {
+  SIDEBAR_DEFAULT,
+  SIDEBAR_MIN,
+  clampSidebarWidth,
+  maxSidebarWidth,
+} from './sidebar-width.js'
 
 type Mode = 'off' | 'element' | 'point'
 
@@ -377,8 +383,91 @@ const convScroll = h('div', 'ez-fade ez-conv-scroll')
 convScroll.appendChild(convList)
 convSection.append(convScroll)
 
-sidebar.append(sideHead, banner, convSection, queueSection)
+const resizer = h('div', 'ez-resizer')
+resizer.tabIndex = 0
+resizer.setAttribute('role', 'separator')
+resizer.setAttribute('aria-orientation', 'vertical')
+resizer.setAttribute('aria-valuemin', String(SIDEBAR_MIN))
+resizer.setAttribute('aria-label', '調整側邊欄寬度')
+resizer.title = '拖曳調整寬度，雙擊還原'
+
+sidebar.append(resizer, sideHead, banner, convSection, queueSection)
 root.append(stage, sidebar)
+
+// ---------------------------------------------------------------- sidebar width
+
+const WIDTH_KEY = 'eztweak:sidebar-width'
+
+const maxSidebar = () => maxSidebarWidth(innerWidth)
+const clampSidebar = (w: number) => clampSidebarWidth(w, innerWidth)
+
+/** What the user asked for, which is not always what fits: a narrow window
+ *  clamps the applied width without spending the preference, so widening the
+ *  window brings the chosen size back. */
+let preferredWidth = SIDEBAR_DEFAULT
+try {
+  const stored = Number(localStorage.getItem(WIDTH_KEY))
+  if (Number.isFinite(stored) && stored > 0) preferredWidth = stored
+} catch {}
+
+function paintSidebarWidth(): void {
+  const width = clampSidebar(preferredWidth)
+  sidebar.style.width = `${width}px`
+  resizer.setAttribute('aria-valuenow', String(width))
+  resizer.setAttribute('aria-valuemax', String(maxSidebar()))
+}
+
+function setSidebarWidth(width: number): void {
+  preferredWidth = clampSidebar(width)
+  paintSidebarWidth()
+}
+
+/** Left out of `setSidebarWidth`: a drag calls that on every pointer move, and
+ *  the width it settles on is the only one worth a synchronous write. */
+function persistSidebarWidth(): void {
+  try {
+    localStorage.setItem(WIDTH_KEY, String(preferredWidth))
+  } catch {}
+}
+
+paintSidebarWidth()
+addEventListener('resize', paintSidebarWidth)
+
+
+resizer.addEventListener('pointerdown', (e) => {
+  if (e.button !== 0) return
+  const startX = e.clientX
+  const startWidth = sidebar.getBoundingClientRect().width
+  // Capture rather than a document-level listener: the pointer spends most of
+  // the drag over the iframe, which would otherwise swallow every move.
+  resizer.setPointerCapture(e.pointerId)
+  document.body.classList.add('ez-resizing')
+  const move = (ev: PointerEvent) => setSidebarWidth(startWidth + startX - ev.clientX)
+  resizer.addEventListener('pointermove', move)
+  resizer.addEventListener(
+    'lostpointercapture',
+    () => {
+      resizer.removeEventListener('pointermove', move)
+      document.body.classList.remove('ez-resizing')
+      persistSidebarWidth()
+    },
+    { once: true },
+  )
+})
+
+resizer.addEventListener('dblclick', () => {
+  setSidebarWidth(SIDEBAR_DEFAULT)
+  persistSidebarWidth()
+})
+
+resizer.addEventListener('keydown', (e) => {
+  const step = e.shiftKey ? 48 : 16
+  if (e.key === 'ArrowLeft') setSidebarWidth(sidebar.getBoundingClientRect().width + step)
+  else if (e.key === 'ArrowRight') setSidebarWidth(sidebar.getBoundingClientRect().width - step)
+  else return
+  persistSidebarWidth()
+  e.preventDefault()
+})
 
 // ---------------------------------------------------------------- behavior
 
