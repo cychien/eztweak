@@ -135,14 +135,62 @@ button {
 
 /* ---------------------------------------------------------------- sidebar */
 
+/* Width is owned by shell.ts - it is user-resizable and restored from storage,
+   so there is no useful value to declare here. */
 .ez-sidebar {
-  width: 344px;
+  position: relative;
   flex-shrink: 0;
   background: var(--background);
   border-left: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   min-height: 0;
+}
+
+/* The grab band straddles the border instead of sitting beside it: a 1px border
+   is not a pointer target, and the room to widen it is on the stage side, where
+   nothing else is clickable. */
+.ez-resizer {
+  position: absolute;
+  inset-block: 0;
+  left: -4px;
+  width: 9px;
+  z-index: 4;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+/* Hover darkens the border that is already there rather than adding a bar of its
+   own - the handle should announce itself without becoming a second edge. */
+.ez-resizer::after {
+  content: '';
+  position: absolute;
+  inset-block: 0;
+  left: 4px;
+  width: 1px;
+  background: transparent;
+  transition: background 0.12s ease;
+}
+
+.ez-resizer:hover::after,
+.ez-resizer:focus-visible::after,
+.ez-resizing .ez-resizer::after {
+  background: var(--ink-ghost);
+}
+
+/* The cursor has to hold across the whole document while dragging: the pointer
+   outruns the handle, and without this it flickers back over whatever it is
+   above. */
+.ez-resizing {
+  cursor: col-resize;
+  user-select: none;
+}
+
+/* Insurance for the moment the pointer crosses into the app's document: pointer
+   capture already keeps the events here, but this also stops the overlay inside
+   from lighting up elements the drag merely passes over. */
+.ez-resizing .ez-frame {
+  pointer-events: none;
 }
 
 .ez-side-head {

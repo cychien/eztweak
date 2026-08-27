@@ -72,6 +72,16 @@ mid-word stays a slash, so urls and paths are left alone. Two commands:
   handed a `file:line` instead of a description, and `[ref 1]` in the comment text says exactly where
   in the sentence you meant it.
 
+  The same command also takes a plain **drag**, the way a screenshot tool does: frame a box and the
+  chip points at everything inside it (no modifier needed - a press only becomes a box once it has
+  moved, so a plain click is still the page's). What the box encloses whole is what it means - the
+  elements it merely cuts through are looked past, down to the ones that fit - so framing a card is
+  the card, and framing a row of them is the row. A region resolves to their common ancestor for the
+  `file:line`, and carries `anchor.contains`, a line per element it enclosed - component, `file:line`
+  and a snippet of that element's own text, which is what tells two instances of the same component
+  apart. A frame around exactly one element is simply that element, the same as clicking it.
+
+
 Either comment box also takes an image or file, pasted or dropped in. Attachments become inline chips
 in the text itself, so a comment can point at a file mid sentence, and backspace deletes one the
 way it deletes a character. They are names, not previews - the box is for the comment, and a

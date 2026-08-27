@@ -37,6 +37,12 @@ function anchorParts(anchor: Anchor, textMax: number, withViewport: boolean): st
   if (anchor.components?.length) parts.push(`<${anchor.components.join(' ← ')}>`)
   if (anchor.section) parts.push(`[section: ${anchor.section}]`)
   if (anchor.text) parts.push(`"${truncate(anchor.text, textMax)}"`)
+  // After the anchor's own fields, because those describe the common ancestor
+  // and this is what says the user drew a box around a group rather than
+  // pointing at that ancestor.
+  if (anchor.contains?.length) {
+    parts.push(`[framed ${anchor.contains.length}: ${anchor.contains.join('; ')}]`)
+  }
   if (withViewport && anchor.viewport) {
     const { width, height, preset } = anchor.viewport
     parts.push(preset ? `@${preset} ${width}x${height}` : `@${width}x${height}`)
@@ -85,6 +91,10 @@ export function toAgentItem(a: Annotation, files: AttachmentLocator): AgentItem 
  *  beats structural names, which beat the filename — the reverse of the agent's
  *  ordering, which wants the most machine-precise anchor first. */
 export function shortAnchor(anchor: Anchor): string {
+  // A framed region is a group, and naming one member of it - which is what the
+  // fields below would do - reads as a pick of that member. The count leads, and
+  // the ancestor's own name still follows it as context.
+  const framed = anchor.contains?.length ? `框選 ${anchor.contains.length} 項` : ''
   const what =
     (anchor.text && truncate(anchor.text, 22)) ||
     anchor.section ||
@@ -92,7 +102,7 @@ export function shortAnchor(anchor: Anchor): string {
     anchor.source?.split('/').pop() ||
     ''
   const at = viewportTag(anchor)
-  return [what, at].filter(Boolean).join(' · ')
+  return [framed, what, at].filter(Boolean).join(' · ')
 }
 
 /** Only non-desktop widths are worth the pixels — desktop is the implied default,

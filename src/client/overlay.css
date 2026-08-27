@@ -32,6 +32,14 @@
   cursor: pointer !important;
 }
 
+/* Once the drag is under way the gesture is no longer "click this element", and
+   the arrow that said so would keep promising it. Overrides the rule above by
+   source order, the way the mode rules settle their own ties. */
+[data-ez-framing],
+[data-ez-framing] *:not([data-ez-ui], [data-ez-ui] *) {
+  cursor: crosshair !important;
+}
+
 .ez-popup {
   cursor: auto;
 }
@@ -465,6 +473,49 @@
   box-shadow: inset 0 0 64px -18px color-mix(in oklab, var(--ez-ref-accent) 62%, transparent);
 }
 
+/* The box being dragged. Dashed, where every other frame the overlay draws is
+   solid: those outline something the page already has, this one is a shape the
+   user is still drawing. Pink, because it answers the same command the pink
+   element frame does and lands in the same chip.
+
+   No ring and no radius. The ring exists to hold a 3px mark legible over an
+   unknown page; this box is drawn against its own faint wash and reads at any
+   size, and a rounded corner on a box the user is dragging by that corner puts
+   the line where the cursor is not. */
+.ez-pick-region {
+  position: fixed;
+  z-index: 2147483598;
+  pointer-events: none;
+  display: none;
+  border: 1px dashed var(--ez-ref-accent);
+  background: color-mix(in oklab, var(--ez-ref-accent) 9%, transparent);
+}
+
+/* Outside the box, under its bottom-right corner - the corner the cursor is on,
+   so the number sits where the eye already is. Inside it would cover the very
+   content being framed at the sizes where the readout matters most. */
+.ez-pick-region-size {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  margin-top: 4px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--ez-ref-accent);
+  color: #fff;
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 1.6;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.ez-pick-region-size[data-ez-inside] {
+  top: auto;
+  bottom: 4px;
+  margin: 0 4px 0 0;
+}
+
 /* The dark pill the overlay already uses for anything it floats over a page it
    knows nothing about - see .ez-badge and .ez-select-btn. The pink is carried by
    the icon alone: a pink banner would compete with the wash it is explaining.
@@ -506,6 +557,7 @@
   overflow: hidden;
   text-overflow: ellipsis;
   min-width: 0;
+  transform: translateY(1px);
 }
 
 .ez-pick-cancel {

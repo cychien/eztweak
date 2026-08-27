@@ -8,6 +8,15 @@ import { GRACE_MS, draftExpired, draftPendingNames, normalizeDraft } from './dra
 import type { AnchorWire, DraftSubject, DraftWire, RefWire } from './draft.js'
 import { type IconNode, icon } from './icon.js'
 import { modLabel } from './pick.js'
+import {
+  type Point,
+  type Region,
+  centerOf,
+  containsRect,
+  intersectsRect,
+  isRegion,
+  regionFrom,
+} from './region.js'
 import { shortAnchor } from '../label.js'
 
 type Mode = 'off' | 'element' | 'point'
@@ -80,6 +89,17 @@ let lastPointer: { x: number; y: number } | null = null
  *  it held, the page looks and behaves exactly like itself, which is what lets a
  *  plain click still follow a link. */
 let modHeld = false
+/** The box being dragged, in page coordinates, or null when the user is not
+ *  drawing one. Page coordinates because the page can still be scrolled mid
+ *  drag, and the box belongs to the document rather than to the viewport. */
+let framing: { from: Point; to: Point } | null = null
+/** A press that has not declared itself yet. Every press during a pick starts
+ *  here and becomes a frame only past the slop - which is what lets a plain
+ *  click stay the page's while a plain drag draws a box. */
+let pendingFrame: Point | null = null
+/** A completed drag ends with a `click`, aimed at whatever the release landed
+ *  on. That click is part of the drag, not a pick of its own. */
+let swallowClick = false
 /** What the open popup is anchored to, as data. A live node cannot survive the
  *  navigation a cross-page pick invites, and a save still has to be precise. */
 let popupSubject: DraftSubject | null = null
@@ -100,6 +120,9 @@ const ui = {
    *  chrome is the only thing telling the user this moment is different. */
   veil: el('div', 'ez-pick-veil'),
   banner: el('div', 'ez-pick-banner'),
+  /** The box being dragged, with its size read out in the corner. */
+  region: el('div', 'ez-pick-region'),
+  regionSize: el('div', 'ez-pick-region-size'),
   popup: null as HTMLElement | null,
   /** Lives beside the popup: its uploads are only ever discarded with it. */
   popupAttach: null as AttachController | null,
@@ -456,7 +479,7 @@ function openPopup(
       {
         id: 'element',
         label: 'Element',
-        hint: `選取頁面元素`,
+        hint: `選取頁面元素或範圍`,
         keywords: ['element', 'pick', 'ref', 'reference', '元素', '指定', '參考', '框選'],
         icon: AlignSelectionIcon as IconNode,
         run: () => void armPick('popup', newPickId()),
@@ -756,6 +779,7 @@ function scheduleRepaint(): void {
     renderMarkers()
     paintHighlight()
     paintPin()
+    paintRegion()
     paintPopup()
   })
 }
@@ -824,8 +848,8 @@ function paintPickChrome(): void {
   ui.banner.textContent = ''
   const text = el('span', 'ez-pick-text')
   text.textContent = back
-    ? `${MOD_LABEL} + 點擊要指定的元素・完成後回到 ${back}`
-    : `${MOD_LABEL} + 點擊要指定的元素`
+    ? `${MOD_LABEL} + 點擊元素或直接拖曳框選・完成後回到 ${back}`
+    : `${MOD_LABEL} + 點擊元素，或拖曳框選範圍`
   const cancel = el('button', 'ez-pick-cancel')
   cancel.textContent = '取消'
   cancel.onclick = () => cancelPick('escape')
@@ -919,6 +943,7 @@ const isModKey = (key: string): boolean => key === 'Meta' || key === 'Control'
 function endPick(): Pick {
   const done = pick!
   pick = null
+  endFraming()
   document.documentElement.removeAttribute('data-ez-pick')
   document.documentElement.removeAttribute('data-ez-pick-hot')
   hoverTarget = null
@@ -926,6 +951,11 @@ function endPick(): Pick {
   paintPickChrome()
   scheduleRepaint()
   return done
+}
+
+function refFor(element: Element): RefWire {
+  const anchor = buildAnchor(element)
+  return { anchor, label: shortAnchor(anchor) || describe(element) }
 }
 
 function landPick(e: MouseEvent): void {
@@ -937,8 +967,12 @@ function landPick(e: MouseEvent): void {
   const target =
     e.target instanceof Element ? e.target : document.elementFromPoint(e.clientX, e.clientY)
   if (!target || isOwnUi(target)) return
-  const anchor = buildAnchor(target)
-  const ref: RefWire = { anchor, label: shortAnchor(anchor) || describe(target) }
+  deliverPick(refFor(target))
+}
+
+/** Both gestures end here: the answer goes to whichever composer is waiting for
+ *  it, and that is decided by the pick, not by how the user pointed. */
+function deliverPick(ref: RefWire): void {
   const done = endPick()
   // The live composer is right here, hidden: nothing has to cross a boundary and
   // the shell's copy of the draft is discarded unused.
@@ -951,6 +985,152 @@ function landPick(e: MouseEvent): void {
   // The composer is elsewhere - the shell's note box, or a popup stranded on the
   // page this pick started from. The shell owns the answer from here.
   post({ type: 'ez:picked', pickId: done.id, ref, page: location.pathname })
+}
+
+// ---------------------------------------------------------------- framing
+
+/** Page coordinates, so a box survives a scroll taken mid drag. */
+function pagePoint(e: MouseEvent): Point {
+  return { x: e.clientX + window.scrollX, y: e.clientY + window.scrollY }
+}
+
+function pageRect(rect: DOMRect): Region {
+  return {
+    x: rect.x + window.scrollX,
+    y: rect.y + window.scrollY,
+    width: rect.width,
+    height: rect.height,
+  }
+}
+
+function paintRegion(): void {
+  if (!framing) {
+    ui.region.style.display = 'none'
+    return
+  }
+  const box = regionFrom(framing.from, framing.to)
+  Object.assign(ui.region.style, {
+    display: 'block',
+    top: `${box.y - window.scrollY}px`,
+    left: `${box.x - window.scrollX}px`,
+    width: `${box.width}px`,
+    height: `${box.height}px`,
+  })
+  ui.regionSize.textContent = `${box.width} × ${box.height}`
+  // A box dragged to the bottom of the viewport would push the readout off it.
+  // Moved inside only then: outside is where it covers nothing.
+  const bottom = box.y - window.scrollY + box.height
+  ui.regionSize.toggleAttribute('data-ez-inside', bottom > window.innerHeight - 24)
+}
+
+function startFraming(at: Point): void {
+  framing = { from: at, to: at }
+  pendingFrame = null
+  document.documentElement.setAttribute('data-ez-framing', '')
+  // A plain press is not preventDefault-ed - the sub-slop tail of it must stay a
+  // real click for the page - so the browser had a few pixels to start selecting
+  // text. The gesture has declared itself now; take that paint back.
+  document.getSelection()?.removeAllRanges()
+  // The hover frame belongs to the click gesture. Two boxes growing out of one
+  // drag would leave the user guessing which one they are about to hand over.
+  moveHighlight(null)
+  paintRegion()
+}
+
+function endFraming(): void {
+  pendingFrame = null
+  if (!framing) return
+  framing = null
+  document.documentElement.removeAttribute('data-ez-framing')
+  paintRegion()
+}
+
+/** How many framed elements are worth naming. Past this the frame is about an
+ *  area rather than a set, and the common ancestor and the box already say so -
+ *  an inventory of everything inside would be read by nobody. */
+const MAX_FRAMED = 16
+
+/** The outermost elements the box encloses whole.
+ *
+ *  Descends only into what the box cuts through, so the cost is the boundary
+ *  rather than the document, and stops at the first element that fits: framing a
+ *  card means the card, not the card and every span inside it. */
+function elementsIn(box: Region): Element[] {
+  const found: Element[] = []
+  const walk = (parent: Element): void => {
+    for (const child of parent.children) {
+      if (found.length >= MAX_FRAMED) return
+      if (child.hasAttribute('data-ez-ui')) continue
+      const rect = pageRect(child.getBoundingClientRect())
+      // A `display: contents` wrapper measures as nothing and lays its children
+      // out in its own place: not a candidate itself, but they are.
+      if (!rect.width || !rect.height) {
+        walk(child)
+        continue
+      }
+      if (containsRect(box, rect)) {
+        found.push(child)
+        continue
+      }
+      if (intersectsRect(box, rect)) walk(child)
+    }
+  }
+  walk(document.body)
+  return found
+}
+
+function commonAncestor(elements: Element[]): Element | null {
+  let node: Element | null = elements[0] ?? null
+  while (node && !elements.every((e) => node!.contains(e))) node = node.parentElement
+  return node
+}
+
+function hostAt(page: Point): Element | null {
+  const at = document.elementFromPoint(page.x - window.scrollX, page.y - window.scrollY)
+  return at && !isOwnUi(at) ? at : null
+}
+
+/** What the box covers, rather than everything the ancestor holds. */
+function framedText(elements: Element[]): string {
+  return elements
+    .map((e) => (e.textContent ?? '').replace(/\s+/g, ' ').trim())
+    .filter(Boolean)
+    .join(' / ')
+    .slice(0, 80)
+}
+
+/** One line per framed element. `describe()` alone cannot say *which* one when
+ *  the frame holds two instances of the same component - same component name,
+ *  same file:line - so each line carries a snippet of the element's own text,
+ *  which is the part that differs between instances. */
+function framedLabel(element: Element): string {
+  const text = (element.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, 24)
+  return text ? `${describe(element)} · "${text}"` : describe(element)
+}
+
+/** A box hands over the elements inside it, described through their common
+ *  ancestor: that is where the file:line and the component chain come from, and
+ *  `contains` is what stops the agent reading the ancestor as the pick. */
+function regionRef(box: Region): RefWire {
+  const framed = elementsIn(box)
+  // One element, or none at all: the box was a coarse way of pointing at
+  // something, and an element pick is what that means. Its own rect is the
+  // precise one, and `rect` then keeps a single meaning - the box the user drew
+  // is only ever what `contains` comes with.
+  if (framed.length <= 1) {
+    const host = framed[0] ?? hostAt(centerOf(box))
+    if (host) return refFor(host)
+  }
+  const host = commonAncestor(framed) ?? document.body
+  const text = framedText(framed)
+  const anchor: AnchorWire = {
+    ...buildAnchor(host),
+    // The box the user drew, not the ancestor's: the ancestor is only how the box
+    // gets a file:line, and its own rect is usually far larger than the area.
+    rect: box,
+    ...(framed.length ? { contains: framed.map(framedLabel), text: text || undefined } : {}),
+  }
+  return { anchor, label: shortAnchor(anchor) || describe(host) }
 }
 
 /** `abort` means the shell asked, so it is not told again. */
@@ -994,6 +1174,30 @@ function setMode(next: Mode): void {
 
 function onMouseMove(e: MouseEvent): void {
   lastPointer = { x: e.clientX, y: e.clientY }
+  if (framing) {
+    // The button came up somewhere this document never heard about - over the
+    // shell's chrome, or outside the window entirely. Nothing landed, so the box
+    // goes rather than following the cursor around unpressed.
+    if (!(e.buttons & 1)) {
+      endFraming()
+      return
+    }
+    framing.to = pagePoint(e)
+    paintRegion()
+    return
+  }
+  if (pendingFrame) {
+    if (!(e.buttons & 1)) {
+      pendingFrame = null
+    } else {
+      const at = pagePoint(e)
+      if (!isRegion(regionFrom(pendingFrame, at))) return
+      startFraming(pendingFrame)
+      framing!.to = at
+      paintRegion()
+      return
+    }
+  }
   // Read off the move, not only off key events: a keyup lost to a focus change
   // would otherwise leave the page stuck looking like a picker.
   if (pick) setModHeld(e.metaKey || e.ctrlKey)
@@ -1007,8 +1211,35 @@ function onMouseMove(e: MouseEvent): void {
   }
 }
 
+/** Any left press during a pick may become a box; whether it *is* one is settled
+ *  by movement. Under the slop it stays a click - the page's for a plain press,
+ *  an element pick for a modified one - so the box costs no click semantics. */
+function onMouseDown(e: MouseEvent): void {
+  if (!pick || e.button !== 0 || isOwnUi(e.target)) return
+  const modified = e.metaKey || e.ctrlKey
+  // A plain press in a typing surface stays the page's whole gesture: dragging
+  // there selects a value to copy. The modifier still frames anywhere.
+  if (!modified && isTyping(e.target)) return
+  // A press on the page's own scrollbar. During a pick scrolling is the way to
+  // reach the element, and a frame growing out of the scrollbar would take it.
+  const doc = document.documentElement
+  if (e.clientX >= doc.clientWidth || e.clientY >= doc.clientHeight) return
+  // Only the modified press is ours from the very first pixel; a plain one must
+  // keep its default so the sub-slop tail still clicks, focuses, selects.
+  if (modified) e.preventDefault()
+  pendingFrame = pagePoint(e)
+}
+
 function onClick(e: MouseEvent): void {
   if (isOwnUi(e.target)) return
+  // The tail of a drag, aimed at whatever was under the release. Taken here so
+  // it can reach neither the page nor a pick of its own.
+  if (swallowClick) {
+    swallowClick = false
+    e.preventDefault()
+    e.stopPropagation()
+    return
+  }
   // Checked before the mode, because a pick started from the shell's note box
   // runs with no mode armed at all.
   if (pick) {
@@ -1059,7 +1290,18 @@ function onClick(e: MouseEvent): void {
   }
 }
 
-function onMouseUp(): void {
+function onMouseUp(e: MouseEvent): void {
+  pendingFrame = null
+  if (framing) {
+    const box = regionFrom(framing.from, pagePoint(e))
+    endFraming()
+    // A press that never became a drag is a click, and the click event right
+    // behind this one is what lands it.
+    if (!isRegion(box)) return
+    swallowClick = true
+    if (pick) deliverPick(regionRef(box))
+    return
+  }
   // Suppressed for the duration of a pick: a plain drag now selects text in the
   // host page, and offering to annotate it would answer a question nobody asked.
   if (pick || mode === 'off' || ui.popup) return
@@ -1147,11 +1389,21 @@ function onKeyDown(e: KeyboardEvent): void {
 // ---------------------------------------------------------------- boot
 
 function boot(): void {
-  document.body.append(ui.highlight, ui.badge, ui.pin, ui.markers, ui.veil, ui.banner)
+  ui.region.append(ui.regionSize)
+  document.body.append(
+    ui.highlight,
+    ui.badge,
+    ui.pin,
+    ui.markers,
+    ui.veil,
+    ui.region,
+    ui.banner,
+  )
   moveHighlight(null)
   movePin(null)
   paintPickChrome()
 
+  document.addEventListener('mousedown', onMouseDown, true)
   document.addEventListener('mousemove', onMouseMove, true)
   document.addEventListener('click', onClick, true)
   document.addEventListener('mouseup', onMouseUp, true)
@@ -1160,7 +1412,12 @@ function boot(): void {
     if (isModKey(e.key)) setModHeld(false)
   }, true)
   // A window that loses focus mid-hold never delivers the keyup.
-  window.addEventListener('blur', () => setModHeld(false))
+  window.addEventListener('blur', () => {
+    setModHeld(false)
+    // The release will be delivered to whatever took the focus, so this document
+    // would never hear the drag end.
+    endFraming()
+  })
   // `passive: false` is the point - a passive listener may not preventDefault.
   document.addEventListener('wheel', onScrollAttempt, { passive: false, capture: true })
   document.addEventListener('touchmove', onScrollAttempt, { passive: false, capture: true })

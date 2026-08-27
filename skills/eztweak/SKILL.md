@@ -64,6 +64,15 @@ You do not need eztweak installed globally — invoke it as `npx -y eztweak@late
      marker sits in the sentence is the user telling you which side of the comparison is which. A
      reference's `anchor.page` may differ from the item's — they are allowed to point across pages.
      The batch can carry `references` too, attached to the note rather than any one item.
+     A reference with `anchor.contains` is a *region*: the user framed a box instead of pointing at
+     one element. Its own anchor resolves to the common ancestor of what the box enclosed,
+     `anchor.contains` is one line per enclosed element (`<Component> · file:line · "own text"` -
+     the text snippet is what tells two instances of the same component apart, e.g. which two of
+     three pricing cards), and `anchor.rect` is the box they drew. Act on the elements listed, not
+     on the ancestor as a whole. You *may* open `url` + `anchor.page` at `anchor.viewport`'s size
+     and look at the `anchor.rect` area yourself - but only when the page does not depend on the
+     user's session: your browser is not logged in, and behind a login the layout shifts and that
+     rect crops the wrong thing. When in doubt, trust `contains` and the text snippets over pixels.
    - Apply every item in the batch in one pass. HMR shows your edits live; don't restart the dev server.
 6. After applying a batch, run `npx -y eztweak@latest poll <url> --agent-reply "<what you changed, item by item, one short line each>"`
    to report back in the browser and wait for the next round.

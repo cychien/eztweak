@@ -190,3 +190,14 @@ test('two files in one comment are each named by their own number', () => {
     'and n is this array position, so [file 2] is attachments[1]',
   )
 })
+
+// Without this the agent reads the anchor - which resolves to the common
+// ancestor - as the thing the user pointed at, rather than the box they drew.
+test('a framed region says so, and names what it framed', () => {
+  assert.equal(
+    referenceLabel(
+      ref({ source: 'src/pricing.tsx:8', contains: ['<Card> · src/card.tsx:3', '<Card> · src/card.tsx:3'] }),
+    ),
+    'src/pricing.tsx:8 · [framed 2: <Card> · src/card.tsx:3; <Card> · src/card.tsx:3]',
+  )
+})

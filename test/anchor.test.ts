@@ -101,3 +101,13 @@ test('more references than a person would pick is refused', () => {
   assert.equal(parseReferences(many.slice(0, 16))?.length, 16)
   assert.equal(parseReferences(many, 2), null)
 })
+
+// The framed list is a label per element and lands in the agent's prompt, so it
+// is bounded the same way every other string here is.
+test('the framed list is bounded in length and in width', () => {
+  const many = Array.from({ length: 30 }, (_, i) => `<C${i}>`)
+  assert.equal(sanitizeAnchor({ contains: many })?.contains?.length, 16)
+  assert.equal(sanitizeAnchor({ contains: ['x'.repeat(500)] })?.contains?.[0]?.length, 120)
+  assert.equal(sanitizeAnchor({ contains: [] })?.contains, undefined)
+  assert.equal(sanitizeAnchor({ contains: '<Card>' })?.contains, undefined)
+})

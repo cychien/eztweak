@@ -72,6 +72,8 @@ export function sanitizeAnchor(raw: unknown): Anchor | null {
   if (selector) out.selector = selector
   const text = str(v.text, 200)
   if (text) out.text = text
+  const contains = strings(v.contains, 16, 120)
+  if (contains) out.contains = contains
   const page = str(v.page, 300)
   if (page) out.page = page
   const p = point(v.point)
