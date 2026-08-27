@@ -65,6 +65,7 @@ interface SnapshotWire {
   conversation: ConversationWire[]
   agentOnline: boolean
   agentBusy: boolean
+  agentProgress?: string
 }
 
 const PREFIX = (() => {
@@ -890,8 +891,11 @@ function render(): void {
     const row = h('div', 'ez-msg ez-msg-agent')
     const dots = h('div', 'ez-thinking')
     dots.setAttribute('role', 'status')
-    dots.setAttribute('aria-label', 'Agent 修改中')
+    dots.setAttribute('aria-label', s.agentProgress ?? 'Agent 修改中')
     for (let i = 0; i < 3; i++) dots.appendChild(h('span', 'ez-dot'))
+    // The agent's own words on what it is doing, when it sends any - rendered
+    // where the reply will land, because it is the reply, mid-formation.
+    if (s.agentProgress) dots.appendChild(h('span', 'ez-progress', s.agentProgress))
     row.append(dots)
     convList.appendChild(row)
   }

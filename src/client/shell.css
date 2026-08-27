@@ -647,6 +647,12 @@ button {
   padding: 6px 0;
 }
 
+.ez-progress {
+  margin-left: 6px;
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+
 .ez-dot {
   width: 5px;
   height: 5px;

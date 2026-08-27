@@ -1,4 +1,4 @@
-import { devTargetUrl, runCli } from './dev-env.mjs'
+import { delay, devTargetUrl, runCli } from './dev-env.mjs'
 
 /** Stands in for a real coding agent: polls, prints every anchor field the agent
  *  would have to work from, then replies and polls again. Lets one person walk
@@ -60,6 +60,11 @@ for (;;) {
   if (result.note) console.log(dim(`note: ${result.note}`))
   printExtras(result, '')
   result.items.forEach(describe)
+
+  for (const [i, item] of result.items.entries()) {
+    await runCli(['progress', url, `改 #${i + 1} ${item.label} 中…`])
+    await delay(1500)
+  }
 
   reply = result.items.map((item, i) => `#${i + 1} ${item.label} → 假裝改好了`).join('\n')
 }
