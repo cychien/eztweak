@@ -364,7 +364,7 @@ const noteAttach = attachify({
     {
       id: 'element',
       label: 'Element',
-      hint: `${MOD_LABEL} 點一下頁面元素`,
+      hint: `${MOD_LABEL} 點一下元素，或拖曳框選範圍`,
       keywords: ['element', 'pick', 'ref', 'reference', '元素', '指定', '參考', '框選'],
       icon: AlignSelectionIcon as IconNode,
       // The pointer is in the other document, so this can only ask. The answer

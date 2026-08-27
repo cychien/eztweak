@@ -14,6 +14,8 @@ export interface AnchorWire {
   section?: string
   selector?: string
   text?: string
+  /** Elements a framed region enclosed. See `Anchor.contains` in protocol.ts. */
+  contains?: string[]
   point?: { x: number; y: number; rel: { x: number; y: number } }
   rect?: { x: number; y: number; width: number; height: number }
   viewport?: { width: number; height: number; preset?: string }

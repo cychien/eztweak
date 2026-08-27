@@ -15,6 +15,11 @@ export interface Anchor {
   selector?: string
   /** trimmed text content or the selected text for kind=text */
   text?: string
+  /** Only for a framed region: one line per element the frame enclosed,
+   *  outermost first. The anchor's other fields resolve to their common
+   *  ancestor, so this is what says the user meant a group rather than it. */
+  contains?: string[]
+  /** The element's own box - or, for a framed region, the box the user drew. */
   rect?: { x: number; y: number; width: number; height: number }
   viewport?: { width: number; height: number; preset?: string }
   /** page pathname the annotation was made on */
