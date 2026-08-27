@@ -65,6 +65,7 @@ interface SnapshotWire {
   conversation: ConversationWire[]
   agentOnline: boolean
   agentBusy: boolean
+  agentProgress?: string
 }
 
 const PREFIX = (() => {
@@ -638,13 +639,14 @@ function buildSaid(entry: ConversationWire, isUser: boolean): HTMLElement {
     shown.forEach((item, i) => {
       const li = h('li', 'ez-bubble-item')
       const body = h('div', 'ez-bi-body')
+      const rendered = commentEl(item.comment, item.references, item.attachments)
+      // The anchor stays off the screen: within a session the author remembers
+      // what they pointed at, and the agent's reply echoes it anyway. The rare
+      // lookup is a hover away.
+      if (item.where) li.title = item.where
       // An item can be a pasted file and nothing else, and an empty div would
       // still take a line.
-      const rendered = commentEl(item.comment, item.references, item.attachments)
-      if (item.comment || item.references?.length || item.attachments?.length) {
-        body.append(rendered.box)
-      }
-      if (item.where) body.append(h('span', 'ez-bi-where', item.where))
+      if (rendered.box.childNodes.length) body.append(rendered.box)
       const files = fileChips(rendered.unplacedFiles)
       if (files) body.append(files)
       li.append(h('span', 'ez-bi-num', `${i + 1}.`), body)
@@ -889,8 +891,11 @@ function render(): void {
     const row = h('div', 'ez-msg ez-msg-agent')
     const dots = h('div', 'ez-thinking')
     dots.setAttribute('role', 'status')
-    dots.setAttribute('aria-label', 'Agent 修改中')
+    dots.setAttribute('aria-label', s.agentProgress ?? 'Agent 修改中')
     for (let i = 0; i < 3; i++) dots.appendChild(h('span', 'ez-dot'))
+    // The agent's own words on what it is doing, when it sends any - rendered
+    // where the reply will land, because it is the reply, mid-formation.
+    if (s.agentProgress) dots.appendChild(h('span', 'ez-progress', s.agentProgress))
     row.append(dots)
     convList.appendChild(row)
   }

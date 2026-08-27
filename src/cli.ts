@@ -26,6 +26,8 @@ Usage:
       open (or resume) a review session for a dev server
   ${PKG_NAME} poll <url> [--agent-reply <msg>]
       block until the user sends feedback; prints JSON, then exits
+  ${PKG_NAME} progress <url> <msg>
+      update the "working on it" line in the review shell; send between edits
   ${PKG_NAME} end <url>
       end the session as the agent
   ${PKG_NAME} status | stop
@@ -214,6 +216,19 @@ async function cmdPoll(rawUrl: string | undefined, reply: string | undefined): P
   }
 }
 
+async function cmdProgress(rawUrl: string | undefined, message: string | undefined): Promise<void> {
+  if (!message?.trim()) fail('missing <message>', `e.g. ${PKG_NAME} progress <url> "adjusting the hero spacing"`)
+  const target = parseTarget(rawUrl)
+  const port = await findSessionPort(target)
+  const res = await fetch(sessionApi(port, '/agent/progress'), {
+    method: 'POST',
+    headers: versionedHeaders,
+    body: JSON.stringify({ message: message.trim() }),
+  })
+  await failOnVersionSkew(res)
+  if (!res.ok) fail(`failed to deliver progress (${res.status})`)
+}
+
 async function cmdEnd(rawUrl: string | undefined): Promise<void> {
   const target = parseTarget(rawUrl)
   const port = await findSessionPort(target)
@@ -280,6 +295,8 @@ async function main(): Promise<void> {
       const reply = replyIdx >= 0 ? rest[replyIdx + 1] : undefined
       return cmdPoll(rest[0], reply)
     }
+    case 'progress':
+      return cmdProgress(rest[0], rest[1])
     case 'end':
       return cmdEnd(rest[0])
     case 'status':

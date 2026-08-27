@@ -60,6 +60,10 @@ interface SnapshotWire {
   agentOnline: boolean
   /** Agent took a batch and hasn't come back to poll — it's off editing. */
   agentBusy: boolean
+  /** The agent's latest word on what it is doing right now. Transient by design:
+   *  progress is status, not conversation, so it lives next to `agentBusy` and
+   *  dies with it instead of accumulating stale lines in the log. */
+  agentProgress?: string
 }
 
 /** First port in `candidates` that binds. A `0` entry always succeeds, so keep
@@ -98,6 +102,7 @@ class SessionRuntime {
   /** Set when a batch is handed to the agent, cleared when it polls again.
    *  Acks can't drive this: the agent acks on receipt, before it does the work. */
   private agentBusy = false
+  private agentProgress: string | null = null
   lastActivity = Date.now()
 
   constructor(
@@ -141,6 +146,7 @@ class SessionRuntime {
       conversation: this.store.conversation,
       agentOnline: this.pollWaiters.size > 0,
       agentBusy: this.agentBusy,
+      ...(this.agentProgress ? { agentProgress: this.agentProgress } : {}),
     }
   }
 
@@ -182,6 +188,7 @@ class SessionRuntime {
     // The agent is back. Clear before `pollOutcome`, which re-arms it if another
     // batch is already queued.
     this.agentBusy = false
+    this.agentProgress = null
     const immediate = this.pollOutcome()
     if (immediate) return immediate
     return new Promise((resolve) => {
@@ -331,6 +338,7 @@ class SessionRuntime {
     api.post('/end', (req, res) => {
       const by: SessionEndedBy = req.body?.by === 'agent' ? 'agent' : 'user'
       this.agentBusy = false
+      this.agentProgress = null
       this.store.end(by)
       this.store.appendConversation({
         role: 'system',
@@ -370,7 +378,20 @@ class SessionRuntime {
     api.post('/agent/reply', (req, res) => {
       const message = String(req.body?.message ?? '').trim()
       if (!message) return res.status(400).json({ error: 'message is required' })
+      // The reply is the finished form of whatever the progress line promised.
+      this.agentProgress = null
       this.store.appendConversation({ role: 'agent', text: message, ts: Date.now() })
+      this.broadcast()
+      res.json({ ok: true })
+    })
+
+    api.post('/agent/progress', (req, res) => {
+      const message = String(req.body?.message ?? '').trim()
+      if (!message) return res.status(400).json({ error: 'message is required' })
+      // Progress is a claim of work in flight, so it also raises the busy flag -
+      // an agent narrating before its first poll is still an agent working.
+      this.agentBusy = true
+      this.agentProgress = message
       this.broadcast()
       res.json({ ok: true })
     })

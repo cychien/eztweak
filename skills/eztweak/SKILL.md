@@ -74,8 +74,13 @@ You do not need eztweak installed globally — invoke it as `npx -y eztweak@late
      user's session: your browser is not logged in, and behind a login the layout shifts and that
      rect crops the wrong thing. When in doubt, trust `contains` and the text snippets over pixels.
    - Apply every item in the batch in one pass. HMR shows your edits live; don't restart the dev server.
+   - While you work, the shell shows the user a "working" indicator. If the batch takes more than a
+     few edits, narrate it: run `npx -y eztweak@latest progress <url> "<one short line: what you are
+     doing right now>"` between steps (e.g. before starting item 2 of 5). Each call replaces the
+     previous line - it is a status, not a log - so send the current step, not a summary so far.
+     Do not send progress for a batch you will finish in one or two quick edits.
 6. After applying a batch, run `npx -y eztweak@latest poll <url> --agent-reply "<what you changed, item by item, one short line each>"`
-   to report back in the browser and wait for the next round.
+   to report back in the browser and wait for the next round. The reply clears the progress line.
 7. When the user says they're satisfied (in chat or via the session), run `npx -y eztweak@latest end <url>`.
 
 ## Rules
@@ -99,5 +104,6 @@ You do not need eztweak installed globally — invoke it as `npx -y eztweak@late
 
 - `npx -y eztweak@latest <url> [--reopen]` — open or resume the review session for a dev server
 - `npx -y eztweak@latest poll <url> [--agent-reply "<msg>"]` — deliver a reply, then block for feedback
+- `npx -y eztweak@latest progress <url> "<msg>"` — update the working-on-it line while editing
 - `npx -y eztweak@latest end <url>` — end the session as the agent (plain reopen stays allowed)
 - `npx -y eztweak@latest status` / `stop` — inspect / stop the local daemon

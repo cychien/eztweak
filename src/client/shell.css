@@ -529,18 +529,37 @@ button {
   justify-content: flex-end;
 }
 
-/* MessageGroup: consecutive turns from the same sender close up, so a reply that
-   arrives in several parts reads as one. */
-.ez-msg-cont {
+/* MessageGroup: consecutive turns from the same sender close up, so a batch sent
+   in several parts reads as one. Only the user's, though - their turns are boxed,
+   so the box still says where one ends. */
+.ez-msg-user.ez-msg-cont {
   margin-top: -6px;
 }
 
+/* The agent's turns are unboxed, so whitespace is the only thing that separates
+   one reply from the bubble on either side of it, and the only thing that
+   separates two replies from each other. Both need more than the default gap,
+   and two replies need the most: a bubble's edge already marks where a turn
+   stops, and between two agent replies there is no edge at all. */
+.ez-msg-agent,
+.ez-msg-agent + .ez-msg-user {
+  margin-top: 18px;
+}
+
+.ez-msg-agent.ez-msg-cont {
+  margin-top: 16px;
+}
+
 .ez-bubble {
+  /* The note bleeds to the bubble's edges by cancelling these, so the two cannot
+     drift apart. */
+  --bubble-pad-x: 10px;
+  --bubble-pad-y: 8px;
   max-width: 84%;
   min-width: 0;
   font-size: 13px;
   line-height: 1.6;
-  padding: 7px 10px;
+  padding: var(--bubble-pad-y) var(--bubble-pad-x);
   border-radius: 12px;
   word-break: break-word;
   white-space: pre-wrap;
@@ -585,32 +604,32 @@ button {
   min-width: 0;
 }
 
-.ez-bi-where {
-  display: block;
-  font-size: 11px;
-  opacity: 0.55;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.ez-bubble-more,
+/* Only the note gets the rule. The note is a different kind of thing from the
+   items above it - the user's own words about the batch, not one more pick - and
+   the rule is what says so. "還有 n 則" is still the same list, just folded.
+   Built from --border rather than from the ink: it keeps the rule in the paper
+   family the bubble's --muted belongs to, so it reads as one more surface step
+   rather than a grey line drawn on top. Stepped toward --ink-ghost only far
+   enough to be legible - an oklab mix scales the warmth with the lightness, so
+   the hue survives the darkening. */
 .ez-bubble-note {
-  margin-top: 7px;
-  padding-top: 7px;
-  border-top: 1px solid color-mix(in oklch, currentColor 20%, transparent);
+  /* Bottom bleed as well as side, so the note owns the space under it - left to
+     the bubble's own padding, the room below the note could never exceed the
+     room above the rule. */
+  margin: 6px calc(var(--bubble-pad-x, 0px) * -1) calc(var(--bubble-pad-y, 0px) * -1);
+  padding: 6px var(--bubble-pad-x, 0px);
+  border-top: 1px solid color-mix(in oklab, var(--border) 80%, var(--ink-ghost));
 }
 
 .ez-bubble-more {
   display: block;
   width: 100%;
   text-align: left;
-  border-left: none;
-  border-right: none;
-  border-bottom: none;
+  border: none;
+  margin-top: 7px;
   background: transparent;
   color: inherit;
-  opacity: 0.7;
+  opacity: 0.45;
   font-size: 11.5px;
   cursor: pointer;
   padding-left: 0;
@@ -618,7 +637,7 @@ button {
 }
 
 .ez-bubble-more:hover {
-  opacity: 1;
+  opacity: 0.75;
 }
 
 .ez-thinking {
@@ -626,6 +645,12 @@ button {
   align-items: center;
   gap: 4px;
   padding: 6px 0;
+}
+
+.ez-progress {
+  margin-left: 6px;
+  font-size: 12px;
+  color: var(--muted-foreground);
 }
 
 .ez-dot {
