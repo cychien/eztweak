@@ -638,13 +638,14 @@ function buildSaid(entry: ConversationWire, isUser: boolean): HTMLElement {
     shown.forEach((item, i) => {
       const li = h('li', 'ez-bubble-item')
       const body = h('div', 'ez-bi-body')
+      const rendered = commentEl(item.comment, item.references, item.attachments)
+      // The anchor stays off the screen: within a session the author remembers
+      // what they pointed at, and the agent's reply echoes it anyway. The rare
+      // lookup is a hover away.
+      if (item.where) li.title = item.where
       // An item can be a pasted file and nothing else, and an empty div would
       // still take a line.
-      const rendered = commentEl(item.comment, item.references, item.attachments)
-      if (item.comment || item.references?.length || item.attachments?.length) {
-        body.append(rendered.box)
-      }
-      if (item.where) body.append(h('span', 'ez-bi-where', item.where))
+      if (rendered.box.childNodes.length) body.append(rendered.box)
       const files = fileChips(rendered.unplacedFiles)
       if (files) body.append(files)
       li.append(h('span', 'ez-bi-num', `${i + 1}.`), body)
