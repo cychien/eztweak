@@ -109,6 +109,10 @@ let popupSubject: DraftSubject | null = null
 let highlightTarget: Element | null = null
 let pinPage: { x: number; y: number } | null = null
 let popupRect: (() => DOMRect) | null = null
+/** The run a text popup is composing about, kept so it can be repainted. Live
+ *  rather than a frozen rect: a selection wraps, so it is many rects, and a
+ *  reflow moves all of them. */
+let selectionRange: Range | null = null
 
 const ui = {
   highlight: el('div', 'ez-highlight'),
@@ -123,6 +127,9 @@ const ui = {
   /** The box being dragged, with its size read out in the corner. */
   region: el('div', 'ez-pick-region'),
   regionSize: el('div', 'ez-pick-region-size'),
+  /** The selected run, drawn by us. The browser stops painting the page's own
+   *  selection the moment the composer takes focus, and the run is the subject. */
+  selection: el('div', 'ez-selection'),
   popup: null as HTMLElement | null,
   /** Lives beside the popup: its uploads are only ever discarded with it. */
   popupAttach: null as AttachController | null,
@@ -311,6 +318,42 @@ function paintHighlight(): void {
   placeBadge(rect, ui.badge.offsetWidth, ui.badge.offsetHeight)
 }
 
+/** The element a selected run hangs off: what a text annotation anchors to, and
+ *  what the frame names while the run is being commented on. */
+function selectionOwner(range: Range): Element | null {
+  const node = range.commonAncestorContainer
+  const owner = node instanceof Element ? node : node.parentElement
+  return owner && !isOwnUi(owner) ? owner : null
+}
+
+/** The page's own selection, when there is a run in it worth annotating. */
+function liveSelectionRange(): Range | null {
+  const selection = window.getSelection()
+  if (!selection || selection.isCollapsed || !selection.rangeCount) return null
+  const range = selection.getRangeAt(0)
+  if (!range.toString().trim() || !selectionOwner(range)) return null
+  return range
+}
+
+/** Only ever the run behind an open popup. Before that the browser is still
+ *  painting the selection itself, and drawing a second colour over it would
+ *  read as two different things being selected. */
+function paintSelection(): void {
+  ui.selection.textContent = ''
+  if (!selectionRange) return
+  for (const rect of selectionRange.getClientRects()) {
+    if (!rect.width || !rect.height) continue
+    const band = el('div', 'ez-selection-band')
+    Object.assign(band.style, {
+      top: `${rect.top}px`,
+      left: `${rect.left}px`,
+      width: `${rect.width}px`,
+      height: `${rect.height}px`,
+    })
+    ui.selection.append(band)
+  }
+}
+
 /** Above the frame by preference, flipped below it when the element sits against
  *  the top of the viewport. Clamping into the frame instead — which is what a
  *  plain `Math.max` does — buries the label in the element it is describing. */
@@ -400,6 +443,8 @@ function closePopup(): void {
   ui.popup = null
   popupRect = null
   popupSubject = null
+  selectionRange = null
+  paintSelection()
 }
 
 function dismiss(): void {
@@ -447,8 +492,14 @@ function openPopup(
   subject: DraftSubject,
   anchor: () => DOMRect,
   onSave: (comment: string, attachments: string[], references: RefWire[]) => Promise<void>,
+  /** Taken through the open rather than set around it: `closePopup` below is
+   *  what clears the previous one, and a caller assigning it first would have
+   *  it wiped out from under them. */
+  run: Range | null = null,
 ): void {
   closePopup()
+  selectionRange = run
+  paintSelection()
   popupSubject = subject
   const popup = el('div', 'ez-popup')
 
@@ -778,6 +829,7 @@ function scheduleRepaint(): void {
   markerRaf = requestAnimationFrame(() => {
     renderMarkers()
     paintHighlight()
+    paintSelection()
     paintPin()
     paintRegion()
     paintPopup()
@@ -1204,7 +1256,15 @@ function onMouseMove(e: MouseEvent): void {
   if (isOwnUi(e.target)) return
   if (pick && !modHeld) return
   if (!pick && (mode === 'off' || ui.popup)) return
-  const target = e.target instanceof Element ? e.target : null
+  // A selected run has already named the subject, so the frame stops answering
+  // the pointer and sits on the run's own element. Letting it keep chasing would
+  // offer a different element than the one the bubble is about to annotate.
+  const run = pick ? null : liveSelectionRange()
+  const target = run
+    ? selectionOwner(run)
+    : e.target instanceof Element
+      ? e.target
+      : null
   if (target !== hoverTarget) {
     hoverTarget = target
     moveHighlight(target)
@@ -1308,16 +1368,11 @@ function onMouseUp(e: MouseEvent): void {
   setTimeout(() => {
     ui.selectionBubble?.remove()
     ui.selectionBubble = null
-    const selection = window.getSelection()
-    if (!selection || selection.isCollapsed || !selection.rangeCount) return
-    const range = selection.getRangeAt(0)
-    const text = selection.toString().trim()
-    if (!text) return
-    const container =
-      range.commonAncestorContainer instanceof Element
-        ? range.commonAncestorContainer
-        : range.commonAncestorContainer.parentElement
-    if (!container || isOwnUi(container)) return
+    const range = liveSelectionRange()
+    if (!range) return
+    const container = selectionOwner(range)
+    if (!container) return
+    const text = range.toString().trim()
     const rect = range.getBoundingClientRect()
     const bubble = el('button', 'ez-select-btn')
     bubble.append(icon(TextSelectIcon as IconNode, 14), document.createTextNode('標註選取文字'))
@@ -1333,6 +1388,7 @@ function onMouseUp(e: MouseEvent): void {
         () => range.getBoundingClientRect(),
         (comment, files, refs) =>
           saveAnnotation('text', container, comment, files, refs, { selectedText: text }),
+        range,
       )
     }
     document.body.appendChild(bubble)
@@ -1391,6 +1447,7 @@ function onKeyDown(e: KeyboardEvent): void {
 function boot(): void {
   ui.region.append(ui.regionSize)
   document.body.append(
+    ui.selection,
     ui.highlight,
     ui.badge,
     ui.pin,
