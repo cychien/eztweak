@@ -888,7 +888,10 @@ function render(): void {
   }
 
   if (s.agentBusy) {
-    const row = h('div', 'ez-msg ez-msg-agent')
+    // Grouped on the same rule a real turn would use: this row is a placeholder
+    // for the reply that replaces it, and a different margin here would make the
+    // thread step sideways at the moment it lands.
+    const row = h('div', `ez-msg ez-msg-agent${prevRole === 'agent' ? ' ez-msg-cont' : ''}`)
     const dots = h('div', 'ez-thinking')
     dots.setAttribute('role', 'status')
     dots.setAttribute('aria-label', s.agentProgress ?? 'Agent 修改中')

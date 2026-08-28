@@ -641,19 +641,38 @@ button {
 }
 
 .ez-thinking {
+  /* The progress line lands inside this row partway through a batch. Reserving
+     its height up front is what stops the whole thread jumping the moment one
+     arrives - the list is pinned to the bottom, so a row that grows moves
+     everything above it. */
+  --ez-progress-line: 17px;
+  --ez-progress-pad: 6px;
   display: flex;
   align-items: center;
   gap: 4px;
-  padding: 6px 0;
+  padding: var(--ez-progress-pad) 0;
+  /* Border-box, so the reserved height has to carry the padding with it. */
+  min-height: calc(var(--ez-progress-line) + var(--ez-progress-pad) * 2);
+  /* Without this the row keeps its content's width and a long progress line
+     pushes the sidebar into horizontal scroll instead of eliding. */
+  min-width: 0;
 }
 
+/* A status, not content: it is replaced on every step, so it stays on the one
+   reserved line and elides rather than wrapping the row taller. */
 .ez-progress {
   margin-left: 6px;
+  min-width: 0;
   font-size: 12px;
+  line-height: var(--ez-progress-line);
   color: var(--muted-foreground);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .ez-dot {
+  flex: none;
   width: 5px;
   height: 5px;
   border-radius: 50%;
