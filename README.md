@@ -2,6 +2,10 @@
 
 > Point at your live app. Your agent fixes it.
 
+![Three annotations left on a running dev server - a click on the hero title, a run of selected
+text, a comment on the logo strip - sent as one batch, and the agent's edits arriving in the page
+over HMR](docs/demo.webp)
+
 eztweak turns any locally running dev server into an annotatable review surface for human ↔
 agent iteration. The user marks up the **real page** - click an element, select some text, leave a
 comment - and the feedback flows to a local coding agent (Claude Code, Codex, anything that can
