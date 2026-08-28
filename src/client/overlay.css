@@ -98,6 +98,24 @@
   display: none;
 }
 
+/* The browser stops painting the page's own selection the moment the composer
+   takes focus, so the run being annotated is redrawn here — in the tool's mark,
+   at a weight that reads as highlighted text rather than as a second frame. One
+   band per client rect, because a selection wraps. */
+.ez-selection {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483599;
+  pointer-events: none;
+}
+
+.ez-selection-band {
+  position: fixed;
+  border-radius: 2px;
+  background: color-mix(in oklab, var(--ez-mark) 30%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--ez-mark) 45%, transparent);
+}
+
 /* Sits on host pages of unknown colour, so the white ring — not the fill — is
    what guarantees it stays legible on a dark canvas. */
 .ez-pin {
