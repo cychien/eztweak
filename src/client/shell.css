@@ -541,7 +541,7 @@ button {
    separates two replies from each other. Both need more than the default gap,
    and two replies need the most: a bubble's edge already marks where a turn
    stops, and between two agent replies there is no edge at all. */
-.ez-msg-agent,
+.ez-msg-agent:not(:first-child),
 .ez-msg-agent + .ez-msg-user {
   margin-top: 18px;
 }
