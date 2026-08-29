@@ -1,8 +1,8 @@
-/* A crosshair says "you are about to mark an exact coordinate", which is true of
-   point mode and not of element mode - picking an element is a pick, so it gets
-   the arrow, the way DevTools' inspector does. Overriding the page's own
-   `pointer` on links is the point of forcing it: a click here annotates, it does
-   not navigate.
+/* A crosshair says "you are about to sweep an area", which is true of region
+   mode and not of element mode - picking an element is a pick, so it gets the
+   arrow, the way DevTools' inspector does. Overriding the page's own `pointer`
+   on links is the point of forcing it: a click here annotates, it does not
+   navigate.
 
    These belong on the page being annotated, not on our own chrome. `cursor`
    inherits, so excluding the overlay here isn't enough — each interactive root
@@ -18,8 +18,8 @@
   cursor: pointer !important;
 }
 
-[data-ez-mode='point']:not([data-ez-pick]),
-[data-ez-mode='point']:not([data-ez-pick]) *:not([data-ez-ui], [data-ez-ui] *) {
+[data-ez-mode='region']:not([data-ez-pick]),
+[data-ez-mode='region']:not([data-ez-pick]) *:not([data-ez-ui], [data-ez-ui] *) {
   cursor: crosshair !important;
 }
 
@@ -60,6 +60,12 @@
   box-sizing: border-box;
 }
 
+/* `--ez-ui-scale` is set on the document by the overlay: the inverse of the
+   scale the shell is drawing this frame at, 1 when it is drawing it whole.
+   Chrome that carries text or takes a click multiplies itself back by it, so it
+   holds its size on screen however small the page is being shown. What marks
+   geometry - the element frame, the selection bands, the drag box - does not:
+   those are measuring the page, and have to shrink with it. */
 [data-ez-ui] {
   --ez-paper-sunken: #f2f0e9;
   --ez-paper-edge: #e9e6dd;
@@ -82,9 +88,8 @@
 }
 
 /* Every mark is drawn in --ez-mark, the one colour in the tool, so it never
-   reads as part of the host page. Element mode frames the region it would
-   capture; point mode draws only the pin. The white ring is what carries them
-   over a dark host page. */
+   reads as part of the host page. The white ring is what carries it over a
+   dark host page. */
 .ez-highlight {
   position: fixed;
   z-index: 2147483600;
@@ -132,6 +137,8 @@
     0 1px 4px oklch(0% 0 0 / 0.35),
     0 0 0 4px color-mix(in oklab, var(--ez-mark) 22%, transparent);
   display: none;
+  transform-origin: center;
+  transform: scale(var(--ez-ui-scale, 1));
 }
 
 .ez-badge {
@@ -146,11 +153,15 @@
   padding: 2px 8px;
   border-radius: 5px;
   box-shadow: 0 0 0 1px oklch(100% 0 0 / 0.25);
-  max-width: 60vw;
+  /* Divided by the scale it is about to be multiplied by, so the ceiling is the
+     one the reader sees rather than the one the layout used. */
+  max-width: calc(60vw / var(--ez-ui-scale, 1));
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   display: none;
+  transform-origin: top left;
+  transform: scale(var(--ez-ui-scale, 1));
 }
 
 /* Fixed, not absolute: a marker painted from a wider viewport's coordinates would
@@ -178,6 +189,8 @@
   text-align: center;
   box-shadow: 0 0 0 2px oklch(100% 0 0 / 0.85);
   pointer-events: auto;
+  transform-origin: center;
+  transform: scale(var(--ez-ui-scale, 1));
 }
 
 .ez-select-btn {
@@ -198,6 +211,8 @@
   box-shadow:
     0 0 0 1px oklch(100% 0 0 / 0.25),
     0 2px 8px oklch(0% 0 0 / 0.3);
+  transform-origin: top left;
+  transform: scale(var(--ez-ui-scale, 1));
 }
 
 /* A floating panel in the shell's own language: white card, hairline edge, the
@@ -207,6 +222,12 @@
   position: fixed;
   z-index: 2147483603;
   width: 300px;
+  /* The one piece of chrome with a width of its own, so the only one that can
+     outgrow the frame it lives in. Capped at what fits once scaled: past that
+     point the panel narrows instead of running off a 390px screen. */
+  max-width: calc((100vw - 24px) / var(--ez-ui-scale, 1));
+  transform-origin: top left;
+  transform: scale(var(--ez-ui-scale, 1));
   background: #fff;
   color: var(--ez-ink);
   border: 1px solid var(--ez-paper-edge);
@@ -500,7 +521,7 @@
    unknown page; this box is drawn against its own faint wash and reads at any
    size, and a rounded corner on a box the user is dragging by that corner puts
    the line where the cursor is not. */
-.ez-pick-region {
+.ez-region {
   position: fixed;
   z-index: 2147483598;
   pointer-events: none;
@@ -512,11 +533,13 @@
 /* Outside the box, under its bottom-right corner - the corner the cursor is on,
    so the number sits where the eye already is. Inside it would cover the very
    content being framed at the sizes where the readout matters most. */
-.ez-pick-region-size {
+.ez-region-size {
   position: absolute;
   top: 100%;
   right: 0;
   margin-top: 4px;
+  transform-origin: top right;
+  transform: scale(var(--ez-ui-scale, 1));
   padding: 1px 6px;
   border-radius: 4px;
   background: var(--ez-ref-accent);
@@ -528,10 +551,24 @@
   white-space: nowrap;
 }
 
-.ez-pick-region-size[data-ez-inside] {
+.ez-region-size[data-ez-inside] {
   top: auto;
   bottom: 4px;
   margin: 0 4px 0 0;
+}
+
+/* The same box answers two gestures. During a pick it is pink - it lands in a
+   ref chip - and in region mode it is drawn in the mark colour, because it is
+   about to be an annotation, the same as every other mark. Keyed off the mode
+   rather than a second element, so a pick started *from* a region popup still
+   drags a pink box. */
+[data-ez-mode='region']:not([data-ez-pick]) .ez-region {
+  border-color: var(--ez-mark);
+  background: color-mix(in oklab, var(--ez-mark) 9%, transparent);
+}
+
+[data-ez-mode='region']:not([data-ez-pick]) .ez-region-size {
+  background: var(--ez-mark);
 }
 
 /* The dark pill the overlay already uses for anything it floats over a page it
@@ -548,12 +585,15 @@
   position: fixed;
   bottom: 16px;
   left: 50%;
-  transform: translateX(-50%);
+  /* Scale before the centring shift, about the corner `left`/`bottom` pin: the
+     shift is then measured in drawn pixels and still lands on the middle. */
+  transform-origin: bottom left;
+  transform: scale(var(--ez-ui-scale, 1)) translateX(-50%);
   z-index: 2147483605;
   display: none;
   align-items: center;
   gap: 8px;
-  max-width: calc(100vw - 24px);
+  max-width: calc((100vw - 24px) / var(--ez-ui-scale, 1));
   padding: 7px 8px 7px 12px;
   border-radius: 999px;
   background: var(--ez-ink);

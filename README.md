@@ -3,10 +3,10 @@
 > Point at your live app. Your agent fixes it.
 
 eztweak turns any locally running dev server into an annotatable review surface for human ↔
-agent iteration. The user marks up the **real page** - click an element, select some text, leave a
-comment - and the feedback flows to a local coding agent (Claude Code, Codex, anything that can
-run a CLI) as structured items that resolve to **exact source locations**. The agent edits the
-code, HMR updates the page in place, the user reviews the next round.
+agent iteration. The user marks up the **real page** - click an element, frame a region, select
+some text, leave a comment - and the feedback flows to a local coding agent (Claude Code, Codex,
+anything that can run a CLI) as structured items that resolve to **exact source locations**. The
+agent edits the code, HMR updates the page in place, the user reviews the next round.
 
 ```
 $ npx -y eztweak@latest http://localhost:5173/pricing   # opens the review shell
@@ -20,6 +20,9 @@ $ npx -y eztweak@latest poll http://localhost:5173/     # agent blocks here unti
   guessing which part of the page you meant. Paste or drop a screenshot into any comment and the
   agent gets a path to it; `/element` points a comment at a second element, so "make this match
   that one" arrives as a `file:line` too.
+- **Every screen at once.** Review on one device or lay all three out on a canvas - desktop,
+  iPad and iPhone side by side at their real viewports, scrolling together. An annotation stays on
+  the screen it was made on, and reaches the agent tagged with the width it was made at.
 - **Built for the loop.** Batch annotations, send once; the agent's `poll` is a blocking CLI call
   that prints structured JSON - the same portable contract as an AXI. HMR keeps iterations
   in place; the review chrome lives outside the app frame, so it survives your agent's syntax errors.
@@ -57,6 +60,25 @@ Dev-only (`apply: 'serve'`) - it never touches production builds.
   Configuration). A CLI that reaches a daemon on another version is refused with a `409` that says
   how to update, instead of speaking a mismatched protocol.
 
+## Annotating
+
+Two modes, and the toolbar shows which one is armed. Both leave the page live underneath, and
+`Esc` steps back out - first the open comment box, then the mode.
+
+- **元素** (`E`) - point at one thing. Hover frames the element under the cursor, a click opens the
+  comment box on it, and selecting text instead annotates that run. This is the mode for "this
+  button", "this heading", "this sentence".
+- **範圍** (`R`) - drag a box over an area. What the box encloses *whole* is what it means: the
+  elements it merely cuts through are looked past, down to the ones that fit - so framing a card is
+  the card, and framing a row of them is the row. The box you drew stays on screen as the comment's
+  subject, and the agent is handed the enclosing element's `file:line` plus `anchor.contains`, a
+  line per element the box held: component, `file:line`, and a snippet of that element's own text,
+  which is what tells two instances of the same component apart. This is the mode for "this whole
+  block", "these four cards", "the spacing through here".
+
+One comment is composed at a time - across every preview on the canvas, not just the one you are
+in - so a box drawn in one screen cannot open a second comment box behind the one you are writing.
+
 ## The comment box
 
 Typing `/` in either comment box opens a command menu - arrow keys and Enter, or click. A slash
@@ -89,6 +111,59 @@ thumbnail takes the room it needs. The bytes go straight to the session director
 per file, and the batch hands the agent an absolute path per attachment so it opens the screenshot
 instead of being handed base64. Deleting a queued annotation deletes its files with it; anything
 attached and then abandoned is collected a day later.
+
+## Devices
+
+The header carries one toggle group with two sides: a menu picking the size to preview at, and
+all of them at once (`4`). The raised side is the one showing. The sizes are real device viewports, not bare widths - where the fold lands is
+half of what a responsive review is looking at:
+
+| Key | Device | Viewport |
+| --- | --- | --- |
+| `1` | 手機 | 375×629 - a 375×812 screen, less the browser's bars |
+| `2` | 平板 | 1112×740 - a 10.5" tablet on its side, past the breakpoint most layouts switch on |
+| `3` | 電腦 | 1440×788 - a 1440×900 laptop screen, less the menu bar and the browser's own |
+
+The sizes are the **page area** a browser leaves on that device, not the screen it leaves it on -
+so a card on the canvas stops showing the page exactly where the real thing stops showing it. On
+its own a size takes only its width from the table and the height from your screen: one preview
+gets the whole stage to show the page in, and the canvas is where the fold is what you are
+checking.
+
+The names are shelves, not machines - a 手機 row naming a handset would claim a precision the
+row does not have, when phone widths run from 360 up past 430. The sizes are still taken from
+real machines; the comments in `devices.ts` say which.
+
+**`4` lays them out on one canvas** - phone and tablet side by side, the desktop on the row below.
+The control in the stage's top corner picks which sizes are on it: the three above, plus a portrait
+tablet (834×1018) that is off by default.
+
+The canvas is drawn at **true size**, always. A 375 card is 375 pixels whether it is standing alone
+or with three others beside it - a scaled 375 is not 375 to a media query, and a page measured at a
+size nobody browses at is not a measurement. Turning a size off does not resize or rearrange the
+ones that are left. What does not fit is what the dragging is for.
+
+Every card is the device it names, at its own height. What keeps the canvas short enough to work
+on is the two-row layout, not a cap on the cards - a card cut to a shared height would be lying
+about where the fold falls, which is half of what the preview is for.
+
+**Drag a card by its label to rearrange the canvas.** A card cannot stop just anywhere: it lands
+top-aligned in an existing row, or on a row of its own, and a line marks where it would go -
+upright between two cards, flat between two rows. The arrangement is remembered, and a size turned
+on later joins as its own row at the bottom rather than reshuffling what you laid out.
+
+**Drag the background to move the canvas.** The frames are the app: a press inside one belongs to
+the page, so the backdrop and the gaps are what the canvas is panned by. That is also why the
+canvas does not have to fit - what is off the edge is a drag away.
+
+Scrolling inside any one preview scrolls the others to the same point in the page, and navigating
+one - a link, back, forward - takes all of them: annotations are filtered by path, and three
+previews on three pages is three separate reviews.
+
+An annotation belongs to the screen it was made on: mark up the iPhone card and the pin lives
+there, not on all three. The agent gets `@mobile 390x844` in the anchor either way. Everything the
+overlay draws - the comment box, the element label, the pins - is drawn back up to full size, so a
+canvas scaled to 60% is still one you can read and type into.
 
 ## Configuration
 

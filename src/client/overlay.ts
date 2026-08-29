@@ -8,6 +8,7 @@ import { GRACE_MS, draftExpired, draftPendingNames, normalizeDraft } from './dra
 import type { AnchorWire, DraftSubject, DraftWire, RefWire } from './draft.js'
 import { type IconNode, icon } from './icon.js'
 import { modLabel } from './pick.js'
+import { following, scrollRange, scrollRatio } from './scroll-sync.js'
 import {
   type Point,
   type Region,
@@ -19,7 +20,7 @@ import {
 } from './region.js'
 import { shortAnchor } from '../label.js'
 
-type Mode = 'off' | 'element' | 'point'
+type Mode = 'off' | 'element' | 'region'
 
 /** A pick in flight: the user typed `/element` and has gone off to point at
  *  something. Deliberately *not* a `Mode`. `setMode` dismisses the popup, which
@@ -75,8 +76,39 @@ const SOURCE_ATTR = 'data-ez-source'
 let mode: Mode = 'off'
 let ended = false
 let viewportPreset: string | undefined
+/** How much bigger than the page the tool's own chrome has to be drawn. The
+ *  shell lays this frame out at true device pixels and scales the whole thing
+ *  to fit its stage, which is right for the page - a scaled 390 is still 390 to
+ *  a media query - and wrong for everything the overlay draws on top: a comment
+ *  box shrunk to 60% is a comment box nobody can type in. Chrome scales back by
+ *  the inverse, so it holds its size on screen whatever the page is shown at. */
+let uiScale = 1
+/** True while the shell is showing several devices at once. An annotation then
+ *  belongs to the screen it was made on: the same comment drawn on all three
+ *  cards would read as three separate comments about three separate things. */
+let scopedToDevice = false
+/** When this frame was last told where to scroll. What it reports while it is
+ *  still settling into that would only be the move coming back, and a frame that
+ *  answers its own echo is how three previews shove each other up the page. */
+let appliedScrollAt: number | null = null
+let scrollRaf = 0
+
+function setFrameZoom(zoom: number): void {
+  const next = zoom > 0 ? 1 / zoom : 1
+  if (next === uiScale) return
+  uiScale = next
+  document.documentElement.style.setProperty('--ez-ui-scale', String(uiScale))
+  // The badge and the popup are placed against measurements taken before the
+  // scale is applied, so a change of scale moves where they belong.
+  scheduleRepaint()
+}
 let annotations: AnnotationWire[] = []
 let hoverTarget: Element | null = null
+/** A popup is open in one of the other previews. One annotation is composed at
+ *  a time wherever it lives, so a held frame stops highlighting, selecting and
+ *  opening popups of its own - a pick is the one exception, because a pick is
+ *  that very popup asking for an element. */
+let held = false
 let pick: Pick | null = null
 /** Last pointer position seen in this document, tracked unconditionally - even
  *  with no mode armed, because a pick from the shell's note box starts that way.
@@ -93,6 +125,9 @@ let modHeld = false
  *  drawing one. Page coordinates because the page can still be scrolled mid
  *  drag, and the box belongs to the document rather than to the viewport. */
 let framing: { from: Point; to: Point } | null = null
+/** The box a region-mode drag settled on, kept painted while its popup is open:
+ *  it is the annotation's subject, the way the highlight is an element popup's. */
+let markedRegion: Region | null = null
 /** A press that has not declared itself yet. Every press during a pick starts
  *  here and becomes a frame only past the slop - which is what lets a plain
  *  click stay the page's while a plain drag draws a box. */
@@ -125,8 +160,8 @@ const ui = {
   veil: el('div', 'ez-pick-veil'),
   banner: el('div', 'ez-pick-banner'),
   /** The box being dragged, with its size read out in the corner. */
-  region: el('div', 'ez-pick-region'),
-  regionSize: el('div', 'ez-pick-region-size'),
+  region: el('div', 'ez-region'),
+  regionSize: el('div', 'ez-region-size'),
   /** The selected run, drawn by us. The browser stops painting the page's own
    *  selection the moment the composer takes focus, and the run is the subject. */
   selection: el('div', 'ez-selection'),
@@ -283,13 +318,8 @@ function insetToViewport(rect: DOMRect): {
   return { top, left, width: Math.max(0, right - left), height: Math.max(0, bottom - top) }
 }
 
-/** Point mode keeps resolving an element — the anchor is built from it — but draws
- *  nothing for it: the pin is the subject, and a frame plus a label would only
- *  compete with it. */
 function paintHighlight(): void {
-  // A pick is always framing an element, even from point mode: what it is about
-  // to hand over is the element, not a coordinate.
-  if (!highlightTarget || (mode === 'point' && !pick)) {
+  if (!highlightTarget) {
     ui.highlight.style.display = 'none'
     ui.badge.style.display = 'none'
     return
@@ -315,7 +345,7 @@ function paintHighlight(): void {
   // depends on the source path, so both edges have to be resolved before it can
   // be placed.
   ui.badge.style.display = 'block'
-  placeBadge(rect, ui.badge.offsetWidth, ui.badge.offsetHeight)
+  placeBadge(rect, ui.badge.offsetWidth * uiScale, ui.badge.offsetHeight * uiScale)
 }
 
 /** The element a selected run hangs off: what a text annotation anchors to, and
@@ -393,8 +423,12 @@ function paintPopup(): void {
   const popup = ui.popup
   if (!popup || !popupRect) return
   const rect = popupRect()
-  const top = Math.min(rect.bottom + 8, window.innerHeight - popup.offsetHeight - 12)
-  const left = Math.min(Math.max(8, rect.left), window.innerWidth - popup.offsetWidth - 12)
+  // Its drawn size, not its laid-out one: the panel is scaled back up against
+  // the frame's own scale, and it is the drawn box that has to stay on screen.
+  const width = popup.offsetWidth * uiScale
+  const height = popup.offsetHeight * uiScale
+  const top = Math.min(rect.bottom + 8, window.innerHeight - height - 12)
+  const left = Math.min(Math.max(8, rect.left), window.innerWidth - width - 12)
   Object.assign(popup.style, { top: `${Math.max(8, top)}px`, left: `${left}px` })
 }
 
@@ -439,6 +473,7 @@ function closePopup(): void {
   // the annotation and clears this first, so nothing here can delete them.
   ui.popupAttach?.discard()
   ui.popupAttach = null
+  if (ui.popup) post({ type: 'ez:popup', open: false })
   ui.popup?.remove()
   ui.popup = null
   popupRect = null
@@ -452,6 +487,8 @@ function dismiss(): void {
   hoverTarget = null
   moveHighlight(null)
   movePin(null)
+  markedRegion = null
+  paintRegion()
 }
 
 /** Leaving the mode as well as the popup. Staying armed with nothing open would
@@ -474,6 +511,13 @@ function escape(): void {
   // capture phase - ahead of the composer's own key handling - so it has to take
   // the press here or the popup would close out from under an open menu.
   if (ui.popupAttach?.closeSlash()) return
+  // A region drag is a layer of its own: taking back the box the user is mid-way
+  // through drawing must not also take the mode. A pick's drag is left alone -
+  // cancelling the whole pick is what Escape has always meant there.
+  if (!pick && (framing || pendingFrame)) {
+    endFraming()
+    return
+  }
   // A pick is a layer above the popup: taking it back hands the composer straight
   // back, still holding everything typed into it. Checked ahead of the mode
   // because a pick from the note box runs with no mode armed.
@@ -589,6 +633,7 @@ function openPopup(
   popup.setAttribute('data-ez-subject', subject.kind)
   document.body.appendChild(popup)
   ui.popup = popup
+  post({ type: 'ez:popup', open: true })
   popupRect = anchor
   paintPopup()
   // The click painted the highlight before this popup existed, so the label is
@@ -735,23 +780,35 @@ function restoreDraft(draft: DraftWire): void {
 
 function rebuildPopup(draft: DraftWire, subject: DraftSubject, target: Element | null): void {
   restoreView(subject.scroll, target)
+  // A region subject comes back as its drawn box. The element the anchor
+  // resolves to is only how the box got its file:line, and highlighting that
+  // ancestor would read as a pick of it.
+  const box = subject.anchor.contains?.length ? subject.anchor.rect : undefined
   const lines: string[] = []
-  if (!target) lines.push('原本的元素已經不在頁面上，這則標註會用當時的位置送出')
+  if (!target && !box) lines.push('原本的元素已經不在頁面上，這則標註會用當時的位置送出')
   const lost = draftPendingNames(draft.body)
   if (lost.length) lines.push(`上傳中的檔案（${lost.join('、')}）沒有跟著回來，請重新貼一次`)
 
-  moveHighlight(target)
+  moveHighlight(box ? null : target)
+  if (box) {
+    markedRegion = box
+    paintRegion()
+  }
   if (subject.pin) movePin(subject.pin)
   openPopup(
     subject,
-    target ? () => target.getBoundingClientRect() : () => staleRect(subject.anchor.rect),
+    box
+      ? () => regionViewportRect(box)
+      : target
+        ? () => target.getBoundingClientRect()
+        : () => staleRect(subject.anchor.rect),
     (comment, files, refs) =>
       saveAnnotation(subject.kind, target, comment, files, refs, {
         selectedText: subject.selectedText,
         pin: subject.pin,
         // Keeps the recorded viewport too: it says what the user was actually
         // looking at when they framed this, which a repaint would overwrite.
-        ...(target ? {} : { anchor: subject.anchor }),
+        ...(target && !box ? {} : { anchor: subject.anchor }),
       }),
   )
   ui.popupAttach?.restore(draft.body)
@@ -770,6 +827,15 @@ function resolveSelector(selector: string | undefined): Element | null {
   } catch {
     return null
   }
+}
+
+/** Whether this screen is the one an annotation was made on. An annotation from
+ *  before the shell could show several at once carries no device, so it has no
+ *  screen to be kept off and shows wherever it lands. */
+function madeHere(a: AnnotationWire): boolean {
+  if (!scopedToDevice) return true
+  const preset = a.anchor.viewport?.preset
+  return !preset || preset === viewportPreset
 }
 
 /** Viewport coordinates for a marker. A point annotation re-derives its spot from
@@ -791,13 +857,24 @@ function markerPosition(a: AnnotationWire): { top: number; left: number } | null
     if (a.anchor.viewport && window.innerWidth !== a.anchor.viewport.width) return null
     return { top: a.anchor.point.y - window.scrollY, left: a.anchor.point.x - window.scrollX }
   }
+  // A framed region's marker sits on the box the user drew, not on the common
+  // ancestor the anchor resolves to - that can be as wide as the page. The box
+  // is a coordinate, so it only holds inside the layout it was drawn in.
+  if (a.anchor.contains?.length && a.anchor.rect) {
+    if (!a.anchor.viewport || window.innerWidth === a.anchor.viewport.width) {
+      return { top: a.anchor.rect.y - window.scrollY, left: a.anchor.rect.x - window.scrollX }
+    }
+    return live ? { top: live.top, left: live.left } : null
+  }
   return live ? { top: live.top, left: live.left } : null
 }
 
 function renderMarkers(): void {
   ui.markers.textContent = ''
   if (pick) return
-  const relevant = annotations.filter((a) => a.anchor.page === location.pathname)
+  const relevant = annotations.filter(
+    (a) => a.anchor.page === location.pathname && madeHere(a),
+  )
   relevant.forEach((a, i) => {
     const at = markerPosition(a)
     if (!at) return
@@ -1012,8 +1089,7 @@ function refFor(element: Element): RefWire {
 
 function landPick(e: MouseEvent): void {
   if (!pick) return
-  // `e.target`, the way the hover frame resolves it - not `elementFromPoint`,
-  // which point mode needs because a pin is a coordinate. What the user gets has
+  // `e.target`, the way the hover frame resolves it. What the user gets has
   // to be the element the frame was drawn around; anything else hands over
   // something they were not looking at.
   const target =
@@ -1056,11 +1132,14 @@ function pageRect(rect: DOMRect): Region {
 }
 
 function paintRegion(): void {
-  if (!framing) {
+  // The marked box hides for the length of a pick, the way the pin does: the
+  // page underneath is the subject now, and the live drag is the one box a
+  // pick paints.
+  const box = framing ? regionFrom(framing.from, framing.to) : pick ? null : markedRegion
+  if (!box) {
     ui.region.style.display = 'none'
     return
   }
-  const box = regionFrom(framing.from, framing.to)
   Object.assign(ui.region.style, {
     display: 'block',
     top: `${box.y - window.scrollY}px`,
@@ -1068,6 +1147,10 @@ function paintRegion(): void {
     width: `${box.width}px`,
     height: `${box.height}px`,
   })
+  // The readout is drag feedback: once the box has settled, its size is no
+  // longer the question.
+  ui.regionSize.style.display = framing ? 'block' : 'none'
+  if (!framing) return
   ui.regionSize.textContent = `${box.width} × ${box.height}`
   // A box dragged to the bottom of the viewport would push the readout off it.
   // Moved inside only then: outside is where it covers nothing.
@@ -1185,6 +1268,40 @@ function regionRef(box: Region): RefWire {
   return { anchor, label: shortAnchor(anchor) || describe(host) }
 }
 
+/** Viewport rect for a page-coordinate box, re-derived per paint so a popup
+ *  anchored to it tracks the region through scrolls. */
+const regionViewportRect = (box: Region): DOMRect =>
+  new DOMRect(box.x - window.scrollX, box.y - window.scrollY, box.width, box.height)
+
+/** A region-mode drag lands here: the box becomes the subject of an ordinary
+ *  annotation, and stays painted while the popup is open - the user drew the
+ *  box, so the box is what the comment is about, however many elements it
+ *  framed. Swapping it for an element highlight would answer a gesture they
+ *  did not make. Only the anchor sharpens with the count: one element framed
+ *  is its own host, several resolve to their common ancestor, and an empty
+ *  sweep falls back to whatever sits under the box. */
+function openRegionPopup(box: Region): void {
+  const framed = elementsIn(box)
+  const host = commonAncestor(framed) ?? hostAt(centerOf(box)) ?? document.body
+  const text = framedText(framed)
+  const anchor: AnchorWire = {
+    ...buildAnchor(host),
+    // The box the user drew, not the host's rect - same contract as a pick's
+    // region: `rect` with `contains` beside it is only ever that box.
+    rect: box,
+    ...(framed.length ? { contains: framed.map(framedLabel), text: text || undefined } : {}),
+  }
+  markedRegion = box
+  paintRegion()
+  openPopup(
+    { kind: 'element', page: location.pathname, anchor },
+    () => regionViewportRect(box),
+    // The recorded anchor verbatim: the box is the annotation's meaning, and
+    // re-measuring the host at save time would overwrite it.
+    (comment, files, refs) => saveAnnotation('element', null, comment, files, refs, { anchor }),
+  )
+}
+
 /** `abort` means the shell asked, so it is not told again. */
 function cancelPick(reason: 'escape' | 'mode' | 'ended' | 'abort'): void {
   if (!pick) return
@@ -1212,6 +1329,8 @@ function setMode(next: Mode): void {
   // is one the user is still composing in - it must be handed back first, so what
   // gets dropped is a popup they can see.
   cancelPick('mode')
+  // A region drag can be live with no pick out; the mode it belongs to is going.
+  endFraming()
   mode = next
   const root = document.documentElement
   if (next === 'off') root.removeAttribute('data-ez-mode')
@@ -1255,7 +1374,9 @@ function onMouseMove(e: MouseEvent): void {
   if (pick) setModHeld(e.metaKey || e.ctrlKey)
   if (isOwnUi(e.target)) return
   if (pick && !modHeld) return
-  if (!pick && (mode === 'off' || ui.popup)) return
+  // Region mode has no hover frame: the gesture is a sweep over an area, and a
+  // box chasing the cursor would promise an element click that means nothing.
+  if (!pick && (mode === 'off' || mode === 'region' || ui.popup || held)) return
   // A selected run has already named the subject, so the frame stops answering
   // the pointer and sits on the run's own element. Letting it keep chasing would
   // offer a different element than the one the bubble is about to annotate.
@@ -1271,22 +1392,44 @@ function onMouseMove(e: MouseEvent): void {
   }
 }
 
-/** Any left press during a pick may become a box; whether it *is* one is settled
- *  by movement. Under the slop it stays a click - the page's for a plain press,
- *  an element pick for a modified one - so the box costs no click semantics. */
+/** The pointer has left this preview - for another one, or for the shell. The
+ *  hover highlight is the pointer's shadow and has to go with it: left painted,
+ *  every frame the pointer crossed would keep a box of its own, and three boxes
+ *  read as a selection nobody made. A popup's pinned subject and a live text
+ *  selection stay - those mark a choice, not the pointer. */
+function onMouseLeave(): void {
+  if (ui.popup || !hoverTarget) return
+  if (!pick && liveSelectionRange()) return
+  hoverTarget = null
+  moveHighlight(null)
+}
+
+/** Any left press during a pick - or with region mode armed - may become a box;
+ *  whether it *is* one is settled by movement. Under the slop it stays a click,
+ *  so the box costs no click semantics. */
 function onMouseDown(e: MouseEvent): void {
-  if (!pick || e.button !== 0 || isOwnUi(e.target)) return
-  const modified = e.metaKey || e.ctrlKey
-  // A plain press in a typing surface stays the page's whole gesture: dragging
-  // there selects a value to copy. The modifier still frames anywhere.
-  if (!modified && isTyping(e.target)) return
-  // A press on the page's own scrollbar. During a pick scrolling is the way to
-  // reach the element, and a frame growing out of the scrollbar would take it.
+  if (e.button !== 0 || isOwnUi(e.target)) return
+  // A press on the page's own scrollbar. Scrolling is the way to reach the
+  // thing being framed, and a box growing out of the scrollbar would take it.
   const doc = document.documentElement
   if (e.clientX >= doc.clientWidth || e.clientY >= doc.clientHeight) return
-  // Only the modified press is ours from the very first pixel; a plain one must
-  // keep its default so the sub-slop tail still clicks, focuses, selects.
-  if (modified) e.preventDefault()
+  if (pick) {
+    const modified = e.metaKey || e.ctrlKey
+    // A plain press in a typing surface stays the page's whole gesture: dragging
+    // there selects a value to copy. The modifier still frames anywhere.
+    if (!modified && isTyping(e.target)) return
+    // Only the modified press is ours from the very first pixel; a plain one must
+    // keep its default so the sub-slop tail still clicks, focuses, selects.
+    if (modified) e.preventDefault()
+    pendingFrame = pagePoint(e)
+    return
+  }
+  // One annotation is composed at a time across the whole canvas: a popup open
+  // here or in any other frame means this press does not start another.
+  if (mode !== 'region' || ui.popup || held) return
+  // The mode was armed deliberately, so the gesture is ours from the first
+  // pixel - the page never gets a chance to start selecting text under the box.
+  e.preventDefault()
   pendingFrame = pagePoint(e)
 }
 
@@ -1314,40 +1457,29 @@ function onClick(e: MouseEvent): void {
     return
   }
   if (mode === 'off') return
-  if (ui.popup) return
+  if (ui.popup || held) return
+  // In region mode the drag is the gesture. A sub-slop press is a click that
+  // never became a box; it ends here rather than reaching the page - an armed
+  // mode never hands a click through.
+  if (mode === 'region') {
+    e.preventDefault()
+    e.stopPropagation()
+    return
+  }
   const selection = window.getSelection()
   if (selection && !selection.isCollapsed) return // handled by selection bubble
 
-  // In point mode the pin, not the cursor's event target, decides the element:
-  // it is the deepest node actually under the dropped pin.
-  const target =
-    mode === 'point'
-      ? document.elementFromPoint(e.clientX, e.clientY)
-      : e.target instanceof Element
-        ? e.target
-        : null
+  const target = e.target instanceof Element ? e.target : null
   if (!target || isOwnUi(target)) return
   e.preventDefault()
   e.stopPropagation()
 
   moveHighlight(target)
-  if (mode === 'point') {
-    const pin = { x: e.clientX + window.scrollX, y: e.clientY + window.scrollY }
-    movePin(pin)
-    // A pin annotation is about that spot, so the popup hangs off the dot
-    // rather than off the (possibly page-wide) element it resolved to.
-    const atPin = () =>
-      new DOMRect(pin.x - window.scrollX - 6, pin.y - window.scrollY - 6, 12, 12)
-    openPopup(subjectOf('point', target, { pin }), atPin, (comment, files, refs) =>
-      saveAnnotation('point', target, comment, files, refs, { pin }),
-    )
-  } else {
-    openPopup(
-      subjectOf('element', target),
-      () => target.getBoundingClientRect(),
-      (comment, files, refs) => saveAnnotation('element', target, comment, files, refs),
-    )
-  }
+  openPopup(
+    subjectOf('element', target),
+    () => target.getBoundingClientRect(),
+    (comment, files, refs) => saveAnnotation('element', target, comment, files, refs),
+  )
 }
 
 function onMouseUp(e: MouseEvent): void {
@@ -1359,12 +1491,20 @@ function onMouseUp(e: MouseEvent): void {
     // behind this one is what lands it.
     if (!isRegion(box)) return
     swallowClick = true
-    if (pick) deliverPick(regionRef(box))
+    if (pick) {
+      deliverPick(regionRef(box))
+      return
+    }
+    // Re-checked at release, not only at press: a draft restored into this frame
+    // mid-drag has a popup open by now, and opening over it would discard the
+    // uploads it is still holding.
+    if (mode !== 'region' || ui.popup || held) return
+    openRegionPopup(box)
     return
   }
   // Suppressed for the duration of a pick: a plain drag now selects text in the
   // host page, and offering to annotate it would answer a question nobody asked.
-  if (pick || mode === 'off' || ui.popup) return
+  if (pick || mode === 'off' || mode === 'region' || ui.popup || held) return
   setTimeout(() => {
     ui.selectionBubble?.remove()
     ui.selectionBubble = null
@@ -1415,9 +1555,23 @@ function isTyping(target: EventTarget | null): boolean {
  *  teardown mid-scroll would strand those styles on their page. Our own chrome
  *  is exempt so a long comment can still be scrolled inside the field. */
 function onScrollAttempt(e: Event): void {
+  // Mod+wheel is the canvas's, wherever the pointer happens to be: the shell
+  // cannot hear a wheel that lands on this document, so the page's own scroll
+  // is cancelled here and the deltas are handed up to move the stage instead.
+  // Only while framed - in a plain tab there is no stage to hand them to.
+  // By type, not instanceof: an event can cross a realm, a constructor cannot.
+  const w = e.type === 'wheel' ? (e as WheelEvent) : null
+  if (w && (w.metaKey || w.ctrlKey) && window.parent !== window) {
+    e.preventDefault()
+    const unit = w.deltaMode === 1 ? 16 : w.deltaMode === 2 ? window.innerHeight : 1
+    post({ type: 'ez:wheel', dx: w.deltaX * unit, dy: w.deltaY * unit })
+    return
+  }
   // Never during a pick: reaching the element being pointed at is the entire
   // task, and a pick from the note box leaves a live popup on the page.
-  if (pick || !popupLive() || isOwnUi(e.target)) return
+  // A held frame is pinned too: its scroll would be synced into the popup's
+  // frame and drag the page out from under the annotation being written.
+  if (pick || (!popupLive() && !held) || isOwnUi(e.target)) return
   e.preventDefault()
 }
 
@@ -1442,9 +1596,80 @@ function onKeyDown(e: KeyboardEvent): void {
   post({ type: 'ez:key', chord: { key: e.key, metaKey: e.metaKey, ctrlKey: e.ctrlKey } })
 }
 
+/** One message per frame at most: a scroll fires far faster than anything can
+ *  usefully act on, and the other previews only need where it ended up. */
+function onScroll(e: Event): void {
+  scheduleRepaint()
+  // Capture catches an inner element's scroll too, and the document's own
+  // position is the only one the previews share.
+  if (e.target !== document && e.target !== document.documentElement) return
+  cancelAnimationFrame(scrollRaf)
+  scrollRaf = requestAnimationFrame(reportScroll)
+}
+
+function reportScroll(): void {
+  if (following(performance.now(), appliedScrollAt)) return
+  appliedScrollAt = null
+  const range = scrollRange(document.documentElement.scrollHeight, window.innerHeight)
+  const ratio = scrollRatio(window.scrollY, range)
+  if (ratio === null) return
+  post({ type: 'ez:scroll', ratio })
+}
+
+function scrollToRatio(ratio: number): void {
+  const range = scrollRange(document.documentElement.scrollHeight, window.innerHeight)
+  if (range <= 0) return
+  const target = ratio * range
+  if (Math.abs(target - window.scrollY) < 0.5) return
+  appliedScrollAt = performance.now()
+  // `instant` overrides the page's own `scroll-behavior: smooth`. A followed
+  // scroll has to land at once: animated, it would still be firing scroll events
+  // after the quiet window closed, and the frame would report the tail of the
+  // move as a scroll of its own and drag the frame that led it backwards.
+  window.scrollTo({ top: target, left: window.scrollX, behavior: 'instant' })
+}
+
+/** Client-side route changes, which nothing announces on its own.
+ *
+ *  A document navigation re-runs this whole script and reports through
+ *  `ez:ready`. An SPA moving between pages does neither: the shell would go on
+ *  believing the preview sits on the page the session was opened on - so the
+ *  other previews are never brought along, and a reload takes the user back to
+ *  a page they left long ago.
+ *
+ *  History is patched rather than polled because the route change *is* the
+ *  history call; there is no other moment to read, and a DOM mutation is a
+ *  consequence of the route change rather than the thing itself. Both methods
+ *  are called through untouched and keep their own `this`: this document
+ *  belongs to the app, and the overlay is only listening in on it.
+ *
+ *  Pathname only, which is the unit everything else here already speaks -
+ *  annotations are filtered by it and the shell navigates by it. */
+function watchLocation(): void {
+  let page = location.pathname
+  const report = (): void => {
+    if (location.pathname === page) return
+    page = location.pathname
+    post({ type: 'ez:page', page })
+  }
+  const patch = (name: 'pushState' | 'replaceState'): void => {
+    const original = history[name].bind(history)
+    history[name] = (data: unknown, unused: string, url?: string | URL | null): void => {
+      original(data, unused, url)
+      // After the call, so `location` already reads as the page just moved to.
+      report()
+    }
+  }
+  patch('pushState')
+  patch('replaceState')
+  window.addEventListener('popstate', report)
+  window.addEventListener('hashchange', report)
+}
+
 // ---------------------------------------------------------------- boot
 
 function boot(): void {
+  watchLocation()
   ui.region.append(ui.regionSize)
   document.body.append(
     ui.selection,
@@ -1462,6 +1687,10 @@ function boot(): void {
 
   document.addEventListener('mousedown', onMouseDown, true)
   document.addEventListener('mousemove', onMouseMove, true)
+  // On the document itself, uncaptured: mouseleave does not bubble, so this
+  // fires only when the pointer exits the page - not on every element boundary
+  // a capture listener would hear about.
+  document.addEventListener('mouseleave', onMouseLeave)
   document.addEventListener('click', onClick, true)
   document.addEventListener('mouseup', onMouseUp, true)
   document.addEventListener('keydown', onKeyDown, true)
@@ -1478,8 +1707,7 @@ function boot(): void {
   // `passive: false` is the point - a passive listener may not preventDefault.
   document.addEventListener('wheel', onScrollAttempt, { passive: false, capture: true })
   document.addEventListener('touchmove', onScrollAttempt, { passive: false, capture: true })
-  window.addEventListener('scroll', scheduleRepaint, { passive: true, capture: true })
-  window.addEventListener('resize', scheduleRepaint, { passive: true })
+  window.addEventListener('scroll', onScroll, { passive: true, capture: true })
   new MutationObserver(scheduleRepaint).observe(document.body, {
     childList: true,
     subtree: true,
@@ -1491,17 +1719,42 @@ function boot(): void {
       type?: string
       mode?: Mode
       preset?: string
+      zoom?: number
+      scoped?: boolean
+      ratio?: number
       pickId?: string
       host?: 'popup' | 'note'
       returnTo?: string
       draft?: DraftWire
+      held?: boolean
     }
     if (data?.type === 'ez:set-mode') setMode(data.mode ?? 'off')
     if (data?.type === 'ez:escape') escape()
-    if (data?.type === 'ez:viewport') viewportPreset = data.preset
+    if (data?.type === 'ez:viewport') {
+      viewportPreset = data.preset
+      const scoped = Boolean(data.scoped)
+      if (scoped !== scopedToDevice) {
+        scopedToDevice = scoped
+        scheduleRepaint()
+      }
+      setFrameZoom(typeof data.zoom === 'number' ? data.zoom : 1)
+    }
     if (data?.type === 'ez:pick' && data.pickId) {
       armPick(data.host ?? 'note', data.pickId, data.returnTo)
     }
+    if (data?.type === 'ez:hold') {
+      held = Boolean(data.held)
+      if (held) {
+        // A drag can be mid-flight when the hold lands: a draft restored into
+        // another frame opens its popup under the user's hand.
+        endFraming()
+        hoverTarget = null
+        moveHighlight(null)
+        ui.selectionBubble?.remove()
+        ui.selectionBubble = null
+      }
+    }
+    if (data?.type === 'ez:scroll-to' && typeof data.ratio === 'number') scrollToRatio(data.ratio)
     if (data?.type === 'ez:pick-abort') cancelPick('abort')
     if (data?.type === 'ez:restore' && data.draft) restoreDraft(data.draft)
   })

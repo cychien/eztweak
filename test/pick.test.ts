@@ -98,6 +98,7 @@ test('landing on another page navigates back, then restores', () => {
       host: 'popup',
       phase: 'picking',
       armed: true,
+      frame: null,
       draft: draft('/pricing'),
       ref: null,
       page: '/docs',
@@ -210,6 +211,7 @@ test('an app that redirects away from home is chased twice, then given up on', (
       host: 'popup',
       phase: 'returning',
       armed: true,
+      frame: null,
       draft: draft('/pricing'),
       ref: ref('b'),
       page: '/docs',
@@ -276,4 +278,116 @@ test('an expiry for a pick we are not tracking is ignored', () => {
   ])
   assert.equal(state?.id, 'p1')
   assert.deepEqual(effects, [])
+})
+
+// ---------------------------------------------------------------- many frames
+
+// The canvas shows every device at once, so a command typed in the sidebar has
+// no frame of its own: it goes out to all of them and the user's click decides.
+test('a sidebar pick stays out to every frame while they all answer', () => {
+  const { state, effects } = run([
+    { t: 'arm', id: 'p1', host: 'note', now: 0 },
+    { t: 'armed', id: 'p1', host: 'note', now: 1, frame: 'desktop' },
+    { t: 'armed', id: 'p1', host: 'note', now: 1, frame: 'mobile' },
+  ])
+  assert.equal(state?.frame, null, 'saying it is listening is not claiming it')
+  assert.equal(state?.armed, true)
+  assert.deepEqual(effects, [], 'nobody is stood down for answering')
+})
+
+test('the frame that is pointed at takes the pick and stands the others down', () => {
+  const { state, effects } = run([
+    { t: 'arm', id: 'p1', host: 'note', now: 0 },
+    { t: 'armed', id: 'p1', host: 'note', now: 1, frame: 'mobile' },
+    { t: 'picked', id: 'p1', ref: ref('src/b.tsx:8'), page: '/', frame: 'mobile' },
+  ])
+  assert.equal(state, null, 'and the pick is over')
+  assert.deepEqual(effects, [
+    { do: 'insert-note', ref: ref('src/b.tsx:8') },
+    { do: 'disarm-others', id: 'p1', keep: 'mobile' },
+    { do: 'banner', text: null },
+  ])
+})
+
+test('once a frame holds the pick, the others are not listened to', () => {
+  const held: PickState = {
+    id: 'p1',
+    host: 'note',
+    phase: 'picking',
+    armed: true,
+    frame: 'mobile',
+    draft: null,
+    ref: null,
+    page: '/',
+    armedAt: 0,
+    returns: 0,
+  }
+  const stray = reducePick(held, {
+    t: 'picked',
+    id: 'p1',
+    ref: ref('src/other.tsx:2'),
+    page: '/',
+    frame: 'tablet',
+  })
+  assert.equal(stray.state, held, 'the pick is still out')
+  assert.deepEqual(stray.effects, [])
+
+  const own = reducePick(held, {
+    t: 'picked',
+    id: 'p1',
+    ref: ref('src/a.tsx:1'),
+    page: '/',
+    frame: 'mobile',
+  })
+  assert.deepEqual(dos(own.effects), ['insert-note', 'disarm-others', 'banner'])
+})
+
+// Every frame reloads when one of them navigates, so the shell hears `ready`
+// three times. Only the frame the pick is out to may act on it - otherwise the
+// other two spend the return budget and the comment is given up on.
+test('a ready from a frame that does not hold the pick changes nothing', () => {
+  const returning: PickState = {
+    id: 'p1',
+    host: 'popup',
+    phase: 'returning',
+    armed: true,
+    frame: 'mobile',
+    draft: draft('/pricing'),
+    ref: ref('b'),
+    page: '/docs',
+    armedAt: 0,
+    returns: 1,
+  }
+  const other = reducePick(returning, { t: 'ready', page: '/docs', now: 1, frame: 'desktop' })
+  assert.equal(other.state?.returns, 1, 'the budget is untouched')
+  assert.deepEqual(other.effects, [])
+})
+
+test('a pick from an overlay popup belongs to its own frame from the start', () => {
+  const { state, effects } = run([
+    { t: 'armed', id: 'p1', host: 'popup', now: 0, frame: 'tablet' },
+    { t: 'draft', id: 'p1', draft: draft('/pricing'), frame: 'tablet' },
+    { t: 'picked', id: 'p1', ref: ref('src/b.tsx:8'), page: '/docs', frame: 'tablet' },
+  ])
+  assert.equal(state?.frame, 'tablet')
+  assert.deepEqual(effects[0], { do: 'navigate', page: '/pricing', frame: 'tablet' })
+})
+
+test('an abort reaches the frame holding the pick, not all of them', () => {
+  const { effects } = run([
+    { t: 'armed', id: 'p1', host: 'popup', now: 0, frame: 'tablet' },
+    { t: 'abort', reason: 'mode' },
+  ])
+  assert.deepEqual(effects[0], { do: 'abort-overlay', id: 'p1', frame: 'tablet' })
+})
+
+// Nothing has answered yet, so the re-armed frame is the one that reloaded and
+// the other frames stay armed exactly as they were.
+test('a frame that reloads under an unclaimed pick is re-armed on its own', () => {
+  const { state, effects } = run([
+    { t: 'arm', id: 'p1', host: 'note', now: 0 },
+    { t: 'ready', page: '/', now: 10, frame: 'desktop' },
+  ])
+  assert.equal(state?.frame, null, 'still anyone’s to answer')
+  assert.deepEqual(effects[0], { do: 'arm-overlay', id: 'p1', host: 'note', frame: 'desktop' })
 })

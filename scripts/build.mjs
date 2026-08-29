@@ -52,6 +52,7 @@ export const targets = [
   },
 ]
 
+
 export async function buildAll() {
   mkdirSync('dist', { recursive: true })
   await Promise.all(targets.map((t) => build(t.config)))
