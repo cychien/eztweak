@@ -106,6 +106,8 @@ const API = `${PREFIX}/api`
 /** Hoisted above the composer: the command's hint is built while this module is
  *  still initialising, so it cannot live down with the rest of the pick code. */
 const MOD_LABEL = modLabel(navigator.userAgent)
+/** The path the shell was opened on. Only ever the starting point: where the
+ *  previews actually are is `currentPage`, which moves with the app. */
 const PAGE_PATH = new URLSearchParams(location.search).get('path') || '/'
 
 
@@ -698,6 +700,35 @@ function setPopupFrame(next: string | null): void {
  *  where the others already are. */
 let currentPage = PAGE_PATH
 
+/** The live page, written back into the shell's own address bar.
+ *
+ *  Without this a reload is a reload of wherever the session *started*: the
+ *  shell reads its path out of the query string, so an app navigated three
+ *  pages deep comes back to the first one, and the review the user was in the
+ *  middle of is gone. The frames are mounted from `currentPage`, so keeping the
+ *  query string equal to it is the whole mechanism.
+ *
+ *  `replaceState`, never `pushState`: a document navigation inside a preview
+ *  already pushes onto the joint session history, so pushing here too would
+ *  make the browser's back button need two presses for one navigation. */
+function rememberPage(): void {
+  const url = new URL(location.href)
+  if (url.searchParams.get('path') !== currentPage) {
+    url.searchParams.set('path', currentPage)
+    history.replaceState(history.state, '', url)
+  }
+  paintPage()
+}
+
+/** The page as it reads in the header and the tab. Driven from `currentPage`
+ *  rather than from the opening path, and painted here rather than only in
+ *  `render()`: a navigation is not a snapshot, so nothing else would repaint. */
+function paintPage(): void {
+  const origin = snapshot?.targetOrigin.replace(/^https?:\/\//, '') ?? ''
+  target.textContent = `${origin}${currentPage}`
+  document.title = `Review · ${currentPage}`
+}
+
 function mountFrame(id: string, device: Device, into: ParentNode, label: string): Frame {
   const card = h('div', 'ez-card')
   const head = h('div', 'ez-card-head', label)
@@ -750,6 +781,7 @@ function syncPages(from: string): void {
   const page = frames.get(from)?.page
   if (!page || page === currentPage) return
   currentPage = page
+  rememberPage()
   for (const f of frames.values()) {
     if (f.id === from || f.page === page) continue
     navigateFrame(f, page)
@@ -1631,7 +1663,7 @@ function render(): void {
   if (!snapshot) return
   const s = snapshot
 
-  target.textContent = `${s.targetOrigin.replace(/^https?:\/\//, '')}${PAGE_PATH}`
+  paintPage()
 
   const ended = s.state === 'ended'
   // Explicitly, rather than leaving it to the overlay: a pick from the note box
@@ -1777,6 +1809,14 @@ window.addEventListener('message', (e: MessageEvent) => {
       if (f.id !== from) toFrame(f.id, { type: 'ez:set-mode', mode: annotateMode })
     }
   }
+  // A route change with no document load behind it - an SPA moving between
+  // pages. Nothing about the overlay was lost, so unlike `ez:ready` this only
+  // says where the frame now is.
+  if (data?.type === 'ez:page' && data.page) {
+    const f = frames.get(from)
+    if (f) f.page = data.page
+    syncPages(from)
+  }
   if (data?.type === 'ez:ready') {
     const f = frames.get(from)
     if (f) f.page = data.page ?? '/'
@@ -1856,4 +1896,4 @@ events.onmessage = (e) => {
   render()
 }
 
-document.title = `Review · ${PAGE_PATH}`
+paintPage()

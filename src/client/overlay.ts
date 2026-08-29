@@ -1629,9 +1629,47 @@ function scrollToRatio(ratio: number): void {
   window.scrollTo({ top: target, left: window.scrollX, behavior: 'instant' })
 }
 
+/** Client-side route changes, which nothing announces on its own.
+ *
+ *  A document navigation re-runs this whole script and reports through
+ *  `ez:ready`. An SPA moving between pages does neither: the shell would go on
+ *  believing the preview sits on the page the session was opened on - so the
+ *  other previews are never brought along, and a reload takes the user back to
+ *  a page they left long ago.
+ *
+ *  History is patched rather than polled because the route change *is* the
+ *  history call; there is no other moment to read, and a DOM mutation is a
+ *  consequence of the route change rather than the thing itself. Both methods
+ *  are called through untouched and keep their own `this`: this document
+ *  belongs to the app, and the overlay is only listening in on it.
+ *
+ *  Pathname only, which is the unit everything else here already speaks -
+ *  annotations are filtered by it and the shell navigates by it. */
+function watchLocation(): void {
+  let page = location.pathname
+  const report = (): void => {
+    if (location.pathname === page) return
+    page = location.pathname
+    post({ type: 'ez:page', page })
+  }
+  const patch = (name: 'pushState' | 'replaceState'): void => {
+    const original = history[name].bind(history)
+    history[name] = (data: unknown, unused: string, url?: string | URL | null): void => {
+      original(data, unused, url)
+      // After the call, so `location` already reads as the page just moved to.
+      report()
+    }
+  }
+  patch('pushState')
+  patch('replaceState')
+  window.addEventListener('popstate', report)
+  window.addEventListener('hashchange', report)
+}
+
 // ---------------------------------------------------------------- boot
 
 function boot(): void {
+  watchLocation()
   ui.region.append(ui.regionSize)
   document.body.append(
     ui.selection,
