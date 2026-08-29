@@ -99,25 +99,241 @@ button {
 
 /* ---------------------------------------------------------------- stage */
 
-.ez-stage {
+/* The stage, and what floats over it. */
+.ez-stage-wrap {
+  position: relative;
   flex: 1;
   display: flex;
-  justify-content: center;
-  overflow: auto;
   min-width: 0;
 }
 
-/* Device-frame chrome only exists to show where a constrained viewport ends.
-   At full width there is no boundary to show, so the stage goes full-bleed. */
-.ez-stage.ez-constrained {
+/* In the corner of the thing it changes. Hidden with the canvas: which sizes are
+   laid out is not a question a single preview is asking. */
+.ez-shown {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 6;
+}
+
+.ez-shown[data-hidden] {
+  display: none;
+}
+
+.ez-shown-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--muted-foreground);
+  cursor: pointer;
+  box-shadow: 0 1px 3px oklch(0% 0 0 / 0.06);
+  transition:
+    color 0.12s ease,
+    border-color 0.12s ease;
+}
+
+.ez-shown-btn:hover,
+.ez-shown[data-open] .ez-shown-btn {
+  color: var(--foreground);
+  border-color: var(--ink-ghost);
+}
+
+.ez-stage {
+  flex: 1;
+  overflow: auto;
+  min-width: 0;
+  /* Held open so a device that only just fits does not lose its scale the moment
+     a scrollbar arrives, then get it back when the scrollbar leaves. */
+  scrollbar-gutter: stable;
+}
+
+/* Sized to its contents and centred by auto margins rather than by the stage
+   centring it: a flex-centred child wider than its box overflows past the edge
+   the scroll cannot reach, and half the canvas becomes unreachable. Auto margins
+   collapse to zero instead, so everything is always draggable to.
+
+   The rows inside share a left edge. Centring each one against the others put
+   the same page at three different origins, which is the one thing a comparison
+   of widths should not have to correct for by eye. */
+.ez-canvas {
+  width: fit-content;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 26px;
+}
+
+/* Arranged by hand, so shell.ts places every card itself: the canvas becomes a
+   plain coordinate plane, sized inline to the arrangement, and a card moving
+   row never moves in the DOM - re-inserting an iframe reloads the page it is
+   showing. Tops aligned within a row, not centres: the hand-held cards are
+   different heights, and what is being compared is what each one puts at the
+   top of the screen. */
+.ez-stage.ez-multi .ez-canvas {
+  position: relative;
+  display: block;
+  /* Anchored to the stage's own padding rather than centred: an arrangement
+     narrower than the stage would otherwise drift with the window's width, and
+     32px is a promise. */
+  margin: 0;
+}
+
+.ez-stage.ez-multi .ez-card {
+  position: absolute;
+}
+
+/* The label is the handle a card is rearranged by - the screen below it is the
+   page's own. touch-action, or a finger-drag would scroll the stage instead. */
+.ez-stage.ez-multi .ez-card-head {
+  cursor: grab;
+  touch-action: none;
+}
+
+.ez-card.ez-card-drag {
+  z-index: 3;
+  opacity: 0.92;
+  will-change: transform;
+}
+
+/* The lift a drag gives a card. On the screen rather than the card, where the
+   edge already lives; transitioned so it swells on lift and settles on drop. */
+.ez-stage.ez-multi .ez-screen {
+  transition: box-shadow 0.18s ease;
+}
+
+.ez-card.ez-card-drag .ez-screen {
+  box-shadow: 0 18px 44px rgba(23, 23, 23, 0.16);
+}
+
+/* Only while a repaint is settling, and only the transform: positions are laid
+   down instantly and the glide is the pin-back transform releasing (left/top
+   are also written on every resize, and a card must not chase a window edge). */
+.ez-canvas[data-settle] .ez-card {
+  transition: transform 0.22s cubic-bezier(0.2, 0, 0, 1);
+}
+
+/* Where the dragged card would land. Ink, not the mark orange: the chrome is
+   monochrome so that colour keeps meaning "feedback". shell.ts hands it the
+   seam's zero-thickness line; the bar is centred over it here. */
+.ez-drop-hint {
+  position: absolute;
+  z-index: 4;
+  pointer-events: none;
+  background: var(--ink);
+  border-radius: 2px;
+  opacity: 0;
+  transition: opacity 0.1s ease;
+}
+
+.ez-drop-hint[data-on] {
+  opacity: 1;
+}
+
+.ez-drop-hint:not([data-flat]) {
+  width: 3px;
+  transform: translateX(-50%);
+}
+
+.ez-drop-hint[data-flat] {
+  height: 3px;
+  transform: translateY(-50%);
+}
+
+/* Device chrome only exists to show where a device's screen ends. The single
+   desktop view has no boundary to draw - the frame is the whole stage - so it
+   goes full-bleed instead. */
+.ez-stage.ez-framed {
   padding: 16px;
 }
 
+/* Written after `ez-framed`, which the canvas also carries: the last row wants
+   room under it, so the canvas does not end flush against the window. */
+.ez-stage.ez-multi {
+  /* Tight at the top - the first thing on the canvas is a label, which needs
+     far less room above it than a card's edge does - roomy at the sides, so a
+     card scrolled to either end is read against the backdrop rather than the
+     window's edge - and generous at the bottom, so the last row does not end
+     flush against the window. */
+  padding: 28px 32px 44px;
+  cursor: grab;
+}
+
+/* Held on the body, so the cursor does not flicker back the moment the pointer
+   outruns the canvas and crosses a frame or the sidebar. */
+body.ez-panning,
+body.ez-panning .ez-stage,
+body.ez-arranging,
+body.ez-arranging .ez-stage,
+body.ez-arranging .ez-card-head {
+  cursor: grabbing;
+  user-select: none;
+}
+
+/* The page under review must not light up under a pointer that is only passing
+   over it on its way across the canvas. */
+body.ez-panning .ez-frame,
+body.ez-arranging .ez-frame {
+  pointer-events: none;
+}
+
+/* One item on the canvas: the label, and the screen it names. */
+.ez-card {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  flex-shrink: 0;
+}
+
+/* The label is the canvas's own chrome. One device on its own is already named
+   by the control that chose it, so it would only be repeating itself. */
+.ez-stage:not(.ez-multi) .ez-card-head {
+  display: none;
+}
+
+.ez-card-head {
+  font-size: 11.5px;
+  line-height: 1;
+  color: var(--muted-foreground);
+  padding-left: 2px;
+  white-space: nowrap;
+}
+
+/* A frame's scaled footprint. Sized by shell.ts.
+
+   The edge is drawn here, on the unscaled box, so every card wears the same
+   hairline whatever scale its page is shown at - drawn inside the wrap it would
+   thin with the zoom. Content-box, against the file's border-box reset: the box
+   is sized to the page, and the border belongs around that, not to two pixels
+   carved off the viewport it exists to outline. */
+/* An outline, not a border: the box is sized to the device's viewport exactly,
+   and a border would either come out of that viewport or add to the box - and
+   two added pixels are enough to push a fitted frame past the stage and raise a
+   second scrollbar beside the page's own. An outline is drawn outside the box
+   and costs the layout nothing. */
+.ez-framed .ez-screen {
+  border-radius: 10px;
+  outline: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.ez-screen {
+  flex-shrink: 0;
+  position: relative;
+}
+
+/* True device pixels. The scale that fits them into the stage is applied here,
+   so the page inside is still laid out at the size the device would give it -
+   a scaled 375 is 375 to a media query. */
 .ez-frame-wrap {
   width: 100%;
   height: 100%;
-  transition: width 0.2s ease;
-  margin: 0 auto;
+  transform-origin: top left;
 }
 
 .ez-frame {
@@ -126,11 +342,6 @@ button {
   height: 100%;
   border: none;
   background: #fff;
-}
-
-.ez-constrained .ez-frame {
-  border-radius: 12px;
-  box-shadow: 0 4px 24px oklch(14.1% 0.005 285.823 / 0.12);
 }
 
 /* ---------------------------------------------------------------- sidebar */
@@ -368,8 +579,12 @@ button {
   margin-top: 8px;
 }
 
-.ez-viewports {
-  display: flex;
+/* One control with two states: at a size, or at all of them. The raised segment
+   is the one that is on - the same segmented-control language the rest of the
+   shell uses, so which state is live reads at a glance. */
+.ez-seg {
+  display: inline-flex;
+  align-items: center;
   gap: 2px;
   background: var(--muted);
   border-radius: var(--radius);
@@ -378,28 +593,194 @@ button {
   width: fit-content;
 }
 
-.ez-vp-btn {
+.ez-seg-item {
+  display: flex;
+  align-items: center;
+  gap: 0px;
   border: none;
   background: transparent;
   color: var(--muted-foreground);
+  font-family: inherit;
   font-size: 12px;
-  padding: 4px 9px;
   border-radius: 6px;
   cursor: pointer;
+  white-space: nowrap;
   transition: color 0.12s ease;
 }
 
-.ez-vp-btn:not(.ez-on):hover {
+.ez-seg-item:not(.ez-on):hover {
   background: oklch(100% 0 0 / 0.6);
   color: var(--foreground);
 }
 
-.ez-vp-btn.ez-on {
+.ez-seg-item.ez-on {
   background: var(--panel);
   color: var(--foreground);
   font-weight: 600;
   box-shadow: 0 1px 2px oklch(14.1% 0.005 285.823 / 0.1);
 }
+
+.ez-seg-multi {
+  padding: 6px 9px;
+}
+
+.ez-seg-device {
+  position: relative;
+  padding-right: 0;
+}
+
+.ez-seg-label {
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  padding: 6px 3px 6px 9px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+/* Its own hit area beside the name, so the segment can be chosen without the
+   menu being opened. */
+.ez-seg-caret {
+  border: none;
+  background: none;
+  position: relative;
+  display: flex;
+  align-items: center;
+  align-self: stretch;
+  padding: 0 6px;
+  cursor: pointer;
+  color: var(--muted-foreground);
+}
+
+/* The hover mark is inset from the segment's edges rather than filling them: a
+   background flush against the button it sits in reads as a second button
+   welded on rather than a target inside one. The hit area stays the full
+   height - only what is drawn is pulled in.
+
+   The group's own background, borrowed: on the raised segment it reads as a
+   target pressed into it, and it is a colour the header already uses. */
+.ez-seg-caret::before {
+  content: '';
+  position: absolute;
+  inset: 3px 2px;
+  border-radius: 5px;
+  background: transparent;
+  transition: background 0.12s ease;
+}
+
+.ez-seg-caret:hover::before {
+  background: var(--muted);
+}
+
+/* Above the mark, which is absolutely positioned under it. */
+.ez-seg-caret svg {
+  position: relative;
+  pointer-events: none;
+}
+
+/* Hung from the group rather than the chevron, so it lines up with the control
+   it belongs to instead of with the 20px target that opened it. */
+.ez-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 5;
+  min-width: 100%;
+  width: max-content;
+  display: none;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px;
+  border-radius: 10px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  box-shadow:
+    0 12px 32px oklch(0% 0 0 / 0.12),
+    0 2px 8px oklch(0% 0 0 / 0.06);
+}
+
+.ez-seg-device[data-open] .ez-menu,
+.ez-shown[data-open] .ez-menu {
+  display: flex;
+}
+
+/* Dropped from the right, where its button is: a menu hung off the left of a
+   control in the corner would hang off the stage. */
+.ez-menu-right {
+  left: auto;
+  right: 0;
+}
+
+/* Holds the column whether or not there is a tick in it, so the names do not
+   step sideways as boxes are checked. The green is the shell's own - the one it
+   already uses for a thing that is attached and accounted for - and the stroke
+   is drawn heavier than the icon set ships it, because at this size the default
+   reads as a hairline beside 12px text.
+
+   Brighter than the attachment ink it is derived from: that green is weighted to
+   carry text on a fill, and a 12px mark on the panel needs to read as a mark
+   rather than as more writing. */
+.ez-menu-tick {
+  display: flex;
+  width: 14px;
+  color: #3f9e4d;
+  visibility: hidden;
+}
+
+.ez-menu-tick svg * {
+  stroke-width: 3;
+}
+
+.ez-menu-item.ez-on .ez-menu-tick {
+  visibility: visible;
+}
+
+.ez-menu-item[disabled] {
+  cursor: default;
+}
+
+/* The last one on cannot be turned off, and says so by going quiet rather than
+   by refusing a click without explanation. */
+.ez-menu-item[disabled] .ez-menu-name {
+  color: var(--muted-foreground);
+}
+
+.ez-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  border: none;
+  background: transparent;
+  color: var(--foreground);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  text-align: left;
+  padding: 5px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.ez-menu-item:hover:not([disabled]),
+.ez-menu-item:focus-visible {
+  background: var(--muted);
+}
+
+/* Against the row's own highlight, which is the same colour the key sits on when
+   the row is plain: on a highlighted row it would read as a hole rather than a
+   key. */
+.ez-menu-item:hover .ez-kbd,
+.ez-menu-item:focus-visible .ez-kbd {
+  background: var(--panel);
+  color: var(--foreground);
+}
+
+.ez-menu-name {
+  flex: 1;
+}
+
+
 
 /* ---------------------------------------------------------------- buttons */
 

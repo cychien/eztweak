@@ -4,9 +4,10 @@ export const SIDEBAR_DEFAULT = 344
 export const SIDEBAR_MIN = 344
 /** The point past which the column is wider than anything it holds ever needs. */
 export const SIDEBAR_MAX = 480
-/** What the stage keeps for itself, chosen so the widest device preset still
- *  fits with its frame padding: a review shell whose sidebar has crowded out the
- *  app under review is useless. */
+/** What the stage keeps for itself. A device wider than this is scaled down to
+ *  fit rather than cut off, so this is not a width anything has to fit in - it is
+ *  the point below which the preview is too small to review in, and a review
+ *  shell whose sidebar has crowded out the app under review is useless. */
 export const STAGE_MIN = 480
 
 /** Two ceilings, and the drag stops at whichever is lower - but the floor

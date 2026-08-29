@@ -2,12 +2,38 @@
 
 import Cancel01Icon from '@hugeicons/core-free-icons/Cancel01Icon'
 import AlignSelectionIcon from '@hugeicons/core-free-icons/AlignSelectionIcon'
+import ArrowDown01Icon from '@hugeicons/core-free-icons/ArrowDown01Icon'
+import Grid02Icon from '@hugeicons/core-free-icons/Grid02Icon'
+import Tick02Icon from '@hugeicons/core-free-icons/Tick02Icon'
 import CursorMagicSelection02Icon from '@hugeicons/core-free-icons/CursorMagicSelection02Icon'
 import File02Icon from '@hugeicons/core-free-icons/File02Icon'
 import KeyboardIcon from '@hugeicons/core-free-icons/KeyboardIcon'
-import Location01Icon from '@hugeicons/core-free-icons/Location01Icon'
+import Select01Icon from '@hugeicons/core-free-icons/Select01Icon'
 import Navigation03Icon from '@hugeicons/core-free-icons/Navigation03Icon'
 import { attachify } from './attach.js'
+import type { Device, Size } from './devices.js'
+import {
+  CANVAS_GAP,
+  CANVAS_ROW_GAP,
+  CANVAS_DEFAULT,
+  CANVAS_DEVICES,
+  DESKTOP,
+  DEVICES,
+  CANVAS_ZOOM,
+  deviceById,
+  deviceLabel,
+  fitWidth,
+} from './devices.js'
+import {
+  applyMove,
+  defaultLayout,
+  dropTarget,
+  indicatorRect,
+  planCanvas,
+  sanitizeLayout,
+  toggleDevice,
+} from './canvas-layout.js'
+import type { CanvasMetrics, Layout } from './canvas-layout.js'
 import type { DraftWire, RefWire } from './draft.js'
 import { fileMarker, refChipText, refMarker, splitComment } from './draft.js'
 import { modLabel, reducePick } from './pick.js'
@@ -20,7 +46,7 @@ import {
   maxSidebarWidth,
 } from './sidebar-width.js'
 
-type Mode = 'off' | 'element' | 'point'
+type Mode = 'off' | 'element' | 'region'
 
 interface AnnotationWire {
   id: string
@@ -82,11 +108,6 @@ const API = `${PREFIX}/api`
 const MOD_LABEL = modLabel(navigator.userAgent)
 const PAGE_PATH = new URLSearchParams(location.search).get('path') || '/'
 
-const VIEWPORTS: { id: string; label: string; width: number | null }[] = [
-  { id: 'desktop', label: '桌面', width: null },
-  { id: 'tablet', label: '768', width: 768 },
-  { id: 'mobile', label: '390', width: 390 },
-]
 
 const ANNOTATE_MODES: {
   id: Exclude<Mode, 'off'>
@@ -97,17 +118,17 @@ const ANNOTATE_MODES: {
 }[] = [
   {
     id: 'element',
-    label: '框選',
-    hint: '圈選整個元素或反白文字',
+    label: '元素',
+    hint: '點一下元素或反白文字來留言',
     key: 'E',
     svg: CursorMagicSelection02Icon as IconNode,
   },
   {
-    id: 'point',
-    label: '點選',
-    hint: '在頁面上點一下就留言，agent 會自己解析點到的是什麼',
-    key: 'P',
-    svg: Location01Icon as IconNode,
+    id: 'region',
+    label: '範圍',
+    hint: '拖曳框出一塊範圍來留言，框到的元素都會帶給 agent',
+    key: 'R',
+    svg: Select01Icon as IconNode,
   },
 ]
 
@@ -119,7 +140,67 @@ const ITEM_LIMIT = 3
 
 let snapshot: SnapshotWire | null = null
 let annotateMode: Mode = 'off'
-let viewport = 'desktop'
+let deviceId = DESKTOP.id
+/** Every device on one canvas instead of one at a time. */
+let multi = false
+/** Which sizes the canvas shows and where each one sits: rows of device ids,
+ *  top to bottom. Dragged into shape by the user, so it is state of its own
+ *  rather than something the sizes imply. */
+let layout: Layout = defaultLayout(CANVAS_DEVICES.filter((d) => CANVAS_DEFAULT.includes(d.id)))
+
+/** Never empty - the canvas has to be a canvas of something - and in the
+ *  table's own order for the picker; where they sit on the canvas is `layout`'s
+ *  to say. */
+function shownDevices(): Device[] {
+  const on = CANVAS_DEVICES.filter((d) => layout.some((row) => row.includes(d.id)))
+  return on.length ? on : [CANVAS_DEVICES[0]!]
+}
+
+/** Unlike `deviceById`, drawn from everything the canvas can show - the
+ *  portrait tablet is not in the single-view table. */
+const canvasDevice = (id: string): Device =>
+  CANVAS_DEVICES.find((d) => d.id === id) ?? DESKTOP
+
+const canvasLayout = (): Device[][] => layout.map((row) => row.map(canvasDevice))
+
+const VIEW_KEY = 'eztweak:view'
+
+/** The arrangement the shell was left in. A preference only - a stored device
+ *  that no longer exists falls back the way any unknown id does. */
+function loadView(): void {
+  try {
+    const stored = JSON.parse(localStorage.getItem(VIEW_KEY) ?? 'null') as {
+      device?: unknown
+      multi?: unknown
+      shown?: unknown
+      layout?: unknown
+    } | null
+    if (typeof stored?.device === 'string') deviceId = deviceById(stored.device).id
+    multi = Boolean(stored?.multi)
+    const arranged = sanitizeLayout(
+      stored?.layout,
+      CANVAS_DEVICES.map((d) => d.id),
+    )
+    if (arranged) layout = arranged
+    // Sessions from before the canvas could be arranged stored only which
+    // sizes were on; they start on the default packing of those sizes.
+    else if (Array.isArray(stored?.shown)) {
+      const kept = CANVAS_DEVICES.filter((d) => (stored.shown as unknown[]).includes(d.id))
+      if (kept.length) layout = defaultLayout(kept)
+    }
+  } catch {}
+}
+
+function saveView(): void {
+  try {
+    localStorage.setItem(
+      VIEW_KEY,
+      JSON.stringify({ device: deviceId, multi, layout }),
+    )
+  } catch {}
+}
+
+loadView()
 
 const root = document.getElementById('ez-shell')!
 
@@ -164,8 +245,6 @@ interface Shortcut {
 /** Modifier-free letters and digits, because the browser has claimed most of the
  *  useful combinations - Chrome's Cmd+1..9 switch tabs, and Cmd+T/W/R/L/N are
  *  gone. That means guarding against typing rather than leaning on a modifier. */
-const viewportName = (v: (typeof VIEWPORTS)[number]) => (v.width ? `${v.label} 寬度` : v.label)
-
 const plain = (key: string) => (e: KeyChord) =>
   !e.metaKey && !e.ctrlKey && e.key.toLowerCase() === key.toLowerCase()
 const cmd = (key: string) => (e: KeyChord) => (e.metaKey || e.ctrlKey) && e.key === key
@@ -189,12 +268,18 @@ const SHORTCUTS: Shortcut[] = [
     match: plain(m.key),
     run: () => sendMode(annotateMode === m.id ? 'off' : m.id),
   })),
-  ...VIEWPORTS.map((v, i) => ({
+  ...DEVICES.map((d, i) => ({
     keys: String(i + 1),
-    label: viewportName(v),
+    label: deviceLabel(d),
     match: plain(String(i + 1)),
-    run: () => setViewport(v.id),
+    run: () => setDevice(d.id),
   })),
+  {
+    keys: '4',
+    label: '所有尺寸排成一張畫布',
+    match: plain('4'),
+    run: () => setMulti(!multi),
+  },
   {
     keys: 'N',
     label: '寫補充說明',
@@ -309,15 +394,134 @@ document.addEventListener('click', (e) => {
 const headRow = h('div', 'ez-head-row')
 headRow.append(brand, h('div', 'ez-spacer'), keysWrap, agentStatus)
 
-const viewportGroup = h('div', 'ez-viewports')
-VIEWPORTS.forEach((v, i) => {
-  const btn = h('button', 'ez-vp-btn', v.label)
-  btn.title = `${viewportName(v)}（${i + 1}）`
-  btn.dataset.vp = v.id
-  if (v.id === viewport) btn.classList.add('ez-on')
-  btn.onclick = () => setViewport(v.id)
-  viewportGroup.appendChild(btn)
+/** A menu rather than three buttons in a row: one size is on at a time, and the
+ *  other two only matter at the moment of switching. It leaves the header a
+ *  control and a toggle - which size, and whether to see them all at once. */
+/** The name is the segment; the chevron beside it opens the menu. Split, because
+ *  they answer different questions - one says "show a single size", the other
+ *  "which one" - and a menu that opens on the whole segment leaves no way to say
+ *  the first without being asked the second. */
+const deviceName = h('button', 'ez-seg-label')
+deviceName.onclick = () => setDevice(deviceId)
+
+const deviceCaret = h('button', 'ez-seg-caret')
+deviceCaret.append(icon(ArrowDown01Icon as IconNode, 11))
+deviceCaret.setAttribute('aria-haspopup', 'menu')
+deviceCaret.setAttribute('aria-expanded', 'false')
+
+/** Built here rather than as a native `select`: a select's menu is the platform's
+ *  - its own type, its own metrics, its own highlight - and this one has to sit
+ *  in a 12px header beside a segmented control and be read as part of it. */
+const deviceMenu = h('div', 'ez-menu')
+deviceMenu.setAttribute('role', 'menu')
+deviceMenu.setAttribute('aria-label', '預覽尺寸')
+
+const deviceItems = DEVICES.map((d, i) => {
+  const item = h('button', 'ez-menu-item')
+  item.setAttribute('role', 'menuitemradio')
+  item.dataset.device = d.id
+  // The size belongs on the card that is showing it, not in the list of names:
+  // here it is a number nobody is choosing by.
+  // No tick column here, unlike the canvas picker: this is a list of three where
+  // one is on, and the menu opens with that one already under the cursor - a
+  // column of blanks to say so would only push the names off the edge.
+  item.title = deviceLabel(d)
+  item.append(h('span', 'ez-menu-name', d.name), h('kbd', 'ez-kbd', String(i + 1)))
+  item.onclick = () => {
+    closeDeviceMenu()
+    setDevice(d.id)
+  }
+  deviceMenu.appendChild(item)
+  return item
 })
+
+const deviceGroup = h('div', 'ez-seg-item ez-seg-device')
+deviceGroup.append(deviceName, deviceCaret, deviceMenu)
+
+let deviceMenuOpen = false
+
+function paintDeviceMenu(): void {
+  deviceGroup.toggleAttribute('data-open', deviceMenuOpen)
+  deviceCaret.setAttribute('aria-expanded', String(deviceMenuOpen))
+}
+
+function closeDeviceMenu(): void {
+  if (!deviceMenuOpen) return
+  deviceMenuOpen = false
+  paintDeviceMenu()
+}
+
+function openDeviceMenu(): void {
+  if (deviceMenuOpen) return
+  deviceMenuOpen = true
+  paintDeviceMenu()
+  // The one already on, so the arrow keys start from where the user is rather
+  // than from the top of a list they did not choose.
+  deviceItems.find((i) => i.dataset.device === deviceId)?.focus()
+}
+
+// Opening the menu decides nothing - looking at the sizes on offer is not
+// choosing one. Picking a row is, and `setDevice` leaves the canvas whichever
+// row it is, so the size already named still gets you back.
+deviceCaret.onclick = () => {
+  if (deviceMenuOpen) closeDeviceMenu()
+  else openDeviceMenu()
+}
+
+/** Arrows walk the list, Escape puts it away and hands focus back to the button
+ *  that opened it. Held on the menu, so it only applies while one is open. */
+deviceMenu.addEventListener('keydown', (e) => {
+  const at = deviceItems.indexOf(document.activeElement as HTMLButtonElement)
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    const step = e.key === 'ArrowDown' ? 1 : -1
+    deviceItems[(at + step + deviceItems.length) % deviceItems.length]?.focus()
+    e.preventDefault()
+    return
+  }
+  if (e.key === 'Escape') {
+    closeDeviceMenu()
+    deviceCaret.focus()
+    e.preventDefault()
+  }
+})
+
+/** A click anywhere else, and a move of focus out of the group - a menu that
+ *  outlives either is one the user has already left. */
+document.addEventListener('click', (e) => {
+  if (e.target instanceof Node && !deviceGroup.contains(e.target)) closeDeviceMenu()
+})
+
+deviceGroup.addEventListener('focusout', (e) => {
+  const to = e.relatedTarget
+  if (to instanceof Node && deviceGroup.contains(to)) return
+  closeDeviceMenu()
+})
+
+const multiBtn = h('button', 'ez-seg-item ez-seg-multi', '全部尺寸')
+multiBtn.title = '所有尺寸排成一張畫布，拖曳背景移動（4）'
+multiBtn.onclick = () => setMulti(!multi)
+
+/** One control, two ways to be: at a size, or at all of them. A group rather
+ *  than a menu with a button beside it, because those are the two states of one
+ *  question - and which of them is on has to be readable without going looking
+ *  for a pressed button. */
+const deviceRow = h('div', 'ez-seg')
+deviceRow.append(deviceGroup, multiBtn)
+
+function paintControls(): void {
+  const device = deviceById(deviceId)
+  deviceName.textContent = device.name
+  deviceName.title = `${deviceLabel(device)}（1 / 2 / 3）`
+  deviceCaret.title = '換一個尺寸'
+  for (const item of deviceItems) {
+    item.setAttribute('aria-checked', String(!multi && item.dataset.device === deviceId))
+    item.classList.toggle('ez-on', !multi && item.dataset.device === deviceId)
+  }
+  deviceGroup.classList.toggle('ez-on', !multi)
+  multiBtn.classList.toggle('ez-on', multi)
+  multiBtn.setAttribute('aria-pressed', String(multi))
+  paintShown()
+}
 
 const annotateGroup = h('div', 'ez-annotate-group')
 const annotateBtns = ANNOTATE_MODES.map((m) => {
@@ -330,17 +534,360 @@ const annotateBtns = ANNOTATE_MODES.map((m) => {
 })
 
 const sideHead = h('div', 'ez-side-head')
-sideHead.append(headRow, target, viewportGroup, annotateGroup)
+sideHead.append(headRow, target, deviceRow, annotateGroup)
 
 const banner = h('div', 'ez-banner')
 banner.style.display = 'none'
 
+/** The stage and what floats over it. The picker cannot live inside the stage:
+ *  that scrolls, and a control that scrolls away with the canvas is one you have
+ *  to drag back to before you can use it. */
+const stageWrap = h('div', 'ez-stage-wrap')
 const stage = h('div', 'ez-stage')
-const frameWrap = h('div', 'ez-frame-wrap')
-const iframe = h('iframe', 'ez-frame')
-iframe.src = PAGE_PATH
-frameWrap.appendChild(iframe)
-stage.appendChild(frameWrap)
+/** What the frames sit on, and what the stage scrolls. Its own element rather
+ *  than the stage itself: it is sized to its contents and centred, so a canvas
+ *  wider than the stage overflows in the one direction the stage can scroll to
+ *  reach, instead of being centred half-way out of view. */
+const canvas = h('div', 'ez-canvas')
+stage.appendChild(canvas)
+
+/** Which sizes the canvas shows. Its own control, in the corner of the thing it
+ *  changes rather than up in the header: what is on the canvas is a property of
+ *  the canvas, and the header is already carrying the one question of whether to
+ *  be on it at all. */
+const shownBtn = h('button', 'ez-shown-btn')
+shownBtn.append(icon(Grid02Icon as IconNode, 14))
+shownBtn.title = '選擇畫布上要顯示的尺寸'
+shownBtn.setAttribute('aria-label', '選擇畫布上要顯示的尺寸')
+shownBtn.setAttribute('aria-haspopup', 'menu')
+shownBtn.setAttribute('aria-expanded', 'false')
+
+const shownMenu = h('div', 'ez-menu ez-menu-right')
+shownMenu.setAttribute('role', 'menu')
+shownMenu.setAttribute('aria-label', '畫布上的尺寸')
+
+const shownItems = CANVAS_DEVICES.map((d) => {
+  const item = h('button', 'ez-menu-item')
+  item.setAttribute('role', 'menuitemcheckbox')
+  item.dataset.device = d.id
+  item.title = deviceLabel(d)
+  const tick = h('span', 'ez-menu-tick')
+  tick.append(icon(Tick02Icon as IconNode, 14))
+  item.append(tick, h('span', 'ez-menu-name', d.name))
+  item.onclick = () => toggleShown(d.id)
+  shownMenu.appendChild(item)
+  return item
+})
+
+const shownWrap = h('div', 'ez-shown')
+shownWrap.append(shownBtn, shownMenu)
+stageWrap.append(stage, shownWrap)
+
+let shownMenuOpen = false
+
+function paintShown(): void {
+  shownWrap.toggleAttribute('data-open', shownMenuOpen)
+  shownWrap.toggleAttribute('data-hidden', !multi)
+  shownBtn.setAttribute('aria-expanded', String(shownMenuOpen))
+  const on = shownDevices()
+  for (const item of shownItems) {
+    const checked = on.some((d) => d.id === item.dataset.device)
+    item.setAttribute('aria-checked', String(checked))
+    item.classList.toggle('ez-on', checked)
+    // The last one on cannot be turned off: an empty canvas is not a view of
+    // anything, and the way back from one is not obvious.
+    item.toggleAttribute('disabled', checked && on.length === 1)
+  }
+}
+
+/** Adds or removes just the one frame rather than rebuilding the stage: the
+ *  other previews are live pages, and remounting an iframe reloads it. */
+function toggleShown(id: string): void {
+  const next = toggleDevice(layout, id)
+  if (next === layout) return
+  layout = next
+  saveView()
+  paintShown()
+  if (!multi) return
+  const mounted = frames.get(id)
+  if (mounted) {
+    // A pick could be armed in the frame about to go; adding one cannot strand
+    // anything, so only removal calls it off.
+    abortPick('mode')
+    mounted.card.remove()
+    frames.delete(id)
+    if (popupFrame === id) setPopupFrame(null)
+  } else {
+    const device = canvasDevice(id)
+    // Assembled off the document and dressed before it joins: an absolutely
+    // positioned card with no left/top yet sits at the canvas origin, and a
+    // paint slipping in there would flash a blank frame over the first card.
+    const holder = document.createDocumentFragment()
+    const frame = mountFrame(id, device, holder, deviceLabel(device))
+    const placed = planCanvas(canvasLayout(), canvasMetrics()).cards.find((c) => c.id === id)
+    if (placed) {
+      frame.card.style.left = `${placed.x}px`
+      frame.card.style.top = `${placed.y}px`
+    }
+    paintFrame(frame, device, device.height, CANVAS_ZOOM, false)
+    canvas.appendChild(holder)
+  }
+  settleFrames()
+}
+
+shownBtn.onclick = () => {
+  shownMenuOpen = !shownMenuOpen
+  paintShown()
+}
+
+document.addEventListener('click', (e) => {
+  if (e.target instanceof Node && !shownWrap.contains(e.target) && shownMenuOpen) {
+    shownMenuOpen = false
+    paintShown()
+  }
+})
+
+shownWrap.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape' || !shownMenuOpen) return
+  shownMenuOpen = false
+  paintShown()
+  shownBtn.focus()
+  e.preventDefault()
+})
+
+/** One mounted preview of the app. Single mode holds one of these; showing
+ *  several sizes at once holds one per device. Everything the shell says to a
+ *  preview goes through the registry, so neither arrangement gets a code path
+ *  of its own. */
+interface Frame {
+  id: string
+  /** Label and screen together - what the canvas lays out as one item. */
+  card: HTMLElement
+  /** Laid out at the scaled size, so the stage lays frames out in the space
+   *  they actually occupy. Everything the scale would blur - the card's shadow,
+   *  its rounded corners - belongs on this one, not on the wrap it scales. */
+  box: HTMLElement
+  /** Sized at the device's true pixels and scaled as a whole, which is what
+   *  keeps a scaled 390 still 390 to a media query inside. */
+  wrap: HTMLElement
+  iframe: HTMLIFrameElement
+  device: Device
+  zoom: number
+  /** Last page this frame reported being on, so the sync can tell which frames
+   *  have somewhere to go and which are already there. */
+  page: string
+}
+
+const SINGLE = 'single'
+const frames = new Map<string, Frame>()
+
+/** The frame with an annotation popup open, if any. One annotation is composed
+ *  at a time across the whole canvas: while it is open every other frame is
+ *  held - no highlight, no selection bubble, no second popup. */
+let popupFrame: string | null = null
+
+function setPopupFrame(next: string | null): void {
+  popupFrame = next
+  for (const f of frames.values()) {
+    if (f.id !== next) toFrame(f.id, { type: 'ez:hold', held: next !== null })
+  }
+}
+
+/** Where the previews actually are. The path the shell was opened on goes stale
+ *  the moment the app navigates, and a frame mounted after that has to start
+ *  where the others already are. */
+let currentPage = PAGE_PATH
+
+function mountFrame(id: string, device: Device, into: ParentNode, label: string): Frame {
+  const card = h('div', 'ez-card')
+  const head = h('div', 'ez-card-head', label)
+  head.title = '拖曳調整排列'
+  const box = h('div', 'ez-screen')
+  const wrap = h('div', 'ez-frame-wrap')
+  const iframe = h('iframe', 'ez-frame')
+  iframe.src = currentPage
+  iframe.title = label
+  wrap.appendChild(iframe)
+  box.appendChild(wrap)
+  card.append(head, box)
+  into.appendChild(card)
+  // Zoom starts at 0 rather than 1 so the first paint always announces itself
+  // to the overlay, whatever it settles on.
+  const frame: Frame = { id, card, box, wrap, iframe, device, zoom: 0, page: currentPage }
+  frames.set(id, frame)
+  head.addEventListener('pointerdown', (e) => beginCardDrag(e, frame))
+  return frame
+}
+
+/** The frame a message came from, or null for anything else that posted at us -
+ *  an iframe of the app's own, most of the time. */
+function frameIdOf(source: MessageEventSource | null): string | null {
+  if (!source) return null
+  for (const f of frames.values()) if (f.iframe.contentWindow === source) return f.id
+  return null
+}
+
+function toFrame(id: string, message: Record<string, unknown>): void {
+  frames.get(id)?.iframe.contentWindow?.postMessage(message, location.origin)
+}
+
+function broadcast(message: Record<string, unknown>): void {
+  for (const f of frames.values()) f.iframe.contentWindow?.postMessage(message, location.origin)
+}
+
+/** `replace`, not `iframe.src`: assigning src pushes an entry onto the joint
+ *  session history and poisons the browser's own back button. */
+function navigateFrame(frame: Frame, page: string): void {
+  frame.page = page
+  frame.iframe.contentWindow?.location.replace(page)
+}
+
+/** Every preview shows the same page. Annotations are filtered by path, so
+ *  frames left on different pages would be three separate reviews wearing one
+ *  set of controls. Recording the destination before asking for it is what
+ *  stops the answering `ez:ready` from bouncing the navigation back. */
+function syncPages(from: string): void {
+  const page = frames.get(from)?.page
+  if (!page || page === currentPage) return
+  currentPage = page
+  for (const f of frames.values()) {
+    if (f.id === from || f.page === page) continue
+    navigateFrame(f, page)
+  }
+}
+
+/** What the stage has to give a frame, inside its own padding. */
+function stageBox(): Size {
+  const cs = getComputedStyle(stage)
+  return {
+    width: stage.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight),
+    height: stage.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom),
+  }
+}
+
+/** `fluid` is the single desktop view, which has no device box to draw: the
+ *  user's own monitor is the desktop, so the frame simply takes the stage. */
+function paintFrame(
+  frame: Frame,
+  device: Device,
+  height: number,
+  zoom: number,
+  fluid: boolean,
+): void {
+  const { card, box, wrap } = frame
+  card.style.width = fluid ? '100%' : ''
+  card.style.height = fluid ? '100%' : ''
+  box.style.width = fluid ? '100%' : `${Math.round(device.width * zoom)}px`
+  box.style.height = fluid ? '100%' : `${Math.round(height * zoom)}px`
+  wrap.style.width = fluid ? '100%' : `${device.width}px`
+  wrap.style.height = fluid ? '100%' : `${height}px`
+  wrap.style.transform = fluid || zoom === 1 ? '' : `scale(${zoom})`
+  const applied = fluid ? 1 : zoom
+  // Only on a real change: this runs on every pointer move of a sidebar drag,
+  // and the overlay counter-scales its own chrome off the back of it.
+  if (frame.device.id !== device.id || frame.zoom !== applied) {
+    frame.device = device
+    frame.zoom = applied
+    toFrame(frame.id, { type: 'ez:viewport', preset: device.id, zoom: applied, scoped: multi })
+  }
+}
+
+function paintFrames(): void {
+  if (multi) {
+    const plan = planCanvas(canvasLayout(), canvasMetrics())
+    canvas.style.width = `${plan.width}px`
+    canvas.style.height = `${plan.height}px`
+    for (const placed of plan.cards) {
+      const frame = frames.get(placed.id)
+      if (!frame) continue
+      frame.card.style.left = `${placed.x}px`
+      frame.card.style.top = `${placed.y}px`
+      const d = canvasDevice(placed.id)
+      paintFrame(frame, d, d.height, CANVAS_ZOOM, false)
+    }
+    return
+  }
+  const frame = frames.get(SINGLE)
+  if (!frame) return
+  const device = deviceById(deviceId)
+  const fluid = Boolean(device.fluid)
+  // The single desktop view has no card to centre - it is the stage - so the
+  // canvas gets out of the way and hands the whole box to the frame.
+  canvas.style.width = fluid ? '100%' : ''
+  canvas.style.height = fluid ? '100%' : ''
+  const box = stageBox()
+  const zoom = fluid ? 1 : fitWidth(device.width, box.width)
+  // The stage's height, in the frame's own pixels: one size on its own gets the
+  // whole screen to show the page in, and only the width is the device's.
+  paintFrame(frame, device, zoom > 0 ? box.height / zoom : device.height, zoom, fluid)
+}
+
+/** A repaint the cards glide through instead of jumping to.
+ *
+ *  Measured in screen coordinates, not the canvas's own: the repaint can shrink
+ *  the canvas, and a stage scrolled near its end then clamps, shifting every
+ *  card on screen at once. Transitioning left/top would start the glide from
+ *  where the card used to be in the canvas, not where the user last saw it -
+ *  so each card is measured before and after, pinned back on its old screen
+ *  position with a transform, and released. The timer restarts with each call
+ *  so an early one cannot cut a later glide short. */
+let settleTimer = 0
+function settleFrames(): void {
+  clearTimeout(settleTimer)
+  canvas.removeAttribute('data-settle')
+  const before = new Map<string, DOMRect>()
+  for (const f of frames.values()) before.set(f.id, f.card.getBoundingClientRect())
+  for (const f of frames.values()) f.card.style.transform = ''
+  paintFrames()
+  const moved: Frame[] = []
+  for (const f of frames.values()) {
+    const was = before.get(f.id)
+    if (!was) continue
+    const now = f.card.getBoundingClientRect()
+    const dx = was.x - now.x
+    const dy = was.y - now.y
+    if (!dx && !dy) continue
+    f.card.style.transform = `translate3d(${dx}px, ${dy}px, 0)`
+    moved.push(f)
+  }
+  if (!moved.length) return
+  // The reflow between pinning and releasing, so the glide has a start to run
+  // from rather than both writes collapsing into one.
+  void canvas.offsetWidth
+  canvas.setAttribute('data-settle', '')
+  for (const f of moved) f.card.style.transform = ''
+  settleTimer = window.setTimeout(() => canvas.removeAttribute('data-settle'), 240)
+}
+
+/** `ez-framed` is device chrome on show - a card with an edge, and room around
+ *  it for that edge to be seen. The single desktop view has neither: there is no
+ *  boundary to draw when the frame is the whole stage. */
+function paintStageClasses(): void {
+  stage.classList.toggle('ez-multi', multi)
+  stage.classList.toggle('ez-framed', multi || !deviceById(deviceId).fluid)
+}
+
+/** Switching between one device and all of them replaces the frames, so a pick
+ *  still out is called off first: the overlay holding it is about to go. */
+function rebuildStage(): void {
+  abortPick('mode')
+  popupFrame = null
+  canvas.replaceChildren()
+  frames.clear()
+  if (multi) {
+    for (const row of canvasLayout()) {
+      for (const d of row) mountFrame(d.id, d, canvas, deviceLabel(d))
+    }
+  } else {
+    const device = deviceById(deviceId)
+    mountFrame(SINGLE, device, canvas, deviceLabel(device))
+  }
+  paintFrames()
+}
+
+paintControls()
+paintStageClasses()
+rebuildStage()
 
 const sidebar = h('aside', 'ez-sidebar')
 const queueSection = h('section', 'ez-section ez-queue-section')
@@ -393,7 +940,240 @@ resizer.setAttribute('aria-label', '調整側邊欄寬度')
 resizer.title = '拖曳調整寬度，雙擊還原'
 
 sidebar.append(resizer, sideHead, banner, convSection, queueSection)
-root.append(stage, sidebar)
+root.append(stageWrap, sidebar)
+
+// ---------------------------------------------------------------- panning
+
+/** Dragged by its background, because the frames are the app under review: a
+ *  press inside one is the page's own and never reaches this document at all.
+ *  What is left - the backdrop, the gaps, the card labels - is the canvas, and
+ *  dragging any of it moves the view.
+ *
+ *  Scroll position rather than a transform of its own: the wheel, the trackpad
+ *  and the scrollbars then all move the same thing, and nothing can be dragged
+ *  somewhere it cannot be dragged back from. */
+stage.addEventListener('pointerdown', (e) => {
+  if (e.button !== 0) return
+  const panX = stage.scrollWidth - stage.clientWidth
+  const panY = stage.scrollHeight - stage.clientHeight
+  if (panX <= 0 && panY <= 0) return
+  const startX = e.clientX
+  const startY = e.clientY
+  const startLeft = stage.scrollLeft
+  const startTop = stage.scrollTop
+  // Capture, so the drag survives the pointer crossing a frame - which is most
+  // of the canvas, and which would otherwise swallow every move.
+  stage.setPointerCapture(e.pointerId)
+  document.body.classList.add('ez-panning')
+  const move = (ev: PointerEvent) => {
+    stage.scrollLeft = startLeft - (ev.clientX - startX)
+    stage.scrollTop = startTop - (ev.clientY - startY)
+  }
+  stage.addEventListener('pointermove', move)
+  stage.addEventListener(
+    'lostpointercapture',
+    () => {
+      stage.removeEventListener('pointermove', move)
+      document.body.classList.remove('ez-panning')
+    },
+    { once: true },
+  )
+})
+
+// ---------------------------------------------------------------- arranging
+
+/** The label's share of a card - what the row geometry has to add above every
+ *  screen. Measured off a mounted card, because it is the label's line height
+ *  plus the card's own gap and neither belongs in two places; before anything
+ *  is on screen the number only has to be close, and the first real paint
+ *  corrects it. */
+function cardHead(): number {
+  for (const f of frames.values()) {
+    const head = f.box.offsetTop
+    if (head > 0) return head
+  }
+  return 19
+}
+
+function canvasMetrics(): CanvasMetrics {
+  return { gap: CANVAS_GAP, rowGap: CANVAS_ROW_GAP, head: cardHead() }
+}
+
+/** Where a dragged card would land: an upright bar in the gap between two
+ *  cards, a flat one across the seam between two rows. Appended for the drag
+ *  and taken out after, so `rebuildStage` never has to know about it. */
+const dropHint = h('div', 'ez-drop-hint')
+
+/** A press is a drag only once it has moved this far, so a slipped click on a
+ *  label does not twitch the card. */
+const DRAG_SLOP = 4
+/** How close to a seam still counts as "a new row here" rather than a slot in
+ *  the row beside it. Wider than the gap itself, which would be a needle to
+ *  thread with a card in hand. */
+const ROW_SNAP = 30
+/** The stage scrolls itself while a drag leans on its edge: the canvas is
+ *  routinely taller than the window, and the far rows have to be reachable
+ *  without putting the card down to scroll. The speed ramps with how far into
+ *  the band the pointer is, so the scroll eases in instead of lurching. */
+const PAN_EDGE = 44
+const PAN_SPEED = 18
+
+/** Cards are dragged by their labels - a press inside the screen belongs to
+ *  the page - and land in the slots the canvas offers: top-aligned in a row,
+ *  or as a row of their own. The card is moved with a transform and the drop
+ *  only rewrites `layout`, so the iframe is never re-mounted and the page
+ *  inside keeps whatever it was doing. */
+function beginCardDrag(e: PointerEvent, frame: Frame): void {
+  if (!multi || e.button !== 0) return
+  e.preventDefault()
+  // The stage would otherwise read the same press as the start of a pan.
+  e.stopPropagation()
+  const handle = e.currentTarget as HTMLElement
+  handle.setPointerCapture(e.pointerId)
+  const startX = e.clientX
+  const startY = e.clientY
+  let clientX = startX
+  let clientY = startY
+  // Where inside the card it was picked up, so it can be glued back under the
+  // pointer whatever the stage scrolls to underneath.
+  const grabbed = frame.card.getBoundingClientRect()
+  const grabX = startX - grabbed.left
+  const grabY = startY - grabbed.top
+  let dragging = false
+  let cancelled = false
+  let landing: Layout | null = null
+  let raf = 0
+
+  // Everything the per-frame work needs, read once at lift: nothing here can
+  // change under a drag, and reading it back out of the DOM sixty times a
+  // second buys nothing but reflows. The canvas's client position is the one
+  // thing that does move - by exactly what the stage scrolls - so it is
+  // carried forward from the scroll offsets instead of remeasured.
+  const rows = canvasLayout()
+  const metrics = canvasMetrics()
+  let homeX = 0
+  let homeY = 0
+  let originX = 0
+  let originY = 0
+  let scrollX = 0
+  let scrollY = 0
+  let stageEdge: DOMRect
+  // The hint only rewrites its styles when the target actually changes;
+  // repainting the same line every frame is churn the compositor notices.
+  let drawn = ''
+
+  const follow = () => {
+    const x = clientX - (originX - (stage.scrollLeft - scrollX))
+    const y = clientY - (originY - (stage.scrollTop - scrollY))
+    // translate3d, so the card gets a compositor layer of its own and the
+    // iframe inside is not repainted on every move.
+    frame.card.style.transform = `translate3d(${x - grabX - homeX}px, ${y - grabY - homeY}px, 0)`
+    const target = dropTarget(rows, metrics, { x, y }, ROW_SNAP)
+    const next = applyMove(layout, frame.id, target)
+    if (next === layout) {
+      // A drop that changes nothing gets no hint: the line is a promise.
+      landing = null
+      drawn = ''
+      dropHint.removeAttribute('data-on')
+      return
+    }
+    landing = next
+    const line = indicatorRect(rows, metrics, target, { x, y })
+    // A flat line follows the pointer between columns, so the key is the line
+    // itself rather than the target.
+    const key = `${line.x}:${line.y}:${line.width}:${line.height}`
+    if (key === drawn) return
+    drawn = key
+    dropHint.setAttribute('data-on', '')
+    dropHint.toggleAttribute('data-flat', line.height === 0)
+    dropHint.style.left = `${line.x}px`
+    dropHint.style.top = `${line.y}px`
+    dropHint.style.width = line.width ? `${line.width}px` : ''
+    dropHint.style.height = line.height ? `${line.height}px` : ''
+  }
+
+  /** Full speed only at the band's outer edge, a crawl at its inner one. */
+  const creep = (depth: number) => Math.round(PAN_SPEED * Math.min(1, depth / PAN_EDGE))
+
+  const tick = () => {
+    let dx = 0
+    let dy = 0
+    if (clientX < stageEdge.left + PAN_EDGE) dx = -creep(stageEdge.left + PAN_EDGE - clientX)
+    else if (clientX > stageEdge.right - PAN_EDGE) dx = creep(clientX - stageEdge.right + PAN_EDGE)
+    if (clientY < stageEdge.top + PAN_EDGE) dy = -creep(stageEdge.top + PAN_EDGE - clientY)
+    else if (clientY > stageEdge.bottom - PAN_EDGE) dy = creep(clientY - stageEdge.bottom + PAN_EDGE)
+    if (dx) stage.scrollLeft += dx
+    if (dy) stage.scrollTop += dy
+    // Every frame, not just after a move: edge-scrolling and the wheel both
+    // slide the canvas under a pointer that is standing still.
+    follow()
+    raf = requestAnimationFrame(tick)
+  }
+
+  const onKey = (ev: KeyboardEvent) => {
+    if (ev.key !== 'Escape') return
+    ev.preventDefault()
+    ev.stopPropagation()
+    cancelled = true
+    // Releasing the capture is the one exit: putting down runs off its loss.
+    handle.releasePointerCapture(e.pointerId)
+  }
+
+  const lift = () => {
+    dragging = true
+    homeX = frame.card.offsetLeft
+    homeY = frame.card.offsetTop
+    const origin = canvas.getBoundingClientRect()
+    originX = origin.left
+    originY = origin.top
+    scrollX = stage.scrollLeft
+    scrollY = stage.scrollTop
+    stageEdge = stage.getBoundingClientRect()
+    document.body.classList.add('ez-arranging')
+    frame.card.classList.add('ez-card-drag')
+    canvas.appendChild(dropHint)
+    document.addEventListener('keydown', onKey, true)
+    raf = requestAnimationFrame(tick)
+  }
+
+  const putDown = () => {
+    cancelAnimationFrame(raf)
+    // One last look with the final coordinates: a flick can land its pointerup
+    // before the frame that would have caught up with it.
+    if (!cancelled) follow()
+    document.removeEventListener('keydown', onKey, true)
+    document.body.classList.remove('ez-arranging')
+    frame.card.classList.remove('ez-card-drag')
+    dropHint.removeAttribute('data-on')
+    dropHint.remove()
+    if (!cancelled && landing) {
+      layout = landing
+      saveView()
+    }
+    // The card glides from wherever it was let go into its slot - the old one
+    // when the drop changed nothing. Its drag transform is left standing: it is
+    // the screen position the glide has to start from.
+    settleFrames()
+  }
+
+  // Only records where the pointer is; the work runs once per frame in `tick`,
+  // however many moves the frame collected.
+  const move = (ev: PointerEvent) => {
+    clientX = ev.clientX
+    clientY = ev.clientY
+    if (!dragging && Math.hypot(clientX - startX, clientY - startY) >= DRAG_SLOP) lift()
+  }
+
+  handle.addEventListener('pointermove', move)
+  handle.addEventListener(
+    'lostpointercapture',
+    () => {
+      handle.removeEventListener('pointermove', move)
+      if (dragging) putDown()
+    },
+    { once: true },
+  )
+}
 
 // ---------------------------------------------------------------- sidebar width
 
@@ -416,6 +1196,9 @@ function paintSidebarWidth(): void {
   sidebar.style.width = `${width}px`
   resizer.setAttribute('aria-valuenow', String(width))
   resizer.setAttribute('aria-valuemax', String(maxSidebar()))
+  // The stage is what is left over, so its share - and the scale a device has to
+  // be shown at to fit in it - moves with every one of these.
+  paintFrames()
 }
 
 function setSidebarWidth(width: number): void {
@@ -432,7 +1215,10 @@ function persistSidebarWidth(): void {
 }
 
 paintSidebarWidth()
-addEventListener('resize', paintSidebarWidth)
+addEventListener('resize', () => {
+  paintSidebarWidth()
+  paintFrames()
+})
 
 
 resizer.addEventListener('pointerdown', (e) => {
@@ -476,17 +1262,13 @@ function sendMode(mode: Mode): void {
   // A pick and a mode change cannot both be in flight: `setMode` in the overlay
   // tears the popup down, and the pick is what would be answering into it.
   abortPick('mode')
-  iframe.contentWindow?.postMessage({ type: 'ez:set-mode', mode }, location.origin)
+  broadcast({ type: 'ez:set-mode', mode })
 }
 
 // ---------------------------------------------------------------- picking
 
 let pickState: PickState | null = null
 let pickSeq = 0
-
-function toFrame(message: Record<string, unknown>): void {
-  iframe.contentWindow?.postMessage(message, location.origin)
-}
 
 /** What the note box shows while the user is off pointing at something. */
 const PICKING_LABEL = '選取中…'
@@ -506,6 +1288,13 @@ function dispatchPick(e: PickEvent): void {
   }
 }
 
+/** The frames an effect is aimed at: the one it names, or all of them. */
+function pickFrames(frame?: string): Frame[] {
+  if (!frame) return [...frames.values()]
+  const one = frames.get(frame)
+  return one ? [one] : []
+}
+
 function applyPickEffect(effect: PickEffect): void {
   switch (effect.do) {
     case 'arm-overlay':
@@ -516,23 +1305,32 @@ function applyPickEffect(effect: PickEffect): void {
         noteAttach.beginRef(PICKING_LABEL)
         paintSendState()
       }
-      toFrame({
-        type: 'ez:pick',
-        pickId: effect.id,
-        host: effect.host,
-        ...(effect.returnTo ? { returnTo: effect.returnTo } : {}),
-      })
+      for (const f of pickFrames(effect.frame)) {
+        toFrame(f.id, {
+          type: 'ez:pick',
+          pickId: effect.id,
+          host: effect.host,
+          ...(effect.returnTo ? { returnTo: effect.returnTo } : {}),
+        })
+      }
       return
     case 'abort-overlay':
-      toFrame({ type: 'ez:pick-abort', pickId: effect.id })
+      for (const f of pickFrames(effect.frame)) {
+        toFrame(f.id, { type: 'ez:pick-abort', pickId: effect.id })
+      }
+      return
+    case 'disarm-others':
+      for (const f of frames.values()) {
+        if (f.id !== effect.keep) toFrame(f.id, { type: 'ez:pick-abort', pickId: effect.id })
+      }
       return
     case 'restore':
-      toFrame({ type: 'ez:restore', draft: effect.draft })
+      for (const f of pickFrames(effect.frame)) {
+        toFrame(f.id, { type: 'ez:restore', draft: effect.draft })
+      }
       return
-    // `replace`, not `iframe.src`: assigning src pushes an entry onto the joint
-    // session history and poisons the browser's own back button.
     case 'navigate':
-      iframe.contentWindow?.location.replace(effect.page)
+      for (const f of pickFrames(effect.frame)) navigateFrame(f, effect.page)
       return
     case 'insert-note':
       noteAttach.resolveRef(effect.ref)
@@ -561,15 +1359,28 @@ setInterval(() => {
   if (pickState) dispatchPick({ t: 'tick', now: Date.now() })
 }, 500)
 
-function setViewport(id: string): void {
-  viewport = id
-  const preset = VIEWPORTS.find((v) => v.id === id)
-  frameWrap.style.width = preset?.width ? `${preset.width}px` : '100%'
-  stage.classList.toggle('ez-constrained', Boolean(preset?.width))
-  viewportGroup.querySelectorAll('.ez-vp-btn').forEach((b) => {
-    b.classList.toggle('ez-on', (b as HTMLElement).dataset.vp === id)
-  })
-  iframe.contentWindow?.postMessage({ type: 'ez:viewport', preset: id }, location.origin)
+function setDevice(id: string): void {
+  if (!multi && id === deviceId) return
+  // Only leaving the canvas replaces the frame. Switching device inside single
+  // view resizes the one that is there, which is what keeps whatever the app is
+  // part-way through - a form, a menu, a route - alive across the switch.
+  const remount = multi
+  deviceId = id
+  multi = false
+  saveView()
+  paintControls()
+  paintStageClasses()
+  if (remount) rebuildStage()
+  else paintFrames()
+}
+
+function setMulti(next: boolean): void {
+  if (multi === next) return
+  multi = next
+  saveView()
+  paintControls()
+  paintStageClasses()
+  rebuildStage()
 }
 
 async function api(path: string, init?: RequestInit): Promise<Response> {
@@ -909,6 +1720,10 @@ function render(): void {
 
 window.addEventListener('message', (e: MessageEvent) => {
   if (e.origin !== location.origin) return
+  // Also the guard against an iframe of the app's own posting up here: a message
+  // is only ours if it came from a frame we mounted.
+  const from = frameIdOf(e.source)
+  if (!from) return
   const data = e.data as {
     type?: string
     mode?: Mode
@@ -919,36 +1734,100 @@ window.addEventListener('message', (e: MessageEvent) => {
     draft?: DraftWire
     ref?: RefWire
     resumed?: boolean
+    ratio?: number
+    dx?: number
+    dy?: number
+    open?: boolean
+  }
+  // A mod+wheel caught inside a preview: the page under the pointer stays put
+  // and the stage moves instead - panning the canvas without having to aim for
+  // the gaps between the frames.
+  if (data?.type === 'ez:wheel') {
+    stage.scrollLeft += data.dx ?? 0
+    stage.scrollTop += data.dy ?? 0
+  }
+  // Where one preview is scrolled to is where all of them should be: the canvas
+  // exists to compare the same part of the page at three widths, and three
+  // frames scrolled apart is three unrelated screenshots.
+  // While an annotation popup is open, only its own frame may lead: anything
+  // else that slips a scroll through would be relayed straight under the popup.
+  if (
+    data?.type === 'ez:scroll' &&
+    typeof data.ratio === 'number' &&
+    multi &&
+    (!popupFrame || from === popupFrame)
+  ) {
+    for (const f of frames.values()) {
+      if (f.id !== from) toFrame(f.id, { type: 'ez:scroll-to', ratio: data.ratio })
+    }
+  }
+  if (data?.type === 'ez:popup') {
+    // A close only counts from the frame holding it: opening a popup closes
+    // nothing else by design, so a stray close must not lift the hold.
+    if (data.open) setPopupFrame(from)
+    else if (from === popupFrame) setPopupFrame(null)
   }
   if (data?.type === 'ez:mode') {
     annotateMode = data.mode ?? 'off'
     for (const { id, btn } of annotateBtns) btn.classList.toggle('ez-on', annotateMode === id)
+    // A change born inside one frame - Escape, mostly - has to reach the rest:
+    // left armed, they keep offering highlights for a mode the shell has
+    // already put away. No echo risk: a frame already in this mode stays quiet.
+    for (const f of frames.values()) {
+      if (f.id !== from) toFrame(f.id, { type: 'ez:set-mode', mode: annotateMode })
+    }
   }
   if (data?.type === 'ez:ready') {
+    const f = frames.get(from)
+    if (f) f.page = data.page ?? '/'
+    syncPages(from)
     // Straight to the frame, not through `sendMode`: this is a replay of state
     // the overlay lost, and `sendMode` calls off any pick that is still out -
     // which is exactly the pick this fresh overlay has to be handed back.
-    toFrame({ type: 'ez:set-mode', mode: annotateMode })
-    toFrame({ type: 'ez:viewport', preset: viewport })
-    dispatchPick({ t: 'ready', page: data.page ?? '/', now: Date.now() })
+    toFrame(from, { type: 'ez:set-mode', mode: annotateMode })
+    if (f) {
+      toFrame(from, { type: 'ez:viewport', preset: f.device.id, zoom: f.zoom, scoped: multi })
+    }
+    // A frame that (re)booted while an annotation is being composed elsewhere
+    // starts held; its own popup died with the page it was on.
+    if (popupFrame && popupFrame !== from) toFrame(from, { type: 'ez:hold', held: true })
+    else if (popupFrame === from) setPopupFrame(null)
+    dispatchPick({ t: 'ready', page: data.page ?? '/', now: Date.now(), frame: from })
   }
   if (data?.type === 'ez:pick-armed' && data.pickId) {
-    dispatchPick({ t: 'armed', id: data.pickId, host: data.host ?? 'popup', now: Date.now() })
+    dispatchPick({
+      t: 'armed',
+      id: data.pickId,
+      host: data.host ?? 'popup',
+      now: Date.now(),
+      frame: from,
+    })
   }
   if (data?.type === 'ez:draft' && data.pickId && data.draft) {
-    dispatchPick({ t: 'draft', id: data.pickId, draft: data.draft })
+    dispatchPick({ t: 'draft', id: data.pickId, draft: data.draft, frame: from })
   }
   if (data?.type === 'ez:picked' && data.pickId && data.ref) {
-    dispatchPick({ t: 'picked', id: data.pickId, ref: data.ref, page: data.page ?? '/' })
+    dispatchPick({
+      t: 'picked',
+      id: data.pickId,
+      ref: data.ref,
+      page: data.page ?? '/',
+      frame: from,
+    })
   }
   if (data?.type === 'ez:draft-done' && data.pickId) {
     dispatchPick({ t: 'draft-done', id: data.pickId })
   }
   if (data?.type === 'ez:draft-expired' && data.pickId) {
-    dispatchPick({ t: 'expired', id: data.pickId })
+    dispatchPick({ t: 'expired', id: data.pickId, frame: from })
   }
   if (data?.type === 'ez:pick-cancelled' && data.pickId) {
-    dispatchPick({ t: 'cancelled', id: data.pickId, resumed: Boolean(data.resumed) })
+    dispatchPick({
+      t: 'cancelled',
+      id: data.pickId,
+      resumed: Boolean(data.resumed),
+      frame: from,
+    })
   }
   if (data?.type === 'ez:key') {
     // Already screened by the overlay for its own popup and the host page's
@@ -961,7 +1840,7 @@ window.addEventListener('message', (e: MessageEvent) => {
  *  mode is the overlay's call, and only it can see whether a popup is open. */
 function escapeAnnotating(): void {
   if (annotateMode === 'off') return
-  iframe.contentWindow?.postMessage({ type: 'ez:escape' }, location.origin)
+  broadcast({ type: 'ez:escape' })
 }
 
 /** The shell is the only listener for the table, and the overlay forwards keys it
