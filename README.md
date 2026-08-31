@@ -205,7 +205,8 @@ npx -y eztweak@latest http://localhost:5173/ --agent claude
 The daemon starts the agent as a child process, sends each feedback batch as one turn, and shows
 the agent's streaming reply, plan, tool activity, questions, and permission prompts in the review
 shell. The completed reply is saved in the conversation, and the next queued batch is delivered
-automatically. No second terminal or `poll` loop is needed.
+automatically. No second terminal or `poll` loop is needed. This is also the mode used by the
+bundled eztweak skill.
 
 Three built-in profiles map short names to ACP server commands:
 
@@ -229,8 +230,7 @@ npx -y eztweak@latest poll http://localhost:5173/
 ```
 
 `poll` blocks until the user sends feedback, prints the structured batch as JSON, and exits. This
-mode works with any coding agent, script, or integration that can run a CLI and remains the mode
-used by the bundled eztweak skill.
+mode remains available for scripts and integrations that consume the CLI contract directly.
 
 ## Development
 
