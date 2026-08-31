@@ -352,6 +352,11 @@ export class SessionStore {
     return this.outbox.find((b) => !b.ackedAt) ?? null
   }
 
+  /** Batches handed out but never acked - what an ACP turn's end settles. */
+  deliveredBatchIds(): string[] {
+    return this.outbox.filter((b) => b.deliveredAt && !b.ackedAt).map((b) => b.batchId)
+  }
+
   markDelivered(batchId: string): void {
     const outbox = this.outbox
     const batch = outbox.find((b) => b.batchId === batchId)

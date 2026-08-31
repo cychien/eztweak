@@ -22,8 +22,12 @@ const pkg = JSON.parse(readFileSync(join(dirname(cliEntry), '../package.json'), 
 const HELP = `${PKG_NAME} - annotate your live dev app, feedback flows to your local agent
 
 Usage:
-  ${PKG_NAME} <url> [--reopen]
-      open (or resume) a review session for a dev server
+  ${PKG_NAME} <url> [--reopen] [--agent <name|command>]
+      open (or resume) a review session for a dev server.
+      --agent (SPIKE) drives the agent over ACP: the session spawns it, feedback
+      goes straight to it, and its stream, questions and permission prompts all
+      surface in the review shell - no terminal needed. Profiles: claude, gemini,
+      codex; anything else is run as an ACP agent command line.
   ${PKG_NAME} poll <url> [--agent-reply <msg>]
       block until the user sends feedback; prints JSON, then exits
   ${PKG_NAME} progress <url> <msg>
@@ -141,7 +145,19 @@ async function openShell(shellUrl: string): Promise<void> {
   }
 }
 
-async function cmdOpen(rawUrl: string | undefined, flags: Set<string>): Promise<void> {
+/** SPIKE: launch profiles for `--agent`. A known name maps to the command that
+ *  starts that agent's ACP server; anything else is taken as the command line. */
+const AGENT_PROFILES: Record<string, string> = {
+  claude: 'npx -y @agentclientprotocol/claude-agent-acp',
+  gemini: 'gemini --experimental-acp',
+  codex: 'npx -y @agentclientprotocol/codex-acp',
+}
+
+async function cmdOpen(
+  rawUrl: string | undefined,
+  flags: Set<string>,
+  agentArg: string | undefined,
+): Promise<void> {
   const target = parseTarget(rawUrl)
   try {
     await fetch(target.origin, { signal: AbortSignal.timeout(3000) })
@@ -158,6 +174,7 @@ async function cmdOpen(rawUrl: string | undefined, flags: Set<string>): Promise<
       url: target.href,
       reopen: flags.has('--reopen'),
       project: projectRoot(),
+      ...(agentArg ? { agent: AGENT_PROFILES[agentArg] ?? agentArg } : {}),
     }),
   })
   const body = (await res.json()) as { shellUrl?: string; error?: string; hint?: string }
@@ -165,7 +182,11 @@ async function cmdOpen(rawUrl: string | undefined, flags: Set<string>): Promise<
   await openShell(body.shellUrl!)
   console.log(`session: ${target.origin}`)
   console.log(`shell:   ${body.shellUrl}`)
-  console.log(`next:    run \`${PKG_NAME} poll ${target.origin}/\` and wait for feedback`)
+  if (agentArg) {
+    console.log(`agent:   ${AGENT_PROFILES[agentArg] ?? agentArg} (ACP) - review runs in the shell`)
+  } else {
+    console.log(`next:    run \`${PKG_NAME} poll ${target.origin}/\` and wait for feedback`)
+  }
 }
 
 async function cmdPoll(rawUrl: string | undefined, reply: string | undefined): Promise<void> {
@@ -303,8 +324,12 @@ async function main(): Promise<void> {
       return cmdStatus()
     case 'stop':
       return cmdStop()
-    default:
-      return cmdOpen(first, flags)
+    default: {
+      const agentIdx = argv.indexOf('--agent')
+      const agentArg = agentIdx >= 0 ? argv[agentIdx + 1] : undefined
+      if (agentIdx >= 0 && !agentArg) fail('missing value for --agent', 'e.g. --agent claude')
+      return cmdOpen(first, flags, agentArg)
+    }
   }
 }
 
