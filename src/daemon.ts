@@ -14,6 +14,8 @@ import {
   URL_PREFIX,
   controlPortRange,
 } from './constants.js'
+import { AcpAgent } from './acp-agent.js'
+import type { AcpSnapshot } from './acp-agent.js'
 import { attachmentIds, parseReferences } from './anchor.js'
 import { injectOverlay, wantsHtml } from './inject.js'
 import { toAgentAttachments, toAgentItem, toConversationItem } from './label.js'
@@ -64,6 +66,8 @@ interface SnapshotWire {
    *  progress is status, not conversation, so it lives next to `agentBusy` and
    *  dies with it instead of accumulating stale lines in the log. */
   agentProgress?: string
+  /** SPIKE: present when this session drives its agent over ACP. */
+  acp?: AcpSnapshot
 }
 
 /** First port in `candidates` that binds. A `0` entry always succeeds, so keep
@@ -92,6 +96,22 @@ async function listenOn(app: express.Express, candidates: number[]): Promise<Ser
   throw lastError instanceof Error ? lastError : new Error('no port available')
 }
 
+/** The batch as one prompt turn. The JSON is exactly what `poll` prints, so an
+ *  agent that knows the skill reads it unchanged; the preamble covers one that
+ *  has never seen eztweak. */
+function acpPrompt(feedback: Extract<PollResult, { type: 'feedback' }>): string {
+  return [
+    'The user reviewed the running app in their browser and sent this feedback batch.',
+    'Each item resolves to source: trust `anchor.source` (file:line) when present, else',
+    'use `anchor.components` / `anchor.section` / `anchor.selector` / `anchor.text`.',
+    '`[file n]` in a comment is `attachments[n-1]` (read the file at `path`);',
+    '`[ref n]` names the entry in `references` whose `n` matches.',
+    'Apply every item, then reply with what you changed, item by item, one short line each.',
+    '',
+    JSON.stringify(feedback, null, 2),
+  ].join('\n')
+}
+
 class SessionRuntime {
   readonly store: SessionStore
   readonly bus = new EventEmitter()
@@ -103,6 +123,8 @@ class SessionRuntime {
    *  Acks can't drive this: the agent acks on receipt, before it does the work. */
   private agentBusy = false
   private agentProgress: string | null = null
+  /** SPIKE: the ACP-driven agent, when this session owns one. */
+  private acp: AcpAgent | null = null
   lastActivity = Date.now()
 
   constructor(
@@ -120,6 +142,8 @@ class SessionRuntime {
   /** Release the port and detach everyone attached, so the origin can be handed
    *  to a different project's session without leaking a listener. */
   async stop(): Promise<void> {
+    this.acp?.stop()
+    this.acp = null
     for (const resolve of this.pollWaiters) resolve(null)
     this.pollWaiters.clear()
     for (const client of this.sseClients) client.end()
@@ -144,15 +168,68 @@ class SessionRuntime {
       targetOrigin: this.targetOrigin,
       annotations: this.store.annotations,
       conversation: this.store.conversation,
-      agentOnline: this.pollWaiters.size > 0,
+      agentOnline:
+        this.pollWaiters.size > 0 || (!!this.acp && this.acp.snapshot().state !== 'exited'),
       agentBusy: this.agentBusy,
       ...(this.agentProgress ? { agentProgress: this.agentProgress } : {}),
+      ...(this.acp ? { acp: this.acp.snapshot() } : {}),
     }
   }
 
   broadcast(): void {
     const data = `data: ${JSON.stringify(this.snapshot())}\n\n`
     for (const res of this.sseClients) res.write(data)
+  }
+
+  /** SPIKE: attach an ACP-driven agent to this session. Replaces a dead one;
+   *  a live one stays - two agents on one review is never what anyone meant. */
+  attachAcpAgent(command: string): boolean {
+    if (this.acp && this.acp.snapshot().state !== 'exited') {
+      return this.acp.snapshot().agent === command
+    }
+    this.acp = new AcpAgent({
+      command,
+      cwd: this.project,
+      // Delivery rides on every state change: the moment the agent first goes
+      // idle - or comes back idle - whatever is queued goes out.
+      onChange: () => {
+        this.deliverToAcp()
+        this.broadcast()
+      },
+      onReply: (text) => {
+        this.agentBusy = false
+        this.agentProgress = null
+        this.store.appendConversation({ role: 'agent', text, ts: Date.now() })
+        // The turn is the whole delivery in ACP mode, so its end is the ack.
+        const delivered = this.store.deliveredBatchIds()
+        for (const id of delivered) this.store.ack(id)
+        this.deliverToAcp()
+        this.broadcast()
+      },
+      onExit: () => {
+        this.agentBusy = false
+        this.broadcast()
+      },
+    })
+    return true
+  }
+
+  answerAcp(id: string, answers: Record<string, string>): boolean {
+    return this.acp?.answer(id, answers) ?? false
+  }
+
+  /** Hand the next queued batch to the ACP agent, if both exist. The payload is
+   *  the same JSON `poll` prints, so the skill's reading of it carries over. */
+  private deliverToAcp(): void {
+    if (!this.acp || this.acp.snapshot().state !== 'idle') return
+    const outcome = this.pollOutcome()
+    if (!outcome) return
+    if (outcome.type === 'session-ended') {
+      this.acp.stop()
+      this.acp = null
+      return
+    }
+    this.acp.prompt(acpPrompt(outcome))
   }
 
   private wakePollers(): void {
@@ -331,12 +408,28 @@ class SessionRuntime {
           ? { references: batch.references.map((r) => ({ n: r.n, label: r.label })) }
           : {}),
       })
+      if (this.acp) this.deliverToAcp()
       this.wakePollers()
       res.json({ batchId: batch.batchId })
     })
 
+    // SPIKE: the user answered the agent's question card in the shell.
+    api.post('/acp/answer', (req, res) => {
+      const id = String(req.body?.id ?? '')
+      const answers = req.body?.answers as Record<string, string> | undefined
+      if (!id || typeof answers !== 'object' || answers === null) {
+        return res.status(400).json({ error: 'id and answers are required' })
+      }
+      if (!this.answerAcp(id, answers)) {
+        return res.status(409).json({ error: 'that question is no longer waiting' })
+      }
+      res.json({ ok: true })
+    })
+
     api.post('/end', (req, res) => {
       const by: SessionEndedBy = req.body?.by === 'agent' ? 'agent' : 'user'
+      this.acp?.stop()
+      this.acp = null
       this.agentBusy = false
       this.agentProgress = null
       this.store.end(by)
@@ -544,7 +637,7 @@ export async function daemonMain(version: string): Promise<void> {
   })
 
   control.post('/control/sessions', async (req, res) => {
-    const { url, reopen, project } = req.body ?? {}
+    const { url, reopen, project, agent } = req.body ?? {}
     let parsed: URL
     try {
       parsed = new URL(String(url))
@@ -580,6 +673,16 @@ export async function daemonMain(version: string): Promise<void> {
       runtime.broadcast()
     }
     runtime.touch()
+    // SPIKE: ACP mode - this session spawns and drives its own agent.
+    if (typeof agent === 'string' && agent) {
+      if (!runtime.attachAcpAgent(agent)) {
+        return res.status(409).json({
+          error: 'a different agent is already attached to this session',
+          hint: 'end the session (or stop the daemon) before switching agents',
+        })
+      }
+      runtime.broadcast()
+    }
     res.json({
       port: runtime.port,
       shellUrl: runtime.shellUrl(parsed.pathname + parsed.search),

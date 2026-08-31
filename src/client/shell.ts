@@ -36,6 +36,7 @@ import {
 import type { CanvasMetrics, Layout } from './canvas-layout.js'
 import type { DraftWire, RefWire } from './draft.js'
 import { fileMarker, refChipText, refMarker, splitComment } from './draft.js'
+import { markdownEl } from './markdown.js'
 import { reduceNav } from './nav.js'
 import type { NavEffect, NavEvent, NavState } from './nav.js'
 import { modLabel, reducePick } from './pick.js'
@@ -94,6 +95,32 @@ interface SnapshotWire {
   agentOnline: boolean
   agentBusy: boolean
   agentProgress?: string
+  acp?: AcpWire
+}
+
+/** SPIKE: the session drives its agent over ACP - live activity and questions. */
+interface AcpWire {
+  agent: string
+  state: 'starting' | 'idle' | 'working' | 'exited'
+  feed: (
+    | { kind: 'say'; text: string }
+    | { kind: 'thought'; text: string }
+    | { kind: 'tool'; toolCallId: string; title: string; status: string }
+    | { kind: 'plan'; entries: { content: string; status: string }[] }
+  )[]
+  ask?: AcpAskWire
+  error?: string
+}
+
+interface AcpAskWire {
+  id: string
+  kind: 'permission' | 'question'
+  title: string
+  questions: {
+    key: string
+    text?: string
+    options: { id: string; name: string; description?: string; hint?: string }[]
+  }[]
 }
 
 const PREFIX = (() => {
@@ -1526,6 +1553,12 @@ function buildSaid(entry: ConversationWire, isUser: boolean): HTMLElement {
     }
   }
 
+  // The agent writes markdown; the user's own text goes through the
+  // marker-aware plain path, where [ref n] and [file n] become chips.
+  if (!isUser && entry.text) {
+    said.appendChild(markdownEl(entry.text, 'ez-md'))
+    return said
+  }
   const note = commentEl(
     entry.text,
     entry.references,
@@ -1761,12 +1794,94 @@ function render(): void {
     // The agent's own words on what it is doing, when it sends any - rendered
     // where the reply will land, because it is the reply, mid-formation.
     if (s.agentProgress) dots.appendChild(h('span', 'ez-progress', s.agentProgress))
-    row.append(dots)
+    // A column of its own: `.ez-msg` is a flex row, and the dots sitting beside
+    // the feed reads as two columns of unrelated text.
+    const turn = h('div', 'ez-acp-turn')
+    // SPIKE, ACP mode: the live turn - tools, thoughts, plan, and the reply as
+    // it streams - rendered where that reply will land. The dots go last: the
+    // feed reads top-down as what already happened, and the pulse marks where
+    // the next line will appear.
+    if (s.acp && s.acp.state === 'working') turn.append(acpFeedEl(s.acp))
+    turn.append(dots)
+    row.append(turn)
     convList.appendChild(row)
+  }
+  if (s.acp?.ask) convList.appendChild(acpAskEl(s.acp.ask))
+  if (s.acp?.state === 'exited' && s.acp.error) {
+    convList.appendChild(h('div', 'ez-msg-system', `agent 已離線：${s.acp.error}`))
   }
 
   convList.scrollTop = convList.scrollHeight
   paintConvFades()
+}
+
+/** SPIKE: the live turn, in the order it happened - the agent says a sentence,
+ *  runs a tool, says another, and the feed keeps that interleaving. Only the
+ *  newest thought is shown, and only while it is the latest thing happening:
+ *  thinking is scaffolding, not narration. */
+function acpFeedEl(acp: AcpWire): HTMLElement {
+  const box = h('div', 'ez-acp-feed')
+  const latest = acp.feed.at(-1)
+  for (const item of acp.feed) {
+    switch (item.kind) {
+      case 'say':
+        box.appendChild(markdownEl(item.text, 'ez-md ez-acp-say'))
+        break
+      case 'thought':
+        if (item === latest) box.appendChild(h('div', 'ez-acp-thought', item.text.slice(-160)))
+        break
+      case 'tool': {
+        const line = h('div', `ez-acp-tool ez-acp-tool-${item.status}`)
+        line.append(h('span', 'ez-acp-dot'), h('span', 'ez-acp-text', item.title))
+        box.appendChild(line)
+        break
+      }
+      case 'plan':
+        for (const entry of item.entries) {
+          const line = h('div', `ez-acp-plan ez-acp-plan-${entry.status}`)
+          line.append(h('span', 'ez-acp-tick'), h('span', 'ez-acp-text', entry.content))
+          box.appendChild(line)
+        }
+        break
+    }
+  }
+  return box
+}
+
+/** SPIKE: a decision routed out of the agent - AskUserQuestion, a permission
+ *  prompt - answered here instead of in a terminal. Every question is a row of
+ *  option buttons; the answer goes out the moment the last one is picked. */
+function acpAskEl(ask: AcpAskWire): HTMLElement {
+  const card = h('div', 'ez-acp-ask')
+  card.append(h('div', 'ez-acp-ask-title', ask.title))
+  const picked = new Map<string, string>()
+  const submit = (): void => {
+    if (picked.size < ask.questions.length) return
+    for (const b of card.querySelectorAll('button')) b.disabled = true
+    void api('/acp/answer', {
+      method: 'POST',
+      body: JSON.stringify({ id: ask.id, answers: Object.fromEntries(picked) }),
+    })
+  }
+  for (const question of ask.questions) {
+    if (question.text) card.append(h('div', 'ez-acp-ask-q', question.text))
+    const row = h('div', 'ez-acp-ask-options')
+    for (const option of question.options) {
+      const btn = h('button', `ez-acp-opt${option.hint ? ` ez-acp-opt-${option.hint}` : ''}`)
+      btn.append(h('span', undefined, option.name))
+      if (option.description) btn.append(h('span', 'ez-acp-opt-desc', option.description))
+      btn.title = option.description ?? ''
+      btn.onclick = () => {
+        picked.set(question.key, option.id)
+        for (const b of row.querySelectorAll('button')) b.classList.remove('ez-on')
+        btn.classList.add('ez-on')
+        submit()
+      }
+      row.appendChild(btn)
+    }
+    card.appendChild(row)
+  }
+  return card
 }
 
 window.addEventListener('message', (e: MessageEvent) => {

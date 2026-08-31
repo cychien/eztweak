@@ -9,8 +9,9 @@ anything that can run a CLI) as structured items that resolve to **exact source 
 agent edits the code, HMR updates the page in place, the user reviews the next round.
 
 ```
-$ npx -y eztweak@latest http://localhost:5173/pricing   # opens the review shell
-$ npx -y eztweak@latest poll http://localhost:5173/     # agent blocks here until you hit send
+$ npx -y eztweak@latest http://localhost:5173/pricing --agent claude  # managed ACP agent
+$ npx -y eztweak@latest http://localhost:5173/pricing                 # portable poll mode
+$ npx -y eztweak@latest poll http://localhost:5173/                   # agent waits for feedback
 ```
 
 - **Zero config.** A local daemon reverse-proxies your dev server and injects the annotation
@@ -23,9 +24,10 @@ $ npx -y eztweak@latest poll http://localhost:5173/     # agent blocks here unti
 - **Every screen at once.** Review on one device or lay all three out on a canvas - desktop,
   iPad and iPhone side by side at their real viewports, scrolling together. An annotation stays on
   the screen it was made on, and reaches the agent tagged with the width it was made at.
-- **Built for the loop.** Batch annotations, send once; the agent's `poll` is a blocking CLI call
-  that prints structured JSON - the same portable contract as an AXI. HMR keeps iterations
-  in place; the review chrome lives outside the app frame, so it survives your agent's syntax errors.
+- **Built for the loop.** In ACP mode, eztweak owns the agent and keeps its live work, questions,
+  and permission prompts in the review shell. Poll mode keeps the blocking structured-JSON contract
+  for any external agent or automation. HMR keeps iterations in place; the review chrome lives
+  outside the app frame, so it survives your agent's syntax errors.
 - **Local-first.** Everything binds to 127.0.0.1. Nothing leaves your machine.
 
 ## Install
@@ -187,6 +189,49 @@ first one's conversation and hand its undelivered feedback to the wrong agent. T
 nearest `.git` or `package.json` ancestor of the directory you run `eztweak` from, so switching
 projects on a port starts a clean review and switching back finds the old one intact.
 
+## Agent modes
+
+eztweak can either manage an ACP agent inside the review session or expose feedback through its
+portable polling contract. Both modes receive the same structured feedback and exact anchors.
+
+### ACP mode (experimental)
+
+Pass `--agent` when opening the session:
+
+```
+npx -y eztweak@latest http://localhost:5173/ --agent claude
+```
+
+The daemon starts the agent as a child process, sends each feedback batch as one turn, and shows
+the agent's streaming reply, plan, tool activity, questions, and permission prompts in the review
+shell. The completed reply is saved in the conversation, and the next queued batch is delivered
+automatically. No second terminal or `poll` loop is needed. This is also the mode used by the
+bundled eztweak skill.
+
+Three built-in profiles map short names to ACP server commands:
+
+| Profile | Command |
+| --- | --- |
+| `claude` | `npx -y @agentclientprotocol/claude-agent-acp` |
+| `codex` | `npx -y @agentclientprotocol/codex-acp` |
+| `gemini` | `gemini --experimental-acp` |
+
+Any other value is used as an ACP command line, so a custom server can be started with
+`--agent 'my-acp-agent --flag'`. Only one live ACP agent can own a session. End the session or stop
+the daemon before switching it to a different agent.
+
+### Poll mode
+
+Without `--agent`, the review uses the existing CLI contract:
+
+```
+npx -y eztweak@latest http://localhost:5173/
+npx -y eztweak@latest poll http://localhost:5173/
+```
+
+`poll` blocks until the user sends feedback, prints the structured batch as JSON, and exits. This
+mode remains available for scripts and integrations that consume the CLI contract directly.
+
 ## Development
 
 Working on eztweak itself takes one command:
@@ -206,7 +251,8 @@ sessions in `.dev/`, so your own `~/.eztweak` is never touched. The review targe
 
 ## Status
 
-Early. On the roadmap: diff-derived Keep/Undo, layout-issue detection, ACP mode.
+Early. On the roadmap: diff-derived Keep/Undo and layout-issue detection. ACP mode is an
+experimental spike.
 
 ## License
 
