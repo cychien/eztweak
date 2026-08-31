@@ -36,6 +36,8 @@ import {
 import type { CanvasMetrics, Layout } from './canvas-layout.js'
 import type { DraftWire, RefWire } from './draft.js'
 import { fileMarker, refChipText, refMarker, splitComment } from './draft.js'
+import { reduceNav } from './nav.js'
+import type { NavEffect, NavEvent, NavState } from './nav.js'
 import { modLabel, reducePick } from './pick.js'
 import type { PickEffect, PickEvent, PickState } from './pick.js'
 import { type IconNode, icon } from './icon.js'
@@ -107,7 +109,7 @@ const API = `${PREFIX}/api`
  *  still initialising, so it cannot live down with the rest of the pick code. */
 const MOD_LABEL = modLabel(navigator.userAgent)
 /** The path the shell was opened on. Only ever the starting point: where the
- *  previews actually are is `currentPage`, which moves with the app. */
+ *  previews actually are is `nav.url`, which moves with the app. */
 const PAGE_PATH = new URLSearchParams(location.search).get('path') || '/'
 
 
@@ -675,9 +677,6 @@ interface Frame {
   iframe: HTMLIFrameElement
   device: Device
   zoom: number
-  /** Last page this frame reported being on, so the sync can tell which frames
-   *  have somewhere to go and which are already there. */
-  page: string
 }
 
 const SINGLE = 'single'
@@ -695,38 +694,73 @@ function setPopupFrame(next: string | null): void {
   }
 }
 
-/** Where the previews actually are. The path the shell was opened on goes stale
- *  the moment the app navigates, and a frame mounted after that has to start
- *  where the others already are. */
-let currentPage = PAGE_PATH
+/** Where the previews actually are, and where a frame mounted later has to
+ *  start. The path the shell was opened on goes stale the moment the app
+ *  navigates; this moves with it. */
+let nav: NavState = { url: PAGE_PATH }
 
-/** The live page, written back into the shell's own address bar.
- *
- *  Without this a reload is a reload of wherever the session *started*: the
- *  shell reads its path out of the query string, so an app navigated three
- *  pages deep comes back to the first one, and the review the user was in the
- *  middle of is gone. The frames are mounted from `currentPage`, so keeping the
- *  query string equal to it is the whole mechanism.
- *
- *  `replaceState`, never `pushState`: a document navigation inside a preview
- *  already pushes onto the joint session history, so pushing here too would
- *  make the browser's back button need two presses for one navigation. */
-function rememberPage(): void {
-  const url = new URL(location.href)
-  if (url.searchParams.get('path') !== currentPage) {
-    url.searchParams.set('path', currentPage)
-    history.replaceState(history.state, '', url)
-  }
-  paintPage()
+/** The review's history is the shell's own, entry for entry - see `nav.ts` for
+ *  why it cannot be the previews'. Everything that moves the review goes through
+ *  here, so there is exactly one place that pushes, one that repaints, and one
+ *  that points the frames at a page. */
+function dispatchNav(e: NavEvent): void {
+  const { state, effects } = reduceNav(nav, e)
+  const moved = state.url !== nav.url
+  nav = state
+  for (const effect of effects) applyNavEffect(effect)
+  // Painted off the state rather than off an effect: a traversal produces no
+  // entry to write, and the header and the tab still have to follow.
+  if (moved) paintPage()
 }
 
-/** The page as it reads in the header and the tab. Driven from `currentPage`
+function applyNavEffect(effect: NavEffect): void {
+  switch (effect.do) {
+    // The address bar carries the live page, not the one the session started
+    // on: the shell mounts its frames from the query string, so a reload three
+    // pages deep has to come back to the third page and not the first. The
+    // state carries it too, because on the way back that is all there is - the
+    // frames that were on those pages are long gone.
+    case 'push':
+      history.pushState({ ezUrl: effect.url }, '', shellUrl(effect.url))
+      return
+    case 'replace':
+      history.replaceState({ ezUrl: effect.url }, '', shellUrl(effect.url))
+      return
+    case 'navigate':
+      for (const f of frames.values()) {
+        if (f.id !== effect.except) navigateFrame(f, effect.url)
+      }
+      return
+  }
+}
+
+function shellUrl(page: string): URL {
+  const url = new URL(location.href)
+  url.searchParams.set('path', page)
+  return url
+}
+
+/** The entry the shell was opened on, so that a back into it is answerable the
+ *  same way every later one is. */
+history.replaceState({ ezUrl: nav.url }, '', shellUrl(nav.url))
+
+/** Back and forward, for a review whose previews hold no history of their own.
+ *  The page comes off the entry rather than off any frame, which is what makes
+ *  this work at all after the stage has been rebuilt: the documents that were
+ *  on those pages are gone, and the entry is the only record left. */
+window.addEventListener('popstate', (e) => {
+  const state = e.state as { ezUrl?: string } | null
+  const path = new URLSearchParams(location.search).get('path')
+  dispatchNav({ t: 'pop', url: state?.ezUrl ?? path ?? '/' })
+})
+
+/** The page as it reads in the header and the tab. Driven from `nav.url`
  *  rather than from the opening path, and painted here rather than only in
  *  `render()`: a navigation is not a snapshot, so nothing else would repaint. */
 function paintPage(): void {
   const origin = snapshot?.targetOrigin.replace(/^https?:\/\//, '') ?? ''
-  target.textContent = `${origin}${currentPage}`
-  document.title = `Review · ${currentPage}`
+  target.textContent = `${origin}${nav.url}`
+  document.title = `Review · ${nav.url}`
 }
 
 function mountFrame(id: string, device: Device, into: ParentNode, label: string): Frame {
@@ -736,7 +770,7 @@ function mountFrame(id: string, device: Device, into: ParentNode, label: string)
   const box = h('div', 'ez-screen')
   const wrap = h('div', 'ez-frame-wrap')
   const iframe = h('iframe', 'ez-frame')
-  iframe.src = currentPage
+  iframe.src = nav.url
   iframe.title = label
   wrap.appendChild(iframe)
   box.appendChild(wrap)
@@ -744,7 +778,7 @@ function mountFrame(id: string, device: Device, into: ParentNode, label: string)
   into.appendChild(card)
   // Zoom starts at 0 rather than 1 so the first paint always announces itself
   // to the overlay, whatever it settles on.
-  const frame: Frame = { id, card, box, wrap, iframe, device, zoom: 0, page: currentPage }
+  const frame: Frame = { id, card, box, wrap, iframe, device, zoom: 0 }
   frames.set(id, frame)
   head.addEventListener('pointerdown', (e) => beginCardDrag(e, frame))
   return frame
@@ -767,25 +801,10 @@ function broadcast(message: Record<string, unknown>): void {
 }
 
 /** `replace`, not `iframe.src`: assigning src pushes an entry onto the joint
- *  session history and poisons the browser's own back button. */
+ *  session history, and every entry a preview owns is one the shell cannot
+ *  answer for once that preview has been thrown away. */
 function navigateFrame(frame: Frame, page: string): void {
-  frame.page = page
   frame.iframe.contentWindow?.location.replace(page)
-}
-
-/** Every preview shows the same page. Annotations are filtered by path, so
- *  frames left on different pages would be three separate reviews wearing one
- *  set of controls. Recording the destination before asking for it is what
- *  stops the answering `ez:ready` from bouncing the navigation back. */
-function syncPages(from: string): void {
-  const page = frames.get(from)?.page
-  if (!page || page === currentPage) return
-  currentPage = page
-  rememberPage()
-  for (const f of frames.values()) {
-    if (f.id === from || f.page === page) continue
-    navigateFrame(f, page)
-  }
 }
 
 /** What the stage has to give a frame, inside its own padding. */
@@ -1761,6 +1780,7 @@ window.addEventListener('message', (e: MessageEvent) => {
     mode?: Mode
     chord?: KeyChord
     page?: string
+    url?: string
     pickId?: string
     host?: 'popup' | 'note'
     draft?: DraftWire
@@ -1809,24 +1829,32 @@ window.addEventListener('message', (e: MessageEvent) => {
       if (f.id !== from) toFrame(f.id, { type: 'ez:set-mode', mode: annotateMode })
     }
   }
+  // A link the overlay took off the page before the browser could follow it.
+  // The navigation has not happened yet: this is the one moment the shell can
+  // own the entry for it, which is the whole reason the overlay intercepts.
+  if (data?.type === 'ez:navigate' && data.url) {
+    dispatchNav({ t: 'request', url: data.url })
+  }
   // A route change with no document load behind it - an SPA moving between
   // pages. Nothing about the overlay was lost, so unlike `ez:ready` this only
   // says where the frame now is.
-  if (data?.type === 'ez:page' && data.page) {
-    const f = frames.get(from)
-    if (f) f.page = data.page
-    syncPages(from)
+  if (data?.type === 'ez:page' && data.url) {
+    dispatchNav({ t: 'moved', url: data.url, from })
   }
   if (data?.type === 'ez:ready') {
-    const f = frames.get(from)
-    if (f) f.page = data.page ?? '/'
-    syncPages(from)
+    dispatchNav({ t: 'loaded', url: data.url ?? data.page ?? '/', from })
     // Straight to the frame, not through `sendMode`: this is a replay of state
     // the overlay lost, and `sendMode` calls off any pick that is still out -
     // which is exactly the pick this fresh overlay has to be handed back.
     toFrame(from, { type: 'ez:set-mode', mode: annotateMode })
-    if (f) {
-      toFrame(from, { type: 'ez:viewport', preset: f.device.id, zoom: f.zoom, scoped: multi })
+    const frame = frames.get(from)
+    if (frame) {
+      toFrame(from, {
+        type: 'ez:viewport',
+        preset: frame.device.id,
+        zoom: frame.zoom,
+        scoped: multi,
+      })
     }
     // A frame that (re)booted while an annotation is being composed elsewhere
     // starts held; its own popup died with the page it was on.

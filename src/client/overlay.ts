@@ -62,6 +62,12 @@ interface SnapshotWire {
   annotations: AnnotationWire[]
 }
 
+/** Whether this document is a preview inside the review shell. Un-framed, the
+ *  overlay is a guest in a page the user is simply browsing: it annotates, but
+ *  it takes over neither the history nor the links, because there is no shell to
+ *  hand either to. */
+const framed = window.parent !== window
+
 const PREFIX = (() => {
   const script = document.currentScript as HTMLScriptElement | null
   try {
@@ -1424,9 +1430,15 @@ function onMouseDown(e: MouseEvent): void {
     pendingFrame = pagePoint(e)
     return
   }
+  if (mode === 'off') return
   // One annotation is composed at a time across the whole canvas: a popup open
-  // here or in any other frame means this press does not start another.
-  if (mode !== 'region' || ui.popup || held) return
+  // here or in any other frame means this press starts no second one - and does
+  // not reach the page either, the way an armed mode's gestures never do.
+  if (ui.popup || held) {
+    e.preventDefault()
+    return
+  }
+  if (mode !== 'region') return
   // The mode was armed deliberately, so the gesture is ours from the first
   // pixel - the page never gets a chance to start selecting text under the box.
   e.preventDefault()
@@ -1457,7 +1469,16 @@ function onClick(e: MouseEvent): void {
     return
   }
   if (mode === 'off') return
-  if (ui.popup || held) return
+  // An armed mode never hands a click through - not even one it has nothing to
+  // do with. A popup open here or in another preview means this click starts no
+  // second annotation, and letting it reach the page would follow the very link
+  // the comment is being written about, taking the popup and the uploads it is
+  // holding down with it.
+  if (ui.popup || held) {
+    e.preventDefault()
+    e.stopPropagation()
+    return
+  }
   // In region mode the drag is the gesture. A sub-slop press is a click that
   // never became a box; it ends here rather than reaching the page - an armed
   // mode never hands a click through.
@@ -1629,7 +1650,18 @@ function scrollToRatio(ratio: number): void {
   window.scrollTo({ top: target, left: window.scrollX, behavior: 'instant' })
 }
 
-/** Client-side route changes, which nothing announces on its own.
+/** Where this document is, as the shell counts pages. Query and hash included:
+ *  the shell points every other preview at this exact string, and the bare path
+ *  would land them on a different view of the same route.
+ *
+ *  Not the unit annotations use - those stay on `location.pathname`, so that the
+ *  same page filtered or scrolled two ways is still one page to review. */
+function here(): string {
+  return location.pathname + location.search + location.hash
+}
+
+/** Client-side route changes, which nothing announces on its own - and, inside a
+ *  preview, the history entries they would otherwise leave behind.
  *
  *  A document navigation re-runs this whole script and reports through
  *  `ez:ready`. An SPA moving between pages does neither: the shell would go on
@@ -1640,30 +1672,76 @@ function scrollToRatio(ratio: number): void {
  *  History is patched rather than polled because the route change *is* the
  *  history call; there is no other moment to read, and a DOM mutation is a
  *  consequence of the route change rather than the thing itself. Both methods
- *  are called through untouched and keep their own `this`: this document
- *  belongs to the app, and the overlay is only listening in on it.
+ *  keep their own `this`: this document belongs to the app, and the overlay is
+ *  only listening in on it.
  *
- *  Pathname only, which is the unit everything else here already speaks -
- *  annotations are filtered by it and the shell navigates by it. */
+ *  Framed, a `pushState` is carried out as a `replaceState`. The route change
+ *  itself is untouched - the app transitions exactly as it meant to - but the
+ *  entry does not stay here, because an entry written inside a preview is one
+ *  only that preview can answer for, and the shell throws its previews away
+ *  every time the stage is rebuilt. The shell pushes one of its own the moment
+ *  it hears the report; `nav.ts` has the whole story. Un-framed there is no
+ *  shell to hand it to, so the app keeps its history as it wrote it. */
 function watchLocation(): void {
-  let page = location.pathname
+  let url = here()
   const report = (): void => {
-    if (location.pathname === page) return
-    page = location.pathname
-    post({ type: 'ez:page', page })
+    if (here() === url) return
+    url = here()
+    post({ type: 'ez:page', page: location.pathname, url })
   }
-  const patch = (name: 'pushState' | 'replaceState'): void => {
-    const original = history[name].bind(history)
-    history[name] = (data: unknown, unused: string, url?: string | URL | null): void => {
-      original(data, unused, url)
+  type WriteState = (data: unknown, unused: string, url?: string | URL | null) => void
+  const pushState = history.pushState.bind(history) as WriteState
+  const replaceState = history.replaceState.bind(history) as WriteState
+  const reporting =
+    (write: WriteState): WriteState =>
+    (data, unused, to) => {
+      write(data, unused, to)
       // After the call, so `location` already reads as the page just moved to.
       report()
     }
-  }
-  patch('pushState')
-  patch('replaceState')
+  history.pushState = reporting(framed ? replaceState : pushState)
+  history.replaceState = reporting(replaceState)
   window.addEventListener('popstate', report)
   window.addEventListener('hashchange', report)
+}
+
+/** The page a click is about to take this document to, or null when it is not
+ *  taking it anywhere. Everything the browser would do somewhere else - a new
+ *  tab, a download, another origin - is left alone: none of it writes an entry
+ *  into the review's history, so there is nothing to take over. */
+function linkTarget(e: MouseEvent): string | null {
+  if (e.defaultPrevented || e.button !== 0) return null
+  if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return null
+  const anchor = e.target instanceof Element ? e.target.closest('a') : null
+  // `HTMLAnchorElement`, not any `<a>`: an SVG one carries no resolvable href,
+  // and an anchor with no href at all is a hook the app hung something on.
+  if (!(anchor instanceof HTMLAnchorElement)) return null
+  if (isOwnUi(anchor) || !anchor.hasAttribute('href') || anchor.hasAttribute('download')) {
+    return null
+  }
+  const target = anchor.getAttribute('target')
+  if (target && target !== '_self') return null
+  let url: URL
+  try {
+    url = new URL(anchor.href)
+  } catch {
+    return null
+  }
+  if (url.origin !== location.origin) return null
+  return url.pathname + url.search + url.hash
+}
+
+/** Bubble phase, deliberately. A router that means to handle this click has
+ *  already said so by the time the event gets here, and the `pushState` it is
+ *  about to make is caught in `watchLocation` instead - so an app keeps its own
+ *  client-side transitions. What is left is a plain document navigation, and
+ *  that is the shell's to make: it owns where the review goes, and the history
+ *  entry for having gone there. */
+function onNavClick(e: MouseEvent): void {
+  const to = linkTarget(e)
+  if (!to) return
+  e.preventDefault()
+  post({ type: 'ez:navigate', url: to })
 }
 
 // ---------------------------------------------------------------- boot
@@ -1692,6 +1770,7 @@ function boot(): void {
   // a capture listener would hear about.
   document.addEventListener('mouseleave', onMouseLeave)
   document.addEventListener('click', onClick, true)
+  if (framed) document.addEventListener('click', onNavClick)
   document.addEventListener('mouseup', onMouseUp, true)
   document.addEventListener('keydown', onKeyDown, true)
   document.addEventListener('keyup', (e) => {
@@ -1776,7 +1855,7 @@ function boot(): void {
   // The page comes with it: the shell only knows the path it was opened on, which
   // goes stale the moment the app navigates, and a pick has to be re-armed and a
   // draft restored against where the iframe actually is.
-  post({ type: 'ez:ready', page: location.pathname })
+  post({ type: 'ez:ready', page: location.pathname, url: here() })
 }
 
 if (document.readyState === 'loading') {
