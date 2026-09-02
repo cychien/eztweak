@@ -66,6 +66,9 @@ interface SnapshotWire {
    *  progress is status, not conversation, so it lives next to `agentBusy` and
    *  dies with it instead of accumulating stale lines in the log. */
   agentProgress?: string
+  /** The batch the agent is answering right now. The live turn is drawn under the
+   *  question that caused it, not under whatever the user typed since. */
+  activeBatchId?: string
   /** SPIKE: present when this session drives its agent over ACP. */
   acp?: AcpSnapshot
 }
@@ -112,6 +115,24 @@ function acpPrompt(feedback: Extract<PollResult, { type: 'feedback' }>): string 
   ].join('\n')
 }
 
+/** Why the turn stopped, for the thread. Only ever shown for a stop the user did
+ *  not get a reply out of - `end_turn` is the normal one and says nothing. The
+ *  raw reason is kept in the fallback: an unmapped stop is still worth naming. */
+function turnEndNote(stopReason: string): string {
+  switch (stopReason) {
+    case 'cancelled':
+      return '已中止'
+    case 'max_tokens':
+      return 'agent 用完這一輪的 token 額度，提早結束'
+    case 'max_turn_requests':
+      return 'agent 用完這一輪的請求次數，提早結束'
+    case 'refusal':
+      return 'agent 拒絕了這一輪'
+    default:
+      return `這一輪提早結束（${stopReason}）`
+  }
+}
+
 class SessionRuntime {
   readonly store: SessionStore
   readonly bus = new EventEmitter()
@@ -122,6 +143,13 @@ class SessionRuntime {
   /** Set when a batch is handed to the agent, cleared when it polls again.
    *  Acks can't drive this: the agent acks on receipt, before it does the work. */
   private agentBusy = false
+  /** The batch the agent is working on. Not derived from the outbox: a poll-mode
+   *  agent acks on *receipt*, before it does the work, so by the time it replies
+   *  the batch it is answering is no longer delivered-and-unacked and only this
+   *  remembers which one it was. Set when a batch is handed over, cleared when the
+   *  agent comes back - it tracks `agentBusy`, except that `/agent/progress` can
+   *  raise that flag with no batch behind it at all. */
+  private activeBatch: string | null = null
   private agentProgress: string | null = null
   /** SPIKE: the ACP-driven agent, when this session owns one. */
   private acp: AcpAgent | null = null
@@ -167,11 +195,12 @@ class SessionRuntime {
       endedBy: s.endedBy,
       targetOrigin: this.targetOrigin,
       annotations: this.store.annotations,
-      conversation: this.store.conversation,
+      conversation: this.store.visibleConversation,
       agentOnline:
         this.pollWaiters.size > 0 || (!!this.acp && this.acp.snapshot().state !== 'exited'),
       agentBusy: this.agentBusy,
       ...(this.agentProgress ? { agentProgress: this.agentProgress } : {}),
+      ...(this.agentBusy && this.activeBatch ? { activeBatchId: this.activeBatch } : {}),
       ...(this.acp ? { acp: this.acp.snapshot() } : {}),
     }
   }
@@ -196,18 +225,38 @@ class SessionRuntime {
         this.deliverToAcp()
         this.broadcast()
       },
-      onReply: (text) => {
+      onTurnEnd: (text, stopReason) => {
         this.agentBusy = false
         this.agentProgress = null
-        this.store.appendConversation({ role: 'agent', text, ts: Date.now() })
-        // The turn is the whole delivery in ACP mode, so its end is the ack.
+        // The batch this turn answered, read before it is cleared. Stamping it is
+        // what lets the thread draw the reply under its own question rather than
+        // under whatever the user typed while the turn was running.
+        const answers = this.activeBatch ? { batchId: this.activeBatch } : {}
+        this.activeBatch = null
         const delivered = this.store.deliveredBatchIds()
+        // A cancelled turn can still have said something before it was stopped,
+        // and an empty one is not a message - the note below is what explains it.
+        if (text) {
+          this.store.appendConversation({ role: 'agent', text, ts: Date.now(), ...answers })
+        }
+        if (stopReason !== 'end_turn') {
+          this.store.appendConversation({
+            role: 'system',
+            text: turnEndNote(stopReason),
+            ts: Date.now(),
+            ...answers,
+          })
+        }
+        // The turn is the whole delivery in ACP mode, so its end is the ack -
+        // including a cancelled one: the user stopped it, and handing the batch
+        // straight back would undo that.
         for (const id of delivered) this.store.ack(id)
         this.deliverToAcp()
         this.broadcast()
       },
       onExit: () => {
         this.agentBusy = false
+        this.activeBatch = null
         this.broadcast()
       },
     })
@@ -216,6 +265,35 @@ class SessionRuntime {
 
   answerAcp(id: string, answers: Record<string, string>): boolean {
     return this.acp?.answer(id, answers) ?? false
+  }
+
+  /** SPIKE: stop the turn the agent is in the middle of. The turn's own end does
+   *  the bookkeeping - the agent still answers the prompt, with `cancelled` and
+   *  whatever it had already said. */
+  cancelAcpTurn(): boolean {
+    return this.acp?.cancelTurn() ?? false
+  }
+
+  /** SPIKE: drop the agent's context and carry on in a fresh ACP session.
+   *
+   *  The shell shows an empty thread afterwards, because that is what "new chat"
+   *  means to the person who asked for one - a notice explaining that the history
+   *  above no longer counts is still history above. The log on disk is untouched
+   *  either way: it is the record of the review, and windowing it costs nothing
+   *  while deleting it would cost the only copy. */
+  newAcpChat(): boolean {
+    if (!this.acp?.newChat()) return false
+    this.agentBusy = false
+    this.activeBatch = null
+    this.agentProgress = null
+    // Everything the agent had not finished with, not just the turn it was on: the
+    // one in flight died with its session, and the ones queued behind it were
+    // asked of a context the user has just said to start over from. Acking is what
+    // stops the fresh session being handed them the moment it goes idle.
+    for (const id of this.store.pendingBatchIds()) this.store.ack(id)
+    this.store.clearConversation()
+    this.broadcast()
+    return true
   }
 
   /** Hand the next queued batch to the ACP agent, if both exist. The payload is
@@ -249,6 +327,7 @@ class SessionRuntime {
     if (!batch) return null
     this.store.markDelivered(batch.batchId)
     this.agentBusy = true
+    this.activeBatch = batch.batchId
     const attachments = toAgentAttachments(batch.attachments, this.store)
     return {
       type: 'feedback',
@@ -262,9 +341,10 @@ class SessionRuntime {
   }
 
   async waitForPoll(): Promise<PollResult | null> {
-    // The agent is back. Clear before `pollOutcome`, which re-arms it if another
+    // The agent is back. Clear before `pollOutcome`, which re-arms both if another
     // batch is already queued.
     this.agentBusy = false
+    this.activeBatch = null
     this.agentProgress = null
     const immediate = this.pollOutcome()
     if (immediate) return immediate
@@ -372,9 +452,44 @@ class SessionRuntime {
       }
     })
 
+    // The queue is editable until it is sent: the same fields `POST /annotations`
+    // accepts, validated the same way, so a comment reopened in the shell can be
+    // saved back with its files and picked elements changed.
     api.patch('/annotations/:id', (req, res) => {
-      const ok = this.store.updateAnnotation(req.params.id, { comment: req.body?.comment })
-      if (!ok) return res.status(404).json({ error: 'annotation not found' })
+      const { comment, attachments, references } = req.body ?? {}
+      const patch: Parameters<SessionStore['updateAnnotation']>[1] = {}
+      if (comment !== undefined) {
+        if (typeof comment !== 'string') {
+          return res.status(400).json({ error: 'comment must be a string' })
+        }
+        patch.comment = comment
+      }
+      if (attachments !== undefined) {
+        const ids = attachmentIds(attachments)
+        if (!ids) return res.status(400).json({ error: 'attachments must be an array of ids' })
+        const files = this.store.getAttachments(ids)
+        if (!files) return res.status(400).json({ error: 'unknown attachment id' })
+        patch.attachments = files
+      }
+      if (references !== undefined) {
+        const refs = parseReferences(references)
+        if (!refs) return res.status(400).json({ error: 'references must be an array of anchors' })
+        patch.references = refs
+      }
+      // The same rule the annotation was created under: a pasted screenshot or a
+      // pointed-at element can be the whole remark, but an annotation that carries
+      // nothing at all is one the user meant to delete.
+      const current = this.store.annotations.find((a) => a.id === req.params.id)
+      if (!current) return res.status(404).json({ error: 'annotation not found' })
+      const nextComment = patch.comment ?? current.comment
+      const nextFiles = patch.attachments ?? current.attachments ?? []
+      const nextRefs = patch.references ?? current.references ?? []
+      if (!nextComment.trim() && !nextFiles.length && !nextRefs.length) {
+        return res.status(400).json({ error: 'comment, attachment or reference is required' })
+      }
+      if (!this.store.updateAnnotation(req.params.id, patch)) {
+        return res.status(404).json({ error: 'annotation not found' })
+      }
       this.broadcast()
       res.json({ ok: true })
     })
@@ -426,11 +541,29 @@ class SessionRuntime {
       res.json({ ok: true })
     })
 
+    // SPIKE: the agent is heading the wrong way - stop this turn.
+    api.post('/acp/cancel', (_req, res) => {
+      if (!this.cancelAcpTurn()) {
+        return res.status(409).json({ error: 'the agent is not in the middle of a turn' })
+      }
+      this.broadcast()
+      res.json({ ok: true })
+    })
+
+    // SPIKE: clear the agent's context and carry on in a fresh session.
+    api.post('/acp/new', (_req, res) => {
+      if (!this.newAcpChat()) {
+        return res.status(409).json({ error: 'no ACP agent is ready on this session' })
+      }
+      res.json({ ok: true })
+    })
+
     api.post('/end', (req, res) => {
       const by: SessionEndedBy = req.body?.by === 'agent' ? 'agent' : 'user'
       this.acp?.stop()
       this.acp = null
       this.agentBusy = false
+      this.activeBatch = null
       this.agentProgress = null
       this.store.end(by)
       this.store.appendConversation({
@@ -473,7 +606,15 @@ class SessionRuntime {
       if (!message) return res.status(400).json({ error: 'message is required' })
       // The reply is the finished form of whatever the progress line promised.
       this.agentProgress = null
-      this.store.appendConversation({ role: 'agent', text: message, ts: Date.now() })
+      // Left set until the agent's next poll, which is what makes it readable
+      // here: the ack already happened, on receipt.
+      const answering = this.activeBatch
+      this.store.appendConversation({
+        role: 'agent',
+        text: message,
+        ts: Date.now(),
+        ...(answering ? { batchId: answering } : {}),
+      })
       this.broadcast()
       res.json({ ok: true })
     })

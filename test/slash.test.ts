@@ -70,3 +70,24 @@ test('filtering ignores case and surrounding space', () => {
   )
 })
 
+
+// `/new` is only meaningful while an ACP agent is attached, and the menu is built
+// once for the life of the composer - so availability is asked at filter time.
+test('a disabled command is off the menu, matched or not', () => {
+  let attached = false
+  const commands: SlashCommand[] = [
+    ...COMMANDS,
+    { ...command('new', '新對話', ['clear']), enabled: () => attached },
+  ]
+  assert.deepEqual(
+    filterCommands(commands, '').map((c) => c.id),
+    ['file', 'viewport'],
+  )
+  assert.deepEqual(filterCommands(commands, 'new'), [])
+  attached = true
+  assert.deepEqual(
+    filterCommands(commands, 'new').map((c) => c.id),
+    ['new'],
+  )
+  assert.equal(filterCommands(commands, '').length, 3)
+})

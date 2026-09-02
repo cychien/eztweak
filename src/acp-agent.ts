@@ -7,16 +7,19 @@
  *  protocol guarantees the stream (`session/update`) and routes the questions
  *  (`session/request_permission`) here, whatever the agent is.
  *
- *  One session, one turn at a time, feed capped - a spike's ambitions. */
+ *  One session at a time, one turn at a time, feed capped - a spike's ambitions.
+ *  "One session at a time" rather than "one session": `/new` throws the agent's
+ *  context away by replacing the ACP session under a connection that stays up,
+ *  which is the only way to stop paying for a history the review has moved past. */
 
 import { type ChildProcess, spawn } from 'node:child_process'
 import { Readable, Writable } from 'node:stream'
 import {
   type ActiveSession,
+  type ActiveSessionMessage,
   type ClientContext,
   type CreateElicitationRequest,
   type CreateElicitationResponse,
-  type PromptResponse,
   type RequestPermissionRequest,
   type RequestPermissionResponse,
   type SessionNotification,
@@ -67,6 +70,9 @@ export interface AcpSnapshot {
   state: AcpState
   feed: AcpFeedItem[]
   ask?: AcpAsk
+  /** A cancel is out and the agent has not yet said the turn is over. The button
+   *  that sent it has to stop offering to send it again. */
+  cancelling?: true
   /** Why the agent is gone, when it is. */
   error?: string
 }
@@ -76,8 +82,9 @@ export interface AcpAgentOptions {
   command: string
   cwd: string
   onChange: () => void
-  /** The turn's accumulated message - the agent's reply to the batch. */
-  onReply: (text: string) => void
+  /** The turn is over: its accumulated message - the agent's reply to the batch,
+   *  which a cancelled turn can still have part of - and why it stopped. */
+  onTurnEnd: (reply: string, stopReason: string) => void
   onExit: (error: string | null) => void
 }
 
@@ -99,12 +106,29 @@ process.on('exit', () => {
 export class AcpAgent {
   private child: ChildProcess
   private ctx: ClientContext | null = null
+  /** The live session. Held as the SDK's `ActiveSession` for one reason: it funnels
+   *  this session's updates *and* its turn's `stop` into a single queue, in stream
+   *  order. That ordering is load-bearing - see `pump`. */
   private session: ActiveSession | null = null
+  /** Retires the pump on the session being replaced, so it stops waiting on a
+   *  `nextUpdate` that will never come. */
+  private retire: (() => void) | null = null
   private state: AcpState = 'starting'
   private feed: AcpFeedItem[] = []
   private ask: AcpAsk | null = null
   private askResolve: ((answers: Record<string, string> | null) => void) | null = null
   private askSeq = 0
+  private cancelling = false
+  /** Bumped whenever the live session is replaced. A turn, or an update, that
+   *  belonged to the session before the bump must not land in the one after -
+   *  and the old session's `prompt` promise settles long after we let go of it. */
+  private epoch = 0
+  /** Set when the agent advertises `session/close`, which is the only way to
+   *  tell it a session it is still holding is finished with. */
+  private canClose = false
+  /** Resolved when the agent is done, and nothing else: it is what holds the
+   *  connection open, so a session swap must not disturb it. */
+  private finish: (() => void) | null = null
   private error: string | null = null
   private stderrTail: string[] = []
 
@@ -137,6 +161,7 @@ export class AcpAgent {
       state: this.state,
       feed: this.feed,
       ...(this.ask ? { ask: this.ask } : {}),
+      ...(this.cancelling ? { cancelling: true as const } : {}),
       ...(this.error ? { error: this.error } : {}),
     }
   }
@@ -145,15 +170,18 @@ export class AcpAgent {
    *  batch at a time, so a second prompt mid-turn is a bug upstream. */
   prompt(text: string): void {
     if (!this.session || this.state !== 'idle') return
+    const epoch = this.epoch
     this.state = 'working'
     this.feed = []
     this.opts.onChange()
-    void this.session
-      .prompt(text)
-      .then((r: PromptResponse) => this.turnEnded(r.stopReason))
-      .catch((err: unknown) => {
-        this.fail(err instanceof Error ? err.message : String(err))
-      })
+    // The turn's *end* is read off the session queue in `pump`, not from this
+    // promise. This only has to notice a request that failed outright.
+    void this.session.prompt(text).catch((err: unknown) => {
+      // A prompt against a session `/new` has already replaced fails on its way
+      // out. The session that replaced it is fine, so this is not a death.
+      if (epoch !== this.epoch) return
+      this.fail(err instanceof Error ? err.message : String(err))
+    })
   }
 
   /** The user answered in the shell: one option id per question key. */
@@ -170,16 +198,116 @@ export class AcpAgent {
     return true
   }
 
-  cancelTurn(): void {
-    if (!this.ctx || !this.session || this.state !== 'working') return
-    void this.ctx
-      .notify(methods.agent.session.cancel, { sessionId: this.session.sessionId })
-      .catch(() => {})
+  /** Stop the turn the agent is in the middle of. The turn still ends through
+   *  `prompt`'s own promise - with `stopReason: 'cancelled'` and whatever it had
+   *  already said - so the partial work stays on the record. */
+  cancelTurn(): boolean {
+    if (!this.session || this.state !== 'working') return false
+    this.sendCancel(this.session.sessionId)
+    this.cancelling = true
+    this.opts.onChange()
+    return true
+  }
+
+  /** Throw away the agent's memory of this review and carry on in a fresh
+   *  session. The child process and the connection both stay: what costs tokens
+   *  is the history the agent replays on every turn, and that belongs to the
+   *  session, not to the process.
+   *
+   *  A turn in flight is cancelled rather than waited on - starting over is the
+   *  whole point of asking - and its end is then dropped on the epoch. */
+  newChat(): boolean {
+    if (!this.ctx || !this.session) return false
+    if (this.state !== 'idle' && this.state !== 'working') return false
+    const old = this.session
+    if (this.state === 'working') this.sendCancel(old.sessionId)
+    this.epoch++
+    this.session = null
+    this.state = 'starting'
+    this.feed = []
+    this.cancelling = false
+    // A question routed out of a session nobody will answer for any more: the
+    // agent is blocked on it, and it has to be released before we let go.
+    this.settleAsk()
+    this.opts.onChange()
+    this.retire?.()
+    old.dispose()
+    void this.closeSession(old.sessionId)
+    void this.openSession().catch((err: unknown) => {
+      this.fail(err instanceof Error ? err.message : String(err))
+    })
+    return true
+  }
+
+  private sendCancel(sessionId: string): void {
+    void this.ctx?.notify(methods.agent.session.cancel, { sessionId }).catch(() => {})
+  }
+
+  /** Best-effort, and capability-gated: only some agents can be told a session is
+   *  finished with, and one that refuses must not take the live session down. */
+  private async closeSession(sessionId: string): Promise<void> {
+    if (!this.canClose || !this.ctx) return
+    try {
+      await this.ctx.request(methods.agent.session.close, { sessionId })
+    } catch {}
+  }
+
+  /** Starts the session this agent is currently meant to be on, and installs it
+   *  only if it is still the one wanted by the time the agent answers. */
+  private async openSession(): Promise<void> {
+    const ctx = this.ctx
+    if (!ctx) return
+    const epoch = this.epoch
+    const session = await ctx.buildSession(this.opts.cwd).start()
+    // A newer `/new` landed while the agent was answering this one: that request
+    // owns the session now, so this one is closed rather than installed.
+    if (epoch !== this.epoch) {
+      session.dispose()
+      void this.closeSession(session.sessionId)
+      return
+    }
+    this.session = session
+    this.state = 'idle'
+    this.opts.onChange()
+    void this.pump(session, epoch).catch((err: unknown) => {
+      if (epoch !== this.epoch) return
+      this.fail(err instanceof Error ? err.message : String(err))
+    })
+  }
+
+  /** Drains one session's messages in the order the agent wrote them.
+   *
+   *  This is the whole reason the session is held as an `ActiveSession`: its
+   *  queue carries the streamed updates *and* the turn's own `stop`, and a reply
+   *  chunk written before the prompt response is therefore *seen* before it.
+   *  Reading the two off separate promises loses that - they are independent
+   *  microtask chains, and the response can settle first, ending the turn before
+   *  the words it was made of have arrived. That produced an empty reply about
+   *  one turn in ten.
+   *
+   *  Retired rather than abandoned: a pump parked on a session `/new` replaced
+   *  would hold that session's queue - and everything the agent still sends to it
+   *  - for the life of the process. */
+  private async pump(session: ActiveSession, epoch: number): Promise<void> {
+    const retired = new Promise<'retired'>((resolve) => {
+      this.retire = () => resolve('retired')
+    })
+    for (;;) {
+      const msg: ActiveSessionMessage | 'retired' = await Promise.race([
+        session.nextUpdate(),
+        retired,
+      ])
+      if (msg === 'retired' || epoch !== this.epoch) return
+      if (msg.kind === 'session_update') this.onUpdate(msg.notification)
+      else if (msg.kind === 'stop') this.turnEnded(msg.stopReason, epoch)
+    }
   }
 
   stop(): void {
     this.state = 'exited'
     this.settleAsk()
+    this.retire?.()
+    this.finish?.()
     this.child.kill('SIGTERM')
     const child = this.child
     setTimeout(() => child.kill('SIGKILL'), 3000).unref()
@@ -191,6 +319,8 @@ export class AcpAgent {
     const tail = this.stderrTail.join('').trim().split('\n').slice(-3).join('\n')
     this.error = tail ? `${message}\n${tail}` : message
     this.settleAsk()
+    this.retire?.()
+    this.finish?.()
     this.opts.onExit(this.error)
     this.opts.onChange()
   }
@@ -203,9 +333,10 @@ export class AcpAgent {
     resolve?.(null)
   }
 
-  private turnEnded(stopReason: string): void {
-    if (this.state !== 'working') return
+  private turnEnded(stopReason: string, epoch: number): void {
+    if (epoch !== this.epoch || this.state !== 'working') return
     this.state = 'idle'
+    this.cancelling = false
     // The reply is the said segments of the feed, in order. Everything between
     // them - the tool runs - is what the paragraphs are narrating, so joining
     // with a blank line keeps each one a paragraph of its own.
@@ -214,8 +345,7 @@ export class AcpAgent {
       .filter(Boolean)
       .join('\n\n')
     this.feed = []
-    if (reply) this.opts.onReply(reply)
-    else if (stopReason !== 'end_turn') this.opts.onReply(`(turn ended: ${stopReason})`)
+    this.opts.onTurnEnd(reply, stopReason)
     this.opts.onChange()
   }
 
@@ -290,6 +420,8 @@ export class AcpAgent {
     return { action: 'accept', content: answers }
   }
 
+  /** Only ever called from `pump`, which has already established that the update
+   *  belongs to the live session and the live epoch. */
   private onUpdate(notification: SessionNotification): void {
     const update = notification.update
     switch (update.sessionUpdate) {
@@ -352,24 +484,22 @@ export class AcpAgent {
       )
       .onRequest(methods.client.elicitation.create, (ctx) => this.requestElicitation(ctx.params))
       .connectWith(stream, async (ctx) => {
-        await ctx.request(methods.agent.initialize, {
+        const init = await ctx.request(methods.agent.initialize, {
           protocolVersion: PROTOCOL_VERSION,
           // Form elicitation is what unlocks the agent's own question tool -
           // claude-agent-acp disallows AskUserQuestion without it.
           clientCapabilities: { elicitation: { form: {} } },
         })
-        const session = await ctx.buildSession(this.opts.cwd).start()
+        this.canClose = !!init.agentCapabilities?.sessionCapabilities?.close
         this.ctx = ctx
-        this.session = session
-        this.state = 'idle'
-        this.opts.onChange()
-        // The pump is the connection's lifetime: `connectWith` closes it when
-        // this returns, and this only returns once the agent is gone.
-        for (;;) {
-          const msg = await session.nextUpdate()
-          if (msg.kind === 'session_update') this.onUpdate(msg.notification)
-          // `stop` is handled by the prompt() promise; nothing to do here.
-        }
+        await this.openSession()
+        // `connectWith` closes the stream when this returns, so this is the
+        // connection's lifetime - and it outlives any one session. It also
+        // rejects if the stream dies first, which is how a killed agent gets
+        // reported even though nothing here is awaiting the child.
+        await new Promise<void>((resolve) => {
+          this.finish = resolve
+        })
       })
   }
 }

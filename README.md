@@ -84,10 +84,21 @@ in - so a box drawn in one screen cannot open a second comment box behind the on
 ## The comment box
 
 Typing `/` in either comment box opens a command menu - arrow keys and Enter, or click. A slash
-mid-word stays a slash, so urls and paths are left alone. Two commands:
+mid-word stays a slash, so urls and paths are left alone. The commands:
 
 - **`/file`** opens the system file picker and drops what you choose in as an attachment, where the
   slash was.
+- **`/new`** starts a new chat: the agent's context is thrown away and the review carries on in a
+  fresh session, which is how a long review stops paying to replay its own history on every turn.
+  Only offered in [ACP mode](#acp-mode-experimental), and only in the note box below the queue. The
+  thread empties with it, back to the state it opened in - a notice explaining that the history above
+  no longer counts is still history above. The log on disk is untouched: `/new` records where the
+  visible thread starts, so the record of the review stays whole while the shell shows the fresh
+  start that was actually asked for. Every batch the agent had not finished with goes too, not just
+  the turn it was on - a question queued behind that turn was asked of a context you have just said
+  to start over from, and a fresh session answering it would be answering something else. The 待送
+  清單 is left alone: those you have not sent yet, so they were never the old context's to begin
+  with. A note you were part-way through typing survives, so `/new` and then send is one move.
 - **`/element`** points the comment at a *second* element - "make this match that one". The page
   stays live while you choose, so a plain click still follows links and opens menus and only
   ⌘/Ctrl+click picks; the comment box steps aside and comes back when you are done. You can cross to
@@ -113,6 +124,43 @@ thumbnail takes the room it needs. The bytes go straight to the session director
 per file, and the batch hands the agent an absolute path per attachment so it opens the screenshot
 instead of being handed base64. Deleting a queued annotation deletes its files with it; anything
 attached and then abandoned is collected a day later.
+
+## The queue
+
+Queued annotations stay editable until the batch goes out. The pencil on a row turns that row's
+comment into a field in place - nothing appears elsewhere, and there is no second place to look.
+Editing borrows the two buttons the row already has rather than adding any: the pencil becomes the
+tick that commits, and the cross, which dismisses either way, becomes the one that backs out. The row
+keeps its number and its source label throughout, so what is being changed never stops being obvious.
+
+The field is seeded with exactly what the row was showing, chips where the sentence had them, so a
+`[ref 1]` or an attached screenshot survives a wording change instead of having to be picked again.
+⌘/Ctrl+Enter saves, Escape cancels, and both outrank the shell's own bindings while the field is
+open, so ⌘+Enter is this save rather than the batch send. `/file` works inside it; `/element` does
+not - pointing a comment at a new element needs the page's own pointer routed back into a row, which
+is a different thing from adjusting what you already wrote, so delete the chip and re-annotate
+instead.
+
+A cancel takes any file attached during the edit with it; the files the row already had are left
+alone either way, and one dropped by a save is collected by the same sweep that collects an
+attachment nothing references.
+
+## Asking while the agent is still working
+
+Sending mid-turn is allowed and queues - you should not have to wait for a turn to finish before
+writing down what you just noticed. The batch goes out on its own the moment the agent comes back,
+and your bubble appears in the thread the moment it leaves the composer, which is what says it went.
+To make it go *now*, stop the current turn: the queued batch is delivered as soon as that turn ends.
+`/new` does the opposite - it drops the queue along with the context.
+
+The thread draws each answer under the question it answers, which is not always where the log put it.
+The log itself stays append-only and stamped in real time - it is the record of the review - but a
+batch sent mid-turn lands *between* an earlier question and its reply, so rendering the log verbatim
+would put the agent's answer under a question it is not answering, and put the new question above
+output that started before it was typed. Instead every entry carries the batch it belongs to, and the
+in-flight turn is drawn in the same place its finished reply will be, so nothing moves when the reply
+lands. Entries that answer no batch - the session notices - stay exactly where the log put them,
+because for those the timeline *is* the meaning.
 
 ## Devices
 
@@ -207,6 +255,16 @@ the agent's streaming reply, plan, tool activity, questions, and permission prom
 shell. The completed reply is saved in the conversation, and the next queued batch is delivered
 automatically. No second terminal or `poll` loop is needed. This is also the mode used by the
 bundled eztweak skill.
+
+Two controls come with owning the agent:
+
+- **⌘/Ctrl+.** stops the turn in flight, from anywhere including mid-sentence in the composer -
+  which is when you usually want it, since watching the agent head the wrong way is what prompts it.
+  No button: a control that is live for the few seconds a turn lasts costs the composer a permanent
+  slot to say so. The status badge reads `正在中止` until the agent answers, so the keypress is not
+  silent. Whatever it had already said stays in the thread, and the batch is not handed back: you
+  stopped it on purpose.
+- **`/new`** in the note box clears the agent's context. See [The comment box](#the-comment-box).
 
 Three built-in profiles map short names to ACP server commands:
 

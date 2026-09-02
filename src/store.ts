@@ -79,6 +79,18 @@ export interface PersistedSession {
   /** Last port this session's proxy held. A restarted daemon re-binds it so the
    *  shell tab the user already has open survives a reload. */
   port?: number
+  /** Where the *visible* thread starts, set by `/new`. A window onto the log, not
+   *  a cut in it: the record of the review stays whole on disk, and only the shell
+   *  is shown a fresh start - which is what "new chat" means to the person who
+   *  asked for one. */
+  conversationClear?: ConversationClear
+}
+
+export interface ConversationClear {
+  /** Entries stamped at or after this are the new thread. Nothing is carried over
+   *  across it: `/new` drops every batch the agent had not finished with, so there
+   *  is no answer still coming that would need its question kept. */
+  at: number
 }
 
 /** Every session on disk. */
@@ -181,11 +193,30 @@ export class SessionStore {
     this.writeJson('queue.json', [...this.annotations, a])
   }
 
-  updateAnnotation(id: string, patch: Partial<Pick<Annotation, 'comment'>>): boolean {
+  /** Files dropped by an edit are deliberately left on disk: `sweepAttachments`
+   *  is what collects an unreferenced attachment, and deleting eagerly here would
+   *  make saving a comment destroy bytes the user cannot see they are losing.
+   *  `removeAnnotation` drops them because the annotation itself is gone. */
+  updateAnnotation(
+    id: string,
+    patch: Partial<Pick<Annotation, 'comment' | 'attachments' | 'references'>>,
+  ): boolean {
     const list = this.annotations
     const target = list.find((a) => a.id === id)
     if (!target) return false
-    Object.assign(target, patch)
+    // Assigned key by key, dropping the empty ones: an `Object.assign` of a patch
+    // holding `comment: undefined` would blank the comment rather than leave it,
+    // and an empty `attachments: []` should mean the field is gone, not present
+    // and empty - that is the shape `addAnnotation` writes.
+    if (patch.comment !== undefined) target.comment = patch.comment
+    if (patch.attachments !== undefined) {
+      if (patch.attachments.length) target.attachments = patch.attachments
+      else delete target.attachments
+    }
+    if (patch.references !== undefined) {
+      if (patch.references.length) target.references = patch.references
+      else delete target.references
+    }
     this.writeJson('queue.json', list)
     return true
   }
@@ -352,9 +383,17 @@ export class SessionStore {
     return this.outbox.find((b) => !b.ackedAt) ?? null
   }
 
-  /** Batches handed out but never acked - what an ACP turn's end settles. */
+  /** Batches handed out but never acked - what an ACP turn's end settles. At most
+   *  one at a time: `nextBatch` only ever hands out the oldest unacked. */
   deliveredBatchIds(): string[] {
     return this.outbox.filter((b) => b.deliveredAt && !b.ackedAt).map((b) => b.batchId)
+  }
+
+  /** Everything the agent has not finished with - the one it is on, and the ones
+   *  still waiting behind it. What `/new` settles: a fresh session is not going to
+   *  answer questions the user has just said to start over from. */
+  pendingBatchIds(): string[] {
+    return this.outbox.filter((b) => !b.ackedAt).map((b) => b.batchId)
   }
 
   markDelivered(batchId: string): void {
@@ -385,6 +424,19 @@ export class SessionStore {
 
   end(by: SessionEndedBy): void {
     this.patchSession({ state: 'ended', endedBy: by })
+  }
+
+  /** Start the visible thread here. Nothing is deleted - see `conversationClear`. */
+  clearConversation(): void {
+    this.patchSession({ conversationClear: { at: Date.now() } })
+  }
+
+  /** The thread as the shell should draw it: everything since the last `/new`,
+   *  plus whatever that `/new` left the user still waiting on. */
+  get visibleConversation(): ConversationEntry[] {
+    const clear = this.session.conversationClear
+    if (!clear) return this.conversation
+    return this.conversation.filter((e) => e.ts >= clear.at)
   }
 
   reopen(): void {

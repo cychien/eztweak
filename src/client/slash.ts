@@ -20,6 +20,13 @@ export interface SlashCommand {
   /** Extra words the filter should match, so `/圖片` finds the file command. */
   keywords: string[]
   icon: IconNode
+  /** Whether the command is on offer right now. Asked at filter time, not at
+   *  build time: `/new` only means anything while an ACP agent is attached, and
+   *  the menu is built once for the life of the composer. A command the user
+   *  cannot use is left out rather than shown greyed - the menu is a list of
+   *  what typing will do, and a dead row in it is a smaller list that reads as
+   *  a bigger one. */
+  enabled?(): boolean
   run(): void
 }
 
@@ -49,9 +56,10 @@ export function detectSlash(before: string): { start: number; query: string } | 
 }
 
 export function filterCommands<T extends SlashCommand>(commands: T[], query: string): T[] {
+  const available = commands.filter((c) => c.enabled?.() ?? true)
   const q = query.trim().toLowerCase()
-  if (!q) return commands
-  return commands.filter((c) =>
+  if (!q) return available
+  return available.filter((c) =>
     [c.id, c.label, ...c.keywords].some((term) => term.toLowerCase().includes(q)),
   )
 }
