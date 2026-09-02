@@ -337,3 +337,54 @@ test('a batch with no references does not invent the field', () => {
   const store = new SessionStore('http://localhost:1133', PROJECT)
   assert.equal(store.sendBatch('just a note')!.references, undefined)
 })
+
+// Editing a queued annotation goes through here, so the patch has to be able to
+// leave a field alone, replace it, and clear it - three different things that a
+// single `Object.assign` of the request body cannot tell apart.
+test('updateAnnotation leaves absent fields alone and clears empty ones', () => {
+  const store = new SessionStore('http://localhost:7777', PROJECT)
+  const file = { id: 'f1', name: 'a.png', mime: 'image/png', size: 3, createdAt: 1 }
+  const ref = { n: 2, anchor, label: 'div' }
+  store.addAnnotation({
+    id: 'e1',
+    kind: 'element',
+    comment: '看 [file 1] 跟 [ref 2]',
+    anchor,
+    createdAt: 1,
+    attachments: [file],
+    references: [ref],
+  })
+
+  // A comment-only patch is what a text tweak sends: the files and the picked
+  // elements must survive it untouched.
+  assert.equal(store.updateAnnotation('e1', { comment: '再看 [file 1] 跟 [ref 2]' }), true)
+  assert.deepEqual(store.annotations[0]!.attachments, [file])
+  assert.deepEqual(store.annotations[0]!.references, [ref])
+  assert.equal(store.annotations[0]!.comment, '再看 [file 1] 跟 [ref 2]')
+
+  // An empty list means the user deleted the last chip, so the field goes rather
+  // than staying on as `[]` - that is the shape `addAnnotation` writes.
+  assert.equal(store.updateAnnotation('e1', { attachments: [], references: [] }), true)
+  assert.equal('attachments' in store.annotations[0]!, false)
+  assert.equal('references' in store.annotations[0]!, false)
+  assert.equal(store.annotations[0]!.comment, '再看 [file 1] 跟 [ref 2]', 'still untouched')
+})
+
+// The bytes outlive the edit on purpose: a save that silently deleted files would
+// be destructive in a way the user cannot see, and `sweepAttachments` is what
+// collects an attachment nothing references any more.
+test('a file dropped by an edit is left for the sweep, not deleted', () => {
+  const store = new SessionStore('http://localhost:7778', PROJECT)
+  const saved = store.addAttachment('shot.png', 'image/png', Buffer.from([1, 2, 3]))
+  store.addAnnotation({
+    id: 'e2',
+    kind: 'element',
+    comment: 'x',
+    anchor,
+    createdAt: 1,
+    attachments: [saved],
+  })
+  store.updateAnnotation('e2', { attachments: [] })
+  assert.equal(existsSync(store.attachmentPath(saved)), true)
+  assert.equal(saved.id in store.attachmentIndex, true)
+})

@@ -10,6 +10,8 @@ import File02Icon from '@hugeicons/core-free-icons/File02Icon'
 import KeyboardIcon from '@hugeicons/core-free-icons/KeyboardIcon'
 import Select01Icon from '@hugeicons/core-free-icons/Select01Icon'
 import Navigation03Icon from '@hugeicons/core-free-icons/Navigation03Icon'
+import BubbleChatAddIcon from '@hugeicons/core-free-icons/BubbleChatAddIcon'
+import Edit02Icon from '@hugeicons/core-free-icons/Edit02Icon'
 import { attachify } from './attach.js'
 import type { Device, Size } from './devices.js'
 import {
@@ -34,10 +36,11 @@ import {
   toggleDevice,
 } from './canvas-layout.js'
 import type { CanvasMetrics, Layout } from './canvas-layout.js'
-import type { DraftWire, RefWire } from './draft.js'
-import { fileMarker, refChipText, refMarker, splitComment } from './draft.js'
+import type { DraftWire, NumberedRef, RefWire } from './draft.js'
+import { bodyFromComment, fileMarker, refChipText, refMarker, splitComment } from './draft.js'
 import { markdownEl } from './markdown.js'
 import { reduceNav } from './nav.js'
+import { threadOrder } from './thread.js'
 import type { NavEffect, NavEvent, NavState } from './nav.js'
 import { modLabel, reducePick } from './pick.js'
 import type { PickEffect, PickEvent, PickState } from './pick.js'
@@ -63,8 +66,10 @@ interface AnnotationWire {
     page?: string
     viewport?: { width?: number; preset?: string }
   }
-  attachments?: { name: string }[]
-  references?: RefEcho[]
+  /** Full records, not echoes: the queue holds the annotation itself, and the
+   *  editor has to be able to hand every field back unchanged. */
+  attachments?: { id: string; name: string }[]
+  references?: NumberedRef[]
 }
 
 /** A bare string is what logs written before references carried a number hold.
@@ -88,6 +93,8 @@ interface ConversationWire {
 
 interface SnapshotWire {
   state: 'active' | 'ended'
+  /** The batch the agent is answering right now. */
+  activeBatchId?: string
   endedBy?: 'user' | 'agent'
   targetOrigin: string
   annotations: AnnotationWire[]
@@ -109,6 +116,8 @@ interface AcpWire {
     | { kind: 'plan'; entries: { content: string; status: string }[] }
   )[]
   ask?: AcpAskWire
+  /** A cancel is out and the turn has not ended yet. */
+  cancelling?: true
   error?: string
 }
 
@@ -132,8 +141,8 @@ const PREFIX = (() => {
   }
 })()
 const API = `${PREFIX}/api`
-/** Hoisted above the composer: the command's hint is built while this module is
- *  still initialising, so it cannot live down with the rest of the pick code. */
+/** Hoisted: the shortcut table is built while this module is still initialising,
+ *  so it cannot live down with the rest of the pick code. */
 const MOD_LABEL = modLabel(navigator.userAgent)
 /** The path the shell was opened on. Only ever the starting point: where the
  *  previews actually are is `nav.url`, which moves with the app. */
@@ -168,6 +177,15 @@ const ANNOTATE_MODES: {
 const expandedBatches = new Set<string>()
 /** Collapse only when it actually saves more than one row. */
 const ITEM_LIMIT = 3
+/** Both sized against the 13px cross they sit beside, because `size` alone does
+ *  not settle how big a glyph looks - each uses a different share of its 24-unit
+ *  box. The cross's ink is 12x12 of it, the pencil's 20x20, and the tick's 14x11:
+ *  at one nominal size the pencil comes out two thirds larger than the cross and
+ *  the tick a third shorter. These are the two sizes at which all three stop
+ *  looking different. (Matching the pencil's ink exactly would take it to 8px,
+ *  where its stroke falls below half a pixel and washes out.) */
+const EDIT_ICON = 10
+const TICK_ICON = 14
 
 let snapshot: SnapshotWire | null = null
 let annotateMode: Mode = 'off'
@@ -322,6 +340,15 @@ const SHORTCUTS: Shortcut[] = [
     label: '送出給 agent',
     match: cmd('Enter'),
     run: () => void sendBatch(),
+    whileTyping: true,
+  },
+  {
+    keys: `${MOD_LABEL} .`,
+    label: '中止 agent 這一輪',
+    match: cmd('.'),
+    run: () => void cancelTurn(),
+    /** The reason to stop the agent usually arrives while the next batch is being
+     *  typed - watching it head the wrong way is what prompts it. */
     whileTyping: true,
   },
   {
@@ -990,18 +1017,79 @@ const noteAttach = attachify({
     {
       id: 'element',
       label: 'Element',
-      hint: `${MOD_LABEL} 點一下元素，或拖曳框選範圍`,
+      hint: '選取頁面元素或範圍',
       keywords: ['element', 'pick', 'ref', 'reference', '元素', '指定', '參考', '框選'],
       icon: AlignSelectionIcon as IconNode,
       // The pointer is in the other document, so this can only ask. The answer
       // comes back as a message and lands here via the pick reducer.
       run: () => startPick('note'),
     },
+    {
+      id: 'new',
+      label: 'New chat',
+      hint: '開啟新對話',
+      keywords: ['new', 'chat', 'clear', 'reset', 'context', '新對話', '清除', '重設'],
+      icon: BubbleChatAddIcon as IconNode,
+      // Only ACP mode has a context this can throw away. A CLI-driven agent owns
+      // its own session, and clearing it is a thing the user does in the terminal.
+      enabled: () => !!snapshot?.acp,
+      // The note being typed survives: the slash menu takes only the `/new` out,
+      // and the draft is what the fresh session is about to be asked.
+      run: () => void newChat(),
+    },
   ],
 })
 const note = noteAttach.editable
 note.title = '寫補充說明（N）'
 queueSection.append(queueScroll, noteAttach.wrap, sendBtn)
+
+/** The editor for a queued annotation: the row's own comment, in place. One
+ *  composer, built once and moved into whichever row is open - nothing else on
+ *  screen, because the row already says which annotation this is and which number
+ *  it holds.
+ *
+ *  It can live in a row now because `paintQueue` only rebuilds the queue when the
+ *  annotations themselves change. A rebuild still moves this between parents,
+ *  which costs the caret but not the text - it is the same element either way -
+ *  and the only thing that triggers one mid-edit is annotating something new,
+ *  which takes the focus into the page regardless. */
+const editAttach = attachify({
+  api: API,
+  mk: h,
+  className: 'ez-qi-input',
+  // Worded as the page popup's, which asks the same question of the same kind of
+  // text, and puts the keys in the field rather than on a line of their own.
+  placeholder: `想怎麼調整？輸入 / 用指令（${MOD_LABEL}+Enter 儲存）`,
+  // The box grows with what is typed into it, and the queue's height budget is
+  // what decides whether the row it grew into is still whole on screen.
+  onChange: () => {
+    paintEditState()
+    capQueue()
+  },
+})
+
+/** Capture on the composer's wrapper, so this outranks both the slash menu inside
+ *  it and the shell's own table outside: while a comment is being edited,
+ *  Cmd+Enter is this save rather than the batch send, and Escape is this cancel
+ *  rather than a blur. The slash menu is a layer within this one, so it goes
+ *  first. */
+editAttach.wrap.addEventListener(
+  'keydown',
+  (e) => {
+    if (e.key === 'Escape') {
+      e.preventDefault()
+      e.stopPropagation()
+      if (!editAttach.closeSlash()) closeEdit('cancelled')
+      return
+    }
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault()
+      e.stopPropagation()
+      void saveEdit()
+    }
+  },
+  true,
+)
 
 const convSection = h('section', 'ez-section ez-conv-section')
 const convList = h('div', 'ez-conv')
@@ -1279,12 +1367,19 @@ function paintSidebarWidth(): void {
   paintFrames()
 }
 
-function setSidebarWidth(width: number): void {
+/** A narrower sidebar rewraps every queued comment, so the two rows the queue's
+ *  height budget is measured from are no longer the height they were. `paintQueue`
+ *  only measures when the rows themselves change, which a resize is not.
+ *
+ *  Kept out of `paintSidebarWidth` because that also runs once at module init,
+ *  before the fade painters `capQueue` reaches for have been assigned. */
+function resizeSidebar(width: number): void {
   preferredWidth = clampSidebar(width)
   paintSidebarWidth()
+  capQueue()
 }
 
-/** Left out of `setSidebarWidth`: a drag calls that on every pointer move, and
+/** Left out of `resizeSidebar`: a drag calls that on every pointer move, and
  *  the width it settles on is the only one worth a synchronous write. */
 function persistSidebarWidth(): void {
   try {
@@ -1296,6 +1391,7 @@ paintSidebarWidth()
 addEventListener('resize', () => {
   paintSidebarWidth()
   paintFrames()
+  capQueue()
 })
 
 
@@ -1307,7 +1403,7 @@ resizer.addEventListener('pointerdown', (e) => {
   // the drag over the iframe, which would otherwise swallow every move.
   resizer.setPointerCapture(e.pointerId)
   document.body.classList.add('ez-resizing')
-  const move = (ev: PointerEvent) => setSidebarWidth(startWidth + startX - ev.clientX)
+  const move = (ev: PointerEvent) => resizeSidebar(startWidth + startX - ev.clientX)
   resizer.addEventListener('pointermove', move)
   resizer.addEventListener(
     'lostpointercapture',
@@ -1321,14 +1417,14 @@ resizer.addEventListener('pointerdown', (e) => {
 })
 
 resizer.addEventListener('dblclick', () => {
-  setSidebarWidth(SIDEBAR_DEFAULT)
+  resizeSidebar(SIDEBAR_DEFAULT)
   persistSidebarWidth()
 })
 
 resizer.addEventListener('keydown', (e) => {
   const step = e.shiftKey ? 48 : 16
-  if (e.key === 'ArrowLeft') setSidebarWidth(sidebar.getBoundingClientRect().width + step)
-  else if (e.key === 'ArrowRight') setSidebarWidth(sidebar.getBoundingClientRect().width - step)
+  if (e.key === 'ArrowLeft') resizeSidebar(sidebar.getBoundingClientRect().width + step)
+  else if (e.key === 'ArrowRight') resizeSidebar(sidebar.getBoundingClientRect().width - step)
   else return
   persistSidebarWidth()
   e.preventDefault()
@@ -1503,6 +1599,183 @@ async function sendBatch(): Promise<void> {
   }
 }
 
+/** Which row is open for editing. One at a time - there is one composer, and it
+ *  is wherever it is. */
+let editing: {
+  id: string
+  /** Files the annotation already had when the edit opened. What is chipped in the
+   *  box and *not* in this set was uploaded during the edit, so a cancel owns
+   *  it. */
+  owned: Set<string>
+} | null = null
+let editSaving = false
+/** The open row's tick, which `paintQueue` rebuilds - so it is re-pointed there
+ *  rather than held. Null whenever no row is open. */
+let editSave: HTMLButtonElement | null = null
+
+function paintEditState(): void {
+  if (!editing || !editSave) return
+  const empty = !editAttach.text() && !editAttach.ids().length && !editAttach.refs().length
+  editSave.disabled = editSaving || empty || editAttach.pending() > 0
+}
+
+/** Turn a queued row's comment into a box, seeded with exactly what it was
+ *  showing - chips where the sentence had them. */
+function openEdit(a: AnnotationWire): void {
+  if (editing?.id === a.id) return
+  closeEdit('switched')
+  editing = { id: a.id, owned: new Set((a.attachments ?? []).map((f) => f.id)) }
+  // Draws the row around the composer, which is what puts it in the document.
+  render()
+  // Focused before the seeding, and both only once it is on screen: `restore`
+  // leaves the caret past the last node, and a selection set on a detached
+  // element is silently dropped - the box would then open with the caret at
+  // offset 0 and typing would land in front of the comment.
+  editAttach.editable.focus()
+  editAttach.restore(bodyFromComment(a.comment, a.references ?? [], a.attachments ?? []))
+  paintEditState()
+}
+
+/** Tear the editor down. `reason` decides who owns the files chipped in it: a
+ *  cancelled edit never happened, so anything uploaded during it belongs to
+ *  nobody and goes now rather than waiting a day for the sweep. A saved or
+ *  vanished one has already handed them over. */
+function closeEdit(reason: 'cancelled' | 'saved' | 'switched' | 'gone'): void {
+  const at = editing
+  if (!at) return
+  editing = null
+  editSaving = false
+  if (reason === 'cancelled' || reason === 'switched') {
+    for (const id of editAttach.ids()) {
+      if (!at.owned.has(id)) void api(`/attachments/${id}`, { method: 'DELETE' })
+    }
+  }
+  // `reset`, not `discard`: the files this box still holds belong to the
+  // annotation, and only the ones the edit itself added were just collected.
+  editAttach.reset()
+  editSave = null
+  // A vanished annotation is already being redrawn by the render that noticed it.
+  if (reason !== 'gone') render()
+}
+
+/** Saves the whole comment - text, files and picked elements - because all three
+ *  are one walk of the box and cannot be sent separately without going out of
+ *  step. The editor stays open if the request fails: the user's words are in it
+ *  and nowhere else. */
+async function saveEdit(): Promise<void> {
+  const at = editing
+  if (!at || editSaving || editSave?.disabled !== false) return
+  editSaving = true
+  paintEditState()
+  try {
+    const res = await api(`/annotations/${at.id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({
+        comment: editAttach.text(),
+        attachments: editAttach.ids(),
+        references: editAttach.refs(),
+      }),
+    })
+    if (!res.ok) return
+    closeEdit('saved')
+  } finally {
+    editSaving = false
+    paintEditState()
+  }
+}
+
+/** Stop the turn the agent is in the middle of. A 409 means the turn ended
+ *  between the click and the request, which is the outcome asked for anyway - the
+ *  snapshot that follows says what actually happened, so nothing is reported. */
+async function cancelTurn(): Promise<void> {
+  const acp = snapshot?.acp
+  if (acp?.state !== 'working' || acp.cancelling) return
+  await api('/acp/cancel', { method: 'POST' })
+}
+
+/** Throw away the agent's context and carry on in a fresh session. No
+ *  confirmation: the thread keeps every word of the review either way, and what
+ *  is being dropped is the agent's memory of it - which is what the user just
+ *  asked to drop. */
+async function newChat(): Promise<void> {
+  if (!snapshot?.acp) return
+  await api('/acp/new', { method: 'POST' })
+}
+
+/** Signature of what the queue currently draws. `render()` runs on every
+ *  snapshot - an ACP turn broadcasts one per streamed chunk - and the queue is
+ *  rebuilt from scratch, so without this a delete button is swapped out from under
+ *  the pointer between mousedown and mouseup, and the row being edited loses the
+ *  caret in it. The list is a handful of small objects, so stringifying it is
+ *  cheaper than the DOM work it avoids. */
+let queueDrawn: string | null = null
+
+function paintQueue(annotations: AnnotationWire[]): void {
+  // An annotation edited into a batch that has now been sent takes its editor
+  // with it - there is nothing left to save it to.
+  if (editing && !annotations.some((a) => a.id === editing?.id)) closeEdit('gone')
+  const signature = JSON.stringify([editing?.id ?? null, annotations])
+  if (signature === queueDrawn) return
+  queueDrawn = signature
+
+  queueList.textContent = ''
+  annotations.forEach((a, i) => {
+    const li = h('li', 'ez-queue-item')
+    const head = h('div', 'ez-qi-head')
+    head.append(h('span', 'ez-qi-num', String(i + 1)), h('span', 'ez-qi-label', annotationLabel(a)))
+    // A chip, not part of the label: the label ellipsizes, and the width is the
+    // one detail that must never be the thing that gets cut off.
+    const vp = a.anchor.viewport
+    if (vp?.width && vp.preset !== 'desktop') {
+      head.append(h('span', 'ez-qi-vp', `${vp.width}px`))
+    }
+    // Their own group, so the space between the two is theirs to set and the
+    // head's gap only has to hold them off the label.
+    const acts = h('div', 'ez-qi-acts')
+    // Editing borrows the two buttons the row already has rather than adding any:
+    // the pencil becomes the tick that commits, and the cross - which dismisses
+    // either way - becomes the one that backs out. Nothing appears or moves, so
+    // there is no second place to look.
+    const open = editing?.id === a.id
+    const primary = h('button', `ez-qi-act ${open ? 'ez-qi-tick' : 'ez-qi-edit'}`)
+    primary.append(
+      open
+        ? icon(Tick02Icon as IconNode, TICK_ICON)
+        : icon(Edit02Icon as IconNode, EDIT_ICON),
+    )
+    primary.title = open ? `儲存（${MOD_LABEL}+Enter）` : '改這則標註（送出前都還能改）'
+    primary.onclick = open ? () => void saveEdit() : () => openEdit(a)
+    const dismiss = h('button', 'ez-qi-act ez-qi-del')
+    dismiss.append(icon(Cancel01Icon as IconNode, 13))
+    dismiss.title = open ? '取消（Esc）' : '移除這則標註'
+    dismiss.onclick = open
+      ? () => closeEdit('cancelled')
+      : () => void api(`/annotations/${a.id}`, { method: 'DELETE' })
+    acts.append(primary, dismiss)
+    head.append(acts)
+    if (open) {
+      li.dataset.editing = ''
+      editSave = primary
+      li.append(head, editAttach.wrap)
+      queueList.appendChild(li)
+      paintEditState()
+      return
+    }
+    li.append(head)
+    const row = commentEl(
+      a.comment,
+      a.references,
+      a.attachments?.map((f) => f.name),
+      'ez-qi-comment',
+    )
+    if (a.comment || a.references?.length || a.attachments?.length) li.append(row.box)
+    const files = fileChips(row.unplacedFiles)
+    if (files) li.append(files)
+    queueList.appendChild(li)
+  })
+  capQueue()
+}
+
 function annotationLabel(a: AnnotationWire): string {
   const parts: string[] = []
   if (a.anchor.source) parts.push(a.anchor.source)
@@ -1668,9 +1941,16 @@ function capQueue(): void {
     const budget =
       items.slice(0, QUEUE_VISIBLE).reduce((sum, li) => sum + li.offsetHeight, 0) +
       gap * (QUEUE_VISIBLE - 1)
-    queueList.style.maxHeight = `${budget}px`
+    // The open row has to fit whole: the budget is measured from collapsed rows,
+    // and a box clipped into a scroller of its own is the thing editing in place
+    // is meant to avoid.
+    const open = items.find((li) => li.dataset.editing !== undefined)
+    queueList.style.maxHeight = `${Math.max(budget, open?.offsetHeight ?? 0)}px`
   } else {
     queueList.style.maxHeight = ''
+  }
+  if (editing) {
+    queueList.querySelector<HTMLElement>('[data-editing]')?.scrollIntoView({ block: 'nearest' })
   }
   paintQueueFades()
 }
@@ -1725,7 +2005,12 @@ function render(): void {
   for (const { btn } of annotateBtns) btn.disabled = ended
   paintSendState()
 
-  if (s.agentBusy) {
+  if (s.acp?.cancelling) {
+    // The cancel is out and the agent has not answered yet. With no button to grey
+    // out, this is the only thing that says the keypress landed.
+    agentStatus.className = 'ez-badge ez-working'
+    agentStatus.textContent = '正在中止'
+  } else if (s.agentBusy) {
     agentStatus.className = 'ez-badge ez-working'
     agentStatus.textContent = 'Agent 修改中'
   } else if (s.agentOnline) {
@@ -1736,39 +2021,15 @@ function render(): void {
     agentStatus.textContent = 'Agent 未連線'
   }
 
-  queueList.textContent = ''
-  s.annotations.forEach((a, i) => {
-    const li = h('li', 'ez-queue-item')
-    const head = h('div', 'ez-qi-head')
-    head.append(h('span', 'ez-qi-num', String(i + 1)), h('span', 'ez-qi-label', annotationLabel(a)))
-    // A chip, not part of the label: the label ellipsizes, and the width is the
-    // one detail that must never be the thing that gets cut off.
-    const vp = a.anchor.viewport
-    if (vp?.width && vp.preset !== 'desktop') {
-      head.append(h('span', 'ez-qi-vp', `${vp.width}px`))
-    }
-    const del = h('button', 'ez-qi-del')
-    del.append(icon(Cancel01Icon as IconNode, 13))
-    del.title = '移除這則標註'
-    del.onclick = () => void api(`/annotations/${a.id}`, { method: 'DELETE' })
-    head.append(del)
-    li.append(head)
-    const row = commentEl(
-      a.comment,
-      a.references,
-      a.attachments?.map((f) => f.name),
-      'ez-qi-comment',
-    )
-    if (a.comment || a.references?.length || a.attachments?.length) li.append(row.box)
-    const files = fileChips(row.unplacedFiles)
-    if (files) li.append(files)
-    queueList.appendChild(li)
-  })
-  capQueue()
+  paintQueue(s.annotations)
 
   convList.textContent = ''
   let prevRole: string | null = null
-  for (const entry of s.conversation) {
+  // Placed where the log says, except that an answer goes under its own question -
+  // see `threadOrder`. The live turn follows the same rule, which is what keeps a
+  // reply from jumping down the thread the instant it stops streaming.
+  let livePlaced = false
+  for (const entry of threadOrder(s.conversation)) {
     if (entry.role === 'system') {
       convList.appendChild(h('div', 'ez-msg-system', entry.text))
       prevRole = null
@@ -1780,39 +2041,51 @@ function render(): void {
     item.append(buildSaid(entry, isUser))
     convList.appendChild(item)
     prevRole = entry.role
+    if (s.agentBusy && isUser && entry.batchId && entry.batchId === s.activeBatchId) {
+      convList.appendChild(liveTurnEl(s, prevRole))
+      livePlaced = true
+      // The next entry follows a turn, not a question, whatever the log order is.
+      prevRole = 'agent'
+    }
   }
-
-  if (s.agentBusy) {
-    // Grouped on the same rule a real turn would use: this row is a placeholder
-    // for the reply that replaces it, and a different margin here would make the
-    // thread step sideways at the moment it lands.
-    const row = h('div', `ez-msg ez-msg-agent${prevRole === 'agent' ? ' ez-msg-cont' : ''}`)
-    const dots = h('div', 'ez-thinking')
-    dots.setAttribute('role', 'status')
-    dots.setAttribute('aria-label', s.agentProgress ?? 'Agent 修改中')
-    for (let i = 0; i < 3; i++) dots.appendChild(h('span', 'ez-dot'))
-    // The agent's own words on what it is doing, when it sends any - rendered
-    // where the reply will land, because it is the reply, mid-formation.
-    if (s.agentProgress) dots.appendChild(h('span', 'ez-progress', s.agentProgress))
-    // A column of its own: `.ez-msg` is a flex row, and the dots sitting beside
-    // the feed reads as two columns of unrelated text.
-    const turn = h('div', 'ez-acp-turn')
-    // SPIKE, ACP mode: the live turn - tools, thoughts, plan, and the reply as
-    // it streams - rendered where that reply will land. The dots go last: the
-    // feed reads top-down as what already happened, and the pulse marks where
-    // the next line will appear.
-    if (s.acp && s.acp.state === 'working') turn.append(acpFeedEl(s.acp))
-    turn.append(dots)
-    row.append(turn)
-    convList.appendChild(row)
-  }
+  // Nothing in the thread claimed it: a turn with no batch behind it, or one whose
+  // question is not in the log. It still has to be visible, so it goes last.
+  if (s.agentBusy && !livePlaced) convList.appendChild(liveTurnEl(s, prevRole))
   if (s.acp?.ask) convList.appendChild(acpAskEl(s.acp.ask))
   if (s.acp?.state === 'exited' && s.acp.error) {
-    convList.appendChild(h('div', 'ez-msg-system', `agent 已離線：${s.acp.error}`))
+    convList.appendChild(
+      h('div', 'ez-msg-system ez-msg-system-plain', `agent 已離線：${s.acp.error}`),
+    )
   }
 
   convList.scrollTop = convList.scrollHeight
   paintConvFades()
+}
+
+/** The turn in flight, drawn where its finished reply will be - so the reply does
+ *  not move when it lands. */
+function liveTurnEl(s: SnapshotWire, prevRole: string | null): HTMLElement {
+  // Grouped on the same rule a real turn would use: this row is a placeholder for
+  // the reply that replaces it, and a different margin here would make the thread
+  // step sideways at the moment it lands.
+  const row = h('div', `ez-msg ez-msg-agent${prevRole === 'agent' ? ' ez-msg-cont' : ''}`)
+  const dots = h('div', 'ez-thinking')
+  dots.setAttribute('role', 'status')
+  dots.setAttribute('aria-label', s.agentProgress ?? 'Agent 修改中')
+  for (let i = 0; i < 3; i++) dots.appendChild(h('span', 'ez-dot'))
+  // The agent's own words on what it is doing, when it sends any - rendered where
+  // the reply will land, because it is the reply, mid-formation.
+  if (s.agentProgress) dots.appendChild(h('span', 'ez-progress', s.agentProgress))
+  // A column of its own: `.ez-msg` is a flex row, and the dots sitting beside the
+  // feed reads as two columns of unrelated text.
+  const turn = h('div', 'ez-acp-turn')
+  // SPIKE, ACP mode: the live turn - tools, thoughts, plan, and the reply as it
+  // streams. The dots go last: the feed reads top-down as what already happened,
+  // and the pulse marks where the next line will appear.
+  if (s.acp && s.acp.state === 'working') turn.append(acpFeedEl(s.acp))
+  turn.append(dots)
+  row.append(turn)
+  return row
 }
 
 /** SPIKE: the live turn, in the order it happened - the agent says a sentence,

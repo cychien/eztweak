@@ -153,6 +153,65 @@ export function draftText(body: DraftNode[]): string {
   return out.join('').replaceAll(NBSP, ' ').trim()
 }
 
+/** A stored comment back into composer nodes - the inverse of the send-time walk,
+ *  and what lets a queued annotation be reopened in a box and edited.
+ *
+ *  Each `[ref n]` / `[file n]` becomes its chip where the sentence had it, so the
+ *  edit starts from what the reader was already looking at. A marker naming
+ *  something that is no longer there stays as literal text, exactly as the
+ *  read-only renderer shows it: the user can then see it and delete it, which is
+ *  better than a silent disappearance they cannot account for.
+ *
+ *  Anything the markers did *not* place is appended. That is not a corner case -
+ *  annotations written before `[file n]` existed carry files with no marker at
+ *  all, and dropping them here would mean editing an old comment quietly threw
+ *  its screenshots away. */
+export function bodyFromComment(
+  text: string,
+  refs: NumberedRef[],
+  files: { id: string; name: string }[],
+): DraftNode[] {
+  const byNumber = new Map(refs.map((r) => [r.n, r]))
+  const placedRefs = new Set<number>()
+  const placedFiles = new Set<number>()
+  const body: DraftNode[] = []
+  for (const part of splitComment(text)) {
+    if (part.t === 'text') {
+      body.push({ t: 'text', v: part.v })
+      continue
+    }
+    if (part.t === 'ref') {
+      const ref = byNumber.get(part.n)
+      if (!ref) {
+        body.push({ t: 'text', v: refMarker(part.n) })
+        continue
+      }
+      placedRefs.add(part.n)
+      body.push({ t: 'ref', n: ref.n, anchor: ref.anchor, label: ref.label })
+      continue
+    }
+    const file = files[part.n - 1]
+    if (!file) {
+      body.push({ t: 'text', v: fileMarker(part.n) })
+      continue
+    }
+    placedFiles.add(part.n)
+    body.push({ t: 'file', id: file.id, name: file.name })
+  }
+  const trailing: DraftNode[] = []
+  for (const ref of refs) {
+    if (!placedRefs.has(ref.n)) trailing.push({ t: 'ref', ...ref })
+  }
+  files.forEach((file, i) => {
+    if (!placedFiles.has(i + 1)) trailing.push({ t: 'file', id: file.id, name: file.name })
+  })
+  // A space before each appended chip, and one after the last: chips are atomic
+  // to the caret, so without them an appended run has nowhere to type between.
+  for (const node of trailing) body.push({ t: 'text', v: NBSP }, node)
+  body.push({ t: 'text', v: NBSP })
+  return normalizeDraft(body)
+}
+
 /** Resolved references in document order, each carrying the number the comment
  *  refers to it by. Order and numbering are independent: the array is positional,
  *  `n` is an identity. */

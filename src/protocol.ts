@@ -113,6 +113,10 @@ export interface ConversationEntry {
   /** Free-form message. For a sent batch this is the user's note, if any. */
   text: string
   ts: number
+  /** For a user entry, the batch it sent. For an agent or turn-end system entry,
+   *  the batch it answers - which is what lets the thread draw a reply under its
+   *  own question when the two are not adjacent in the log. Absent on anything
+   *  that belongs to no batch. */
   batchId?: string
   items?: ConversationItem[]
   attachments?: string[]

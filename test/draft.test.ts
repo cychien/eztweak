@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
   NBSP,
+  bodyFromComment,
   draftBelongsHere,
   draftExpired,
   draftFileIds,
@@ -16,7 +17,7 @@ import {
   restorableBody,
   splitComment,
 } from '../src/client/draft.js'
-import type { AnchorWire, DraftNode, DraftWire } from '../src/client/draft.js'
+import type { AnchorWire, DraftNode, DraftWire, NumberedRef } from '../src/client/draft.js'
 
 const text = (v: string): DraftNode => ({ t: 'text', v })
 const file = (id: string, name: string): DraftNode => ({ t: 'file', id, name })
@@ -296,4 +297,99 @@ test('both kinds of marker split out of one comment', () => {
     { t: 'file', n: 1 },
     { t: 'text', v: ' C' },
   ])
+})
+
+// ------------------------------------------------------- bodyFromComment
+
+const anchorAt = (source: string): AnchorWire => ({ source })
+const aRef = (n: number, source: string): NumberedRef => ({
+  n,
+  anchor: anchorAt(source),
+  label: source,
+})
+const aFile = (id: string, name: string) => ({ id, name })
+
+/** What the editor has to guarantee: reopening a stored comment and saving it
+ *  untouched leaves the annotation as it was. The text is compared after
+ *  `draftText`'s own trim, which is what a save would have written anyway. */
+function roundTrip(
+  text: string,
+  refs: NumberedRef[],
+  files: { id: string; name: string }[],
+): { text: string; refs: NumberedRef[]; ids: string[] } {
+  const body = bodyFromComment(text, refs, files)
+  return { text: draftText(body), refs: draftRefs(body), ids: draftFileIds(body) }
+}
+
+test('a plain comment round-trips through the editor untouched', () => {
+  assert.deepEqual(roundTrip('這邊的間距再小一點', [], []), {
+    text: '這邊的間距再小一點',
+    refs: [],
+    ids: [],
+  })
+})
+
+test('chips are rebuilt where the sentence had them', () => {
+  const body = bodyFromComment(
+    '把這個改成跟 [ref 2] 一樣，參考 [file 1]',
+    [aRef(2, 'src/Hero.tsx:4')],
+    [aFile('f1', 'shot.png')],
+  )
+  assert.deepEqual(
+    body.map((n) => n.t),
+    ['text', 'ref', 'text', 'file', 'text'],
+  )
+  assert.deepEqual(roundTrip('把這個改成跟 [ref 2] 一樣，參考 [file 1]', [aRef(2, 'src/Hero.tsx:4')], [
+    aFile('f1', 'shot.png'),
+  ]), {
+    text: '把這個改成跟 [ref 2] 一樣，參考 [file 1]',
+    refs: [aRef(2, 'src/Hero.tsx:4')],
+    ids: ['f1'],
+  })
+})
+
+// A reference's number is its identity, not its position - so a comment that
+// names only [ref 5] has to come back naming [ref 5], not [ref 1].
+test('a reference keeps its own number, gaps and all', () => {
+  assert.deepEqual(roundTrip('像 [ref 5] 那樣', [aRef(5, 'a.tsx:1')], []), {
+    text: '像 [ref 5] 那樣',
+    refs: [aRef(5, 'a.tsx:1')],
+    ids: [],
+  })
+})
+
+// The case that would otherwise lose data silently: annotations written before
+// `[file n]` existed carry files that no marker places.
+test('files no marker places are appended rather than dropped', () => {
+  const result = roundTrip('看一下這個', [], [aFile('f1', 'a.png'), aFile('f2', 'b.png')])
+  assert.deepEqual(result.ids, ['f1', 'f2'])
+  assert.equal(result.text, '看一下這個 [file 1] [file 2]')
+})
+
+test('references no marker places are appended too', () => {
+  const result = roundTrip('對齊一下', [aRef(1, 'a.tsx:1'), aRef(3, 'b.tsx:9')], [])
+  assert.deepEqual(result.refs, [aRef(1, 'a.tsx:1'), aRef(3, 'b.tsx:9')])
+  assert.equal(result.text, '對齊一下 [ref 1] [ref 3]')
+})
+
+// Better than a chip that quietly vanishes: the user can see the dead marker and
+// delete it. This is also what the read-only renderer shows.
+test('a marker naming something that is gone stays as literal text', () => {
+  const result = roundTrip('像 [ref 9] 那樣，還有 [file 4]', [], [])
+  assert.equal(result.text, '像 [ref 9] 那樣，還有 [file 4]')
+  assert.deepEqual(result.refs, [])
+  assert.deepEqual(result.ids, [])
+})
+
+// `[file n]` is positional, so a comment that names them out of order comes back
+// renumbered - but paired with the same ids, which is what actually matters.
+test('out-of-order file markers renumber against the ids they name', () => {
+  const result = roundTrip('先 [file 2] 再 [file 1]', [], [aFile('f1', 'a.png'), aFile('f2', 'b.png')])
+  assert.equal(result.text, '先 [file 1] 再 [file 2]')
+  assert.deepEqual(result.ids, ['f2', 'f1'], 'the second id is still the one named first')
+})
+
+test('the body always ends on text, so the caret can sit past a trailing chip', () => {
+  const body = bodyFromComment('看 [file 1]', [], [aFile('f1', 'a.png')])
+  assert.equal(body[body.length - 1]?.t, 'text')
 })

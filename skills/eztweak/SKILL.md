@@ -51,7 +51,10 @@ the user did not provide an ACP command, ask them which ACP agent to use.
    explicitly asked to review again.
 3. Once the CLI reports the session and agent, tell the user the review shell is ready. Do not start
    a parallel feedback loop or shadow the ACP agent's edits. The daemon delivers queued and future
-   batches automatically, one turn at a time.
+   batches automatically, one turn at a time. The shell owns the turn: the user can stop one that is
+   heading the wrong way (the Stop button, or Cmd/Ctrl+.), `/new` in the note box clears the agent's
+   context and carries the review on in a fresh session, and a batch sent mid-turn queues rather
+   than interrupting - so do not tell the user to wait for a turn to finish before annotating.
 4. The user ends the review from the shell. Do not end or stop a live session unless they ask.
 
 ## Failures and switching agents

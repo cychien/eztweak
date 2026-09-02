@@ -902,7 +902,7 @@ body.ez-arranging .ez-frame {
 }
 
 .ez-conv:empty::after {
-  content: '與 agent 的對話紀錄';
+  content: '想調整什麼 🎨';
   font-size: 12px;
   color: var(--muted-foreground);
   line-height: 1.6;
@@ -923,6 +923,7 @@ body.ez-arranging .ez-frame {
   margin-top: -6px;
 }
 
+
 /* The agent's turns are unboxed, so whitespace is the only thing that separates
    one reply from the bubble on either side of it, and the only thing that
    separates two replies from each other. Both need more than the default gap,
@@ -930,7 +931,7 @@ body.ez-arranging .ez-frame {
    stops, and between two agent replies there is no edge at all. */
 .ez-msg-agent:not(:first-child),
 .ez-msg-agent + .ez-msg-user {
-  margin-top: 18px;
+  margin-top: 10px;
 }
 
 .ez-msg-agent.ez-msg-cont {
@@ -1033,7 +1034,13 @@ body.ez-arranging .ez-frame {
      arrives - the list is pinned to the bottom, so a row that grows moves
      everything above it. */
   --ez-progress-line: 17px;
-  --ez-progress-pad: 6px;
+  /* Small on purpose. The reserve above is split evenly around a 4px dot by
+     `align-items: center`, so every pixel of it pushes the dots half a pixel
+     further from the bubble they answer - and measured against a real reply,
+     whose first line of ink starts 20px below that bubble, 6px here put the dots
+     at 32.5px. 2px lands their centre where a first line's ink centre would be,
+     which is where a mark this small has to sit to read as the same line. */
+  --ez-progress-pad: 2px;
   display: flex;
   align-items: center;
   gap: 3px;
@@ -1095,11 +1102,41 @@ body.ez-arranging .ez-frame {
   }
 }
 
+/* A boundary in the thread rather than something someone said in it - where a
+   turn stopped, or the session did. The rules are what make it read as a line
+   drawn across the conversation; they shrink rather than vanish when the notice
+   is one of the longer ones. The text is an anonymous flex item, which already
+   defaults to `flex: 0 1 auto` - it takes the width it needs and the rules divide
+   what is left. */
 .ez-msg-system {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   font-size: 11.5px;
   color: var(--muted-foreground);
-  text-align: center;
   padding: 2px 0;
+}
+
+.ez-msg-system::before,
+.ez-msg-system::after {
+  content: '';
+  flex: 1 1 auto;
+  min-width: 12px;
+  /* A border rather than a 1px filled box: only a border can be dashed. */
+  border-top: 1px dashed var(--border);
+}
+
+/* The agent's own error is not a boundary - it is a message with a payload, and a
+   rule either side of three lines of stderr reads as decoration. */
+.ez-msg-system-plain {
+  display: block;
+  text-align: center;
+  white-space: pre-wrap;
+}
+
+.ez-msg-system-plain::before,
+.ez-msg-system-plain::after {
+  content: none;
 }
 
 /* ---------------------------------------------------------------- queue */
@@ -1222,19 +1259,64 @@ body.ez-arranging .ez-frame {
   flex-shrink: 0;
 }
 
-.ez-qi-del {
+/* Butted together: the two glyphs carry their own slack - centred in equal boxes,
+   the pencil's ink leaves 3.8px a side and the cross's 4.7px - so any gap on top
+   of that reads as a wide one. Zero here is what puts them next to each other. */
+.ez-qi-acts {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  flex-shrink: 0;
+  /* A pixel right, by eye. A transform rather than a margin, so the nudge does not
+     also hand the label a pixel it would then re-wrap into. The row has 11px of
+     padding to spend, so nothing comes near the edge. */
+  transform: translateX(1px);
+}
+
+/* A square, not padding: equal boxes with the glyph centred in each is what makes
+   two icons of different natural sizes line up on both axes. */
+.ez-qi-act {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
   border: none;
   background: transparent;
   color: var(--ink-faint);
   cursor: pointer;
   flex-shrink: 0;
   border-radius: 4px;
-  padding: 2px;
 }
 
-.ez-qi-del:hover {
+.ez-qi-act:hover:not(:disabled) {
+  color: var(--foreground);
+}
+
+/* Half a pixel up, by eye. The pencil's frame is centred like every other, but the
+   short stroke it carries at the very bottom of that frame weighs the glyph down,
+   so centring the frame leaves the mark itself reading low. On the glyph rather
+   than the button, so the hit area stays where it is. */
+.ez-qi-edit svg {
+  transform: translateY(-1px);
+}
+
+.ez-qi-tick svg {
+  transform: translateY(0.3px);
+}
+
+/* The tick, while the comment it would commit is empty. */
+.ez-qi-act:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* The one destructive action in the row gets the only colour in it. Written to
+   outrank `.ez-qi-act:hover:not(:disabled)` above, which `:not()` pushes to three
+   class-level components - order alone would not settle it, and the red silently
+   stopped applying when that `:not()` was added. */
+.ez-qi-act.ez-qi-del:hover:not(:disabled) {
   color: oklch(52% 0.2 25);
 }
 
@@ -1243,6 +1325,41 @@ body.ez-arranging .ez-frame {
   margin-top: 4px;
   line-height: 1.55;
   word-break: break-word;
+}
+
+/* The row with its comment open as a box. It keeps its own sunken fill and the
+   field inside it stays white, which is the contrast that says which part is now
+   typeable - the page popup does the reverse for the same reason, a recessed field
+   inside a light card. */
+.ez-queue-item[data-editing] .ez-attach {
+  margin: 6px 0 0;
+}
+
+/* Grows with its content, capped only so one very long comment cannot take the
+   queue's whole share of the sidebar - `capQueue` raises the queue's own budget to
+   fit whatever this comes to. */
+.ez-qi-input {
+  display: block;
+  position: relative;
+  min-height: 34px;
+  max-height: 34vh;
+  overflow-y: auto;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.5;
+  color: var(--foreground);
+  white-space: pre-wrap;
+  word-break: break-word;
+  outline: none;
+}
+
+.ez-qi-input[data-empty]::before {
+  content: attr(data-placeholder);
+  position: absolute;
+  inset: 0 0 auto 0;
+  color: var(--ink-faint);
+  pointer-events: none;
 }
 
 .ez-attach {
@@ -1458,7 +1575,6 @@ body.ez-arranging .ez-frame {
    every snapshot, gone the moment the reply lands. */
 .ez-acp-feed {
   width: 100%;
-  margin-top: 6px;
   display: flex;
   flex-direction: column;
   gap: 3px;
@@ -1553,7 +1669,25 @@ body.ez-arranging .ez-frame {
 }
 
 .ez-acp-say {
-  margin: 4px 0;
+  margin: 8px 0;
+}
+
+/* The feed's own edges belong to the turn, not to the prose: the row above and
+   the dots below already own that space. */
+.ez-acp-say:first-child {
+  margin-top: 0;
+}
+
+.ez-acp-say:last-child {
+  margin-bottom: 0;
+}
+
+/* The pulse marks where the next line lands, so it needs to read as separate
+   from the line that already did - not as its continuation. Carries what the
+   row's own block padding used to contribute, so trimming that padding moves the
+   dots closer to the bubble without also moving them closer to the feed. */
+.ez-acp-feed:not(:empty) + .ez-thinking {
+  margin-top: 12px;
 }
 
 /* ------------------------------------------------------- agent markdown */
@@ -1573,8 +1707,11 @@ body.ez-arranging .ez-frame {
   margin-bottom: 0;
 }
 
+/* 10, not 7: at 12.5px in a narrow column a paragraph break of 0.56em reads as a
+   line break, and the agent's replies are mostly short paragraphs - the break is
+   the only thing separating one point from the next. */
 .ez-md p {
-  margin: 7px 0;
+  margin: 10px 0;
 }
 
 .ez-md h5,
@@ -1584,14 +1721,22 @@ body.ez-arranging .ez-frame {
   font-weight: 650;
 }
 
+/* Same as a paragraph's: a list is one more block in the same flow, and a smaller
+   gap here would tie it to whichever paragraph happened to precede it. */
 .ez-md ul,
 .ez-md ol {
-  margin: 7px 0;
+  margin: 10px 0;
   padding-left: 20px;
 }
 
 .ez-md li {
   margin: 3px 0;
+}
+
+/* 600, not the UA's 700: at 12.5px in a 340px column the browser's bold reads as
+   a shout next to the body text it is meant to be emphasis within. */
+.ez-md strong {
+  font-weight: 600;
 }
 
 .ez-md a {
