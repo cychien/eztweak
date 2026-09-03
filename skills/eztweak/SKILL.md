@@ -2,7 +2,7 @@
 name: eztweak
 description: Start an ACP-managed visual review loop on a live dev app. The user annotates the real page in the browser, and a spawned coding agent receives exact source locations, edits the code, and reports progress in the review shell. Use after generating or modifying UI the user should visually review, or when the user asks to review or annotate a running page.
 metadata:
-  version: 0.6.1
+  version: 0.6.2
 ---
 
 # eztweak - live-app ACP review
