@@ -92,6 +92,7 @@ interface ConversationWire {
 }
 
 interface SnapshotWire {
+  version: string
   state: 'active' | 'ended'
   /** The batch the agent is answering right now. */
   activeBatchId?: string
@@ -103,6 +104,15 @@ interface SnapshotWire {
   agentBusy: boolean
   agentProgress?: string
   acp?: AcpWire
+  update?: UpdateWire
+}
+
+/** A newer daemon on the registry, and how far the update has got once the user
+ *  took it up. */
+interface UpdateWire {
+  latest: string
+  phase: 'available' | 'installing' | 'handing-over' | 'failed'
+  error?: string
 }
 
 /** SPIKE: the session drives its agent over ACP - live activity and questions. */
@@ -266,7 +276,50 @@ function h<K extends keyof HTMLElementTagNameMap>(
 
 // ---------------------------------------------------------------- static layout
 
-const brand = h('div', 'ez-brand', 'Review')
+const brand = h('div', 'ez-brand', 'eztweak')
+const version = h('span', 'ez-version')
+/** The way back to an update the user put off: the card is gone, this is not.
+ *  Opens a one-item menu rather than bringing the card back - by this point the
+ *  card has already been read and dismissed, so what is wanted is the action, not
+ *  the explanation again. */
+const updatePill = h('button', 'ez-update-flag')
+updatePill.setAttribute('aria-haspopup', 'menu')
+updatePill.setAttribute('aria-expanded', 'false')
+
+const updateMenu = h('div', 'ez-menu')
+updateMenu.setAttribute('role', 'menu')
+const updateNow = h('button', 'ez-menu-item')
+updateNow.setAttribute('role', 'menuitem')
+updateMenu.append(updateNow)
+
+const updateHint = h('div', 'ez-update-hint')
+updateHint.hidden = true
+updateHint.append(updatePill, updateMenu)
+
+let updateMenuOpen = false
+
+function paintUpdateMenu(): void {
+  updateHint.toggleAttribute('data-open', updateMenuOpen)
+  updatePill.setAttribute('aria-expanded', String(updateMenuOpen))
+}
+
+updatePill.onclick = () => {
+  updateMenuOpen = !updateMenuOpen
+  paintUpdateMenu()
+}
+
+updateNow.onclick = () => {
+  updateMenuOpen = false
+  paintUpdateMenu()
+  void startUpdate()
+}
+
+document.addEventListener('click', (e) => {
+  if (updateMenuOpen && e.target instanceof Node && !updateHint.contains(e.target)) {
+    updateMenuOpen = false
+    paintUpdateMenu()
+  }
+})
 const target = h('span', 'ez-target')
 const agentStatus = h('div', 'ez-badge')
 
@@ -450,7 +503,7 @@ document.addEventListener('click', (e) => {
 })
 
 const headRow = h('div', 'ez-head-row')
-headRow.append(brand, h('div', 'ez-spacer'), keysWrap, agentStatus)
+headRow.append(brand, version, updateHint, h('div', 'ez-spacer'), keysWrap, agentStatus)
 
 /** A menu rather than three buttons in a row: one size is on at a time, and the
  *  other two only matter at the moment of switching. It leaves the header a
@@ -596,6 +649,146 @@ sideHead.append(headRow, target, deviceRow, annotateGroup)
 
 const banner = h('div', 'ez-banner')
 banner.style.display = 'none'
+
+// ---------------------------------------------------------------- update card
+
+const updateCard = h('section', 'ez-update')
+updateCard.hidden = true
+
+const UPDATE_DISMISSED_KEY = 'ez-update-dismissed'
+
+/** What "later" was said to. A different version is a different offer and comes
+ *  back; the same one stays put off until the pill in the header is clicked. */
+function updateOfferKey(u: UpdateWire): string {
+  return `v${u.latest}`
+}
+
+function readUpdateDismissed(): string | null {
+  try {
+    return localStorage.getItem(UPDATE_DISMISSED_KEY)
+  } catch {
+    return null
+  }
+}
+
+function setUpdateDismissed(key: string | null): void {
+  try {
+    if (key) localStorage.setItem(UPDATE_DISMISSED_KEY, key)
+    else localStorage.removeItem(UPDATE_DISMISSED_KEY)
+  } catch {
+    /* storage unavailable: the card simply stays */
+  }
+  render()
+}
+
+let updating = false
+
+async function startUpdate(): Promise<void> {
+  if (updating) return
+  updating = true
+  // Asking for the update revokes any "later" it was put off with. Otherwise a
+  // retry launched from the flag's menu runs with the card still suppressed, and
+  // a second failure of the same version is never shown - the dismissal was
+  // about the offer, not about the outcome of acting on it.
+  setUpdateDismissed(null)
+  try {
+    await api('/update', { method: 'POST' })
+  } finally {
+    // A refused request (nothing to update, or one already running) never moves
+    // the daemon, so nothing would arrive to repaint the borrowed `installing`
+    // view this leaves behind.
+    updating = false
+    render()
+  }
+}
+
+function updateTitle(u: UpdateWire): string {
+  switch (u.phase) {
+    case 'installing':
+      return `正在更新到 v${u.latest}`
+    case 'handing-over':
+      return `正在切換到 v${u.latest}`
+    case 'failed':
+      return '更新失敗'
+    default:
+      return `有新版本 v${u.latest}`
+  }
+}
+
+/** What the card should be showing, which is not always what the last snapshot
+ *  says. Between the click and the daemon's first broadcast the snapshot still
+ *  describes the state the click is leaving - so a retry would paint the failure
+ *  it is retrying, and its error, for that gap. Local intent outranks the
+ *  snapshot there, and installing is where the daemon is about to be. */
+function updateView(u: UpdateWire): UpdateWire {
+  if (!updating || (u.phase !== 'available' && u.phase !== 'failed')) return u
+  const { error: _error, ...rest } = u
+  return { ...rest, phase: 'installing' }
+}
+
+function paintUpdate(s: SnapshotWire): void {
+  const u = s.update && updateView(s.update)
+  // A failure is as dismissible as the offer it came from: the close button is
+  // drawn in both, and the retry lives on in the flag's menu either way. The
+  // phases in between are not - an update in flight has no "later".
+  const dismissible = u?.phase === 'available' || u?.phase === 'failed'
+  const dismissed = !!u && dismissible && readUpdateDismissed() === updateOfferKey(u)
+  updateHint.hidden = !dismissed
+  if (dismissed) {
+    updatePill.textContent = `v${u.latest} 可更新`
+    updateNow.textContent = `更新到 v${u.latest}`
+    updateNow.disabled = updating
+  } else if (updateMenuOpen) {
+    updateMenuOpen = false
+  }
+  paintUpdateMenu()
+  updateCard.hidden = !u || !!dismissed
+  updateCard.textContent = ''
+  if (!u || dismissed) return
+
+  updateCard.append(h('div', 'ez-update-title', updateTitle(u)))
+
+  const busy = u.phase !== 'available' && u.phase !== 'failed'
+  const lines = h('ul', 'ez-update-lines')
+  const line = (text: string, cls = '') => lines.append(h('li', cls || undefined, text))
+  const working = s.acp?.state === 'working'
+  if (busy) {
+    if (u.phase === 'installing') line('下載並安裝新版本…')
+    if (u.phase === 'handing-over') line('新的 daemon 接手中，畫面會自動重新載入')
+  } else {
+    // The one thing the update changes that outlives it. What gets installed,
+    // restarted and overwritten is the update itself - listing that buries the
+    // only line the user has to decide about.
+    if (s.acp) line('更新完成後，會開啟新 session')
+    if (u.phase === 'failed' && u.error) line(u.error, 'ez-update-error')
+  }
+  // Only when it has something in it: an offer with nothing to warn about is a
+  // title and two buttons, and an empty list still holds its top margin open.
+  if (lines.childElementCount) updateCard.append(lines)
+
+  if (!busy) {
+    const actions = h('div', 'ez-update-actions')
+    const go = h('button', 'ez-update-go')
+    go.append(
+      h(
+        'span',
+        'ez-update-label',
+        u.phase === 'failed' ? '重試' : working ? '仍要更新' : '立即更新',
+      ),
+    )
+    go.disabled = updating
+    go.onclick = () => void startUpdate()
+    actions.append(go)
+    updateCard.append(actions)
+
+    const dismiss = h('button', 'ez-update-x')
+    dismiss.append(icon(Cancel01Icon as IconNode, 13))
+    dismiss.title = '稍後再說（版號旁的提示會留著）'
+    dismiss.setAttribute('aria-label', dismiss.title)
+    dismiss.onclick = () => setUpdateDismissed(updateOfferKey(u))
+    updateCard.append(dismiss)
+  }
+}
 
 /** The stage and what floats over it. The picker cannot live inside the stage:
  *  that scrolls, and a control that scrolls away with the canvas is one you have
@@ -814,7 +1007,7 @@ window.addEventListener('popstate', (e) => {
 function paintPage(): void {
   const origin = snapshot?.targetOrigin.replace(/^https?:\/\//, '') ?? ''
   target.textContent = `${origin}${nav.url}`
-  document.title = `Review · ${nav.url}`
+  document.title = `eztweak · ${nav.url}`
 }
 
 function mountFrame(id: string, device: Device, into: ParentNode, label: string): Frame {
@@ -1105,7 +1298,7 @@ resizer.setAttribute('aria-valuemin', String(SIDEBAR_MIN))
 resizer.setAttribute('aria-label', '調整側邊欄寬度')
 resizer.title = '拖曳調整寬度，雙擊還原'
 
-sidebar.append(resizer, sideHead, banner, convSection, queueSection)
+sidebar.append(resizer, sideHead, banner, updateCard, convSection, queueSection)
 root.append(stageWrap, sidebar)
 
 // ---------------------------------------------------------------- panning
@@ -2002,6 +2195,7 @@ function render(): void {
   // runs with no mode armed, so the overlay's `setMode('off')` cancels nothing.
   if (ended) abortPick('ended')
   paintBanner()
+  paintUpdate(s)
   for (const { btn } of annotateBtns) btn.disabled = ended
   paintSendState()
 
@@ -2306,9 +2500,20 @@ document.addEventListener('keydown', (e) => {
   if (runShortcut(e, isTyping(e.target))) e.preventDefault()
 })
 
+/** The version of the daemon this page's scripts came from. The shell's assets
+ *  are the daemon's, so a snapshot from another version means the port changed
+ *  hands - a daemon restart onto a new build - and only a reload catches up. */
+let servedBy: string | null = null
+
 const events = new EventSource(`${API}/events`)
 events.onmessage = (e) => {
   snapshot = JSON.parse(e.data) as SnapshotWire
+  servedBy ??= snapshot.version
+  if (snapshot.version !== servedBy) {
+    location.reload()
+    return
+  }
+  version.textContent = `v${snapshot.version}`
   render()
 }
 

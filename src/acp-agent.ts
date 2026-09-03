@@ -145,6 +145,15 @@ export class AcpAgent {
       this.stderrTail = [...this.stderrTail, chunk.toString()].slice(-20)
     })
     liveChildren.add(this.child)
+    // A spawn that never got off the ground reports asynchronously and emits no
+    // `exit`, so without this it is an uncaught exception rather than an agent
+    // that failed to start. Reachable whenever `cwd` is gone - a restored session
+    // whose project has since been deleted, moved, or is on an unmounted volume -
+    // and there it would take the daemon, and every other session, down with it.
+    this.child.on('error', (err: Error) => {
+      liveChildren.delete(this.child)
+      this.fail(`agent could not start: ${err.message}`)
+    })
     this.child.on('exit', (code) => {
       liveChildren.delete(this.child)
       if (this.state === 'exited') return

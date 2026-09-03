@@ -35,6 +35,7 @@
     "check": "npm run build && npm run typecheck && npm test",
     "typecheck": "tsc --noEmit && tsc -p fixtures/playground --noEmit",
     "test": "node --import tsx --test \"test/**/*.test.ts\"",
+    "version": "node scripts/sync-skill-version.mjs && git add skills/eztweak/SKILL.md",
     "prepublishOnly": "npm run check"
   },
   "engines": {

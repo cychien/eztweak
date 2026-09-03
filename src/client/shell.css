@@ -70,6 +70,20 @@
      4.5:1 a run this small owes. */
   --code-ink: #b4482a;
   --code-fill: rgba(180, 72, 42, 0.09);
+
+  /* The one blue: a newer version is available. Deliberately an ink and not a
+     chip - it has no fill of its own, because the header already carries a
+     filled pill in `.ez-badge` and a second one beside it reads as another
+     status rather than as something on offer. Weighted, not picked by eye -
+     5.44:1 on --paper against --ink-muted's 5.37:1 - so it is no darker or
+     heavier than the secondary text it sits with. What makes it carry is
+     chroma, not depth: a navy at this weight recedes, so saturation is pushed
+     to 80% of the gamut while the luminance stays put. Held short of full
+     saturation on purpose - a standing note that something is available, not a
+     warning that something is wrong. Blue because every other accent here is
+     taken: --mark is the thing annotated, --attach a file, --ref a picked
+     element, and none of them mean "newer". */
+  --update-ink: #2566ba;
 }
 
 * {
@@ -433,6 +447,11 @@ body.ez-arranging .ez-frame {
   letter-spacing: -0.03em;
 }
 
+.ez-version {
+  font-size: 11px;
+  color: var(--ink-faint);
+}
+
 /* Reserve the line: the target origin only arrives with the first snapshot, and
    without a height held for it the whole sidebar below the head jumps down once
    it lands. */
@@ -707,7 +726,8 @@ body.ez-arranging .ez-frame {
 }
 
 .ez-seg-device[data-open] .ez-menu,
-.ez-shown[data-open] .ez-menu {
+.ez-shown[data-open] .ez-menu,
+.ez-update-hint[data-open] .ez-menu {
   display: flex;
 }
 
@@ -864,6 +884,137 @@ body.ez-arranging .ez-frame {
   line-height: 1.6;
   padding: 10px 14px;
   flex-shrink: 0;
+}
+
+/* ------------------------------------------------------------ update card */
+
+.ez-update {
+  position: relative;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.5;
+  flex-shrink: 0;
+}
+
+.ez-update-title {
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.ez-update-lines {
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+  color: var(--muted-foreground);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  word-break: break-all;
+}
+
+.ez-update-error {
+  color: oklch(45% 0.15 25);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px;
+}
+
+.ez-update-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.ez-update-go {
+  border: 1px solid var(--primary);
+  background: var(--primary);
+  color: var(--primary-foreground);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 5px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  box-shadow: inset 0 1px 0 0 oklch(100% 0 0 / 0.14);
+}
+
+.ez-update-go:hover:not(:disabled) {
+  opacity: 0.88;
+}
+
+.ez-update-go:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* A pixel up, by eye - both labels, so the pair keeps one baseline. On the label
+   rather than the button, so the hit areas stay where they are. */
+.ez-update-label {
+  display: inline-block;
+  transform: translateY(-1px);
+}
+
+/* In the corner rather than beside the action: putting the offer away is not an
+   alternative to taking it, and a button next to "立即更新" reads as one. A bare
+   glyph, like `.ez-keys` - hover deepens the ink and nothing else, because a
+   fill appearing under it would read as a second control on the card. The
+   padding is hit area only. */
+.ez-update-x {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px;
+  border: none;
+  background: none;
+  color: var(--ink-ghost);
+  cursor: pointer;
+}
+
+.ez-update-x:hover {
+  color: var(--foreground);
+}
+
+/* Positioning context for the one-item menu the pill opens. */
+.ez-update-hint {
+  position: relative;
+  display: flex;
+}
+
+/* Beside the version and built like it - same size, no fill, no border, nothing
+   that asks to be dealt with now. Colour is the whole signal: it is the one
+   coloured thing in otherwise monochrome chrome, which is enough to find
+   without borrowing `.ez-badge`'s pill, whose shape means status. The 500 is
+   the one step of weight it takes: at 11px a 400 reads as more secondary text. */
+.ez-update-flag {
+  display: inline-flex;
+  align-items: center;
+  border: none;
+  background: none;
+  padding: 0;
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+  color: var(--update-ink);
+  cursor: pointer;
+}
+
+/* The underline is the affordance - with no fill or border, it is what says the
+   words are a control rather than a label. `2px` matches the offset the
+   markdown links already use, which is as far as an 11px line can sit before it
+   reads as detached. */
+.ez-update-flag:hover {
+  color: color-mix(in oklab, var(--update-ink) 82%, var(--ink));
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.ez-update-hint[hidden],
+.ez-update[hidden] {
+  display: none;
 }
 
 /* ---------------------------------------------------------------- sections */

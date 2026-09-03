@@ -9,6 +9,10 @@ export const DATA_DIR = process.env[`${ENV_PREFIX}_DATA_DIR`] ?? join(homedir(),
 export const SESSIONS_DIR = join(DATA_DIR, 'sessions')
 export const REGISTRY_FILE = join(DATA_DIR, 'daemon.json')
 export const DAEMON_LOG = join(DATA_DIR, 'daemon.log')
+/** Where a self-updating daemon installs the version it hands over to. */
+export const VERSIONS_DIR = join(DATA_DIR, 'versions')
+export const UPDATE_CHECK_FILE = join(DATA_DIR, 'update-check.json')
+export const NO_UPDATE_CHECK_ENV = `${ENV_PREFIX}_NO_UPDATE_CHECK`
 
 export const DEFAULT_CONTROL_PORT = 4400
 const CONTROL_PORT_ENV = `${ENV_PREFIX}_CONTROL_PORT`
@@ -49,6 +53,11 @@ export const MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024
 /** How long an attachment nothing references survives the sweep. Long enough
  *  that a composer left open across a daemon restart still resolves its ids. */
 export const ATTACHMENT_GRACE_MS = 24 * 60 * 60_000
+
+/** How long one answer from the npm registry is trusted before asking again.
+ *  A daemon lives as long as a review does, so this is the delay between a
+ *  release and the shell offering it. */
+export const UPDATE_CHECK_TTL_MS = 4 * 60 * 60_000
 
 export const POLL_TIMEOUT_MS = 50_000
 /** Consecutive connection failures a `poll` rides out before giving up. Covers a
