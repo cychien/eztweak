@@ -79,6 +79,11 @@ export interface PersistedSession {
   /** Last port this session's proxy held. A restarted daemon re-binds it so the
    *  shell tab the user already has open survives a reload. */
   port?: number
+  /** The ACP command this session's agent was started with. A restarted daemon
+   *  spawns it again, so the review does not lose its agent along with the
+   *  daemon - though it does lose the agent's context, which is what the shell
+   *  is told. */
+  agent?: string
   /** Where the *visible* thread starts, set by `/new`. A window onto the log, not
    *  a cut in it: the record of the review stays whole on disk, and only the shell
    *  is shown a fresh start - which is what "new chat" means to the person who
@@ -422,8 +427,15 @@ export class SessionStore {
     this.patchSession({ port })
   }
 
+  setAgent(command: string): void {
+    this.patchSession({ agent: command })
+  }
+
+  /** Ending drops the agent with the session: a reopen decides afresh whether
+   *  it is ACP-driven, and a restore must not resurrect an agent nobody asked for. */
   end(by: SessionEndedBy): void {
-    this.patchSession({ state: 'ended', endedBy: by })
+    const { agent: _agent, ...rest } = this.session
+    this.writeJson('session.json', { ...rest, state: 'ended', endedBy: by })
   }
 
   /** Start the visible thread here. Nothing is deleted - see `conversationClear`. */

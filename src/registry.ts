@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process'
+import { type ChildProcess, spawn } from 'node:child_process'
 import { mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { DAEMON_LOG, DATA_DIR, REGISTRY_FILE } from './constants.js'
 
@@ -25,14 +25,17 @@ export function writeRegistry(info: DaemonInfo): void {
   writeFileSync(REGISTRY_FILE, JSON.stringify(info, null, 2))
 }
 
-export function clearRegistry(): void {
+/** With `pid`, only a registry naming that daemon is cleared: a retiring daemon
+ *  must not take its successor's entry down with it. */
+export function clearRegistry(pid?: number): void {
+  if (pid !== undefined && readRegistry()?.pid !== pid) return
   rmSync(REGISTRY_FILE, { force: true })
 }
 
 /** Confirms the port is serving *our* daemon, not just something that answers.
  *  A registry left behind by a killed daemon can otherwise point at whatever
  *  later took the port — including an older daemon from a previous build. */
-async function probe(port: number, pid: number): Promise<{ version: string } | null> {
+export async function probeDaemon(port: number, pid: number): Promise<{ version: string } | null> {
   try {
     const res = await fetch(`http://127.0.0.1:${port}/control/health`, {
       signal: AbortSignal.timeout(1500),
@@ -49,34 +52,52 @@ async function probe(port: number, pid: number): Promise<{ version: string } | n
 export async function findRunningDaemon(): Promise<RunningDaemon | null> {
   const info = readRegistry()
   if (!info) return null
-  const probed = await probe(info.port, info.pid)
+  const probed = await probeDaemon(info.port, info.pid)
   if (probed) return { ...info, version: probed.version }
   clearRegistry()
   return null
 }
 
 /** `/control/stop` clears the registry before it responds, and a stopping
- *  daemon's health check turns 503 so a starting one never adopts it. */
-async function stopDaemon(port: number): Promise<void> {
+ *  daemon's health check turns 503 so a starting one never adopts it. Waits for
+ *  the process itself to go: it holds the session ports until it exits, and a
+ *  replacement started before then lands its sessions elsewhere, changing every
+ *  shell URL the user has open. */
+async function stopDaemon(daemon: { port: number; pid: number }): Promise<void> {
   try {
-    await fetch(`http://127.0.0.1:${port}/control/stop`, {
+    await fetch(`http://127.0.0.1:${daemon.port}/control/stop`, {
       method: 'POST',
       signal: AbortSignal.timeout(1500),
     })
   } catch {
     /* already gone */
   }
+  const deadline = Date.now() + 3000
+  while (Date.now() < deadline) {
+    try {
+      process.kill(daemon.pid, 0)
+    } catch {
+      return
+    }
+    await new Promise((r) => setTimeout(r, 50))
+  }
 }
 
-async function spawnDaemon(cliEntry: string): Promise<RunningDaemon> {
+/** Start a daemon from `cliEntry` and let go of it: detached, logging to the
+ *  shared daemon log, outliving whoever launched it. */
+export function launchDaemon(cliEntry: string, args: string[] = []): ChildProcess {
   mkdirSync(DATA_DIR, { recursive: true })
   const log = openSync(DAEMON_LOG, 'a')
-  const child = spawn(process.execPath, [cliEntry, '__daemon'], {
+  const child = spawn(process.execPath, [cliEntry, '__daemon', ...args], {
     detached: true,
     stdio: ['ignore', log, log],
   })
   child.unref()
+  return child
+}
 
+async function spawnDaemon(cliEntry: string): Promise<RunningDaemon> {
+  launchDaemon(cliEntry)
   const deadline = Date.now() + 8000
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, 150))
@@ -96,7 +117,7 @@ export async function ensureDaemon(cliEntry: string, version: string): Promise<R
   for (let attempt = 0; attempt < 2; attempt++) {
     const running = (await findRunningDaemon()) ?? (await spawnDaemon(cliEntry))
     if (running.version === version) return running
-    await stopDaemon(running.port)
+    await stopDaemon(running)
   }
   throw new Error(`a daemon running another version keeps taking over (see ${DAEMON_LOG})`)
 }

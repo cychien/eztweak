@@ -1,16 +1,18 @@
 import { EventEmitter } from 'node:events'
 import { readFileSync } from 'node:fs'
-import type { Server } from 'node:http'
+import { type Server, createServer } from 'node:http'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { Socket } from 'node:net'
 import express, { type ErrorRequestHandler, type Response, Router } from 'express'
 import { createProxyMiddleware, responseInterceptor } from 'http-proxy-middleware'
 import {
+  DAEMON_LOG,
   IDLE_STOP_MS,
   MAX_ATTACHMENT_BYTES,
   PKG_NAME,
   POLL_TIMEOUT_MS,
+  UPDATE_CHECK_TTL_MS,
   URL_PREFIX,
   controlPortRange,
 } from './constants.js'
@@ -21,7 +23,10 @@ import { injectOverlay, wantsHtml } from './inject.js'
 import { toAgentAttachments, toAgentItem, toConversationItem } from './label.js'
 import type { Annotation, PollResult, SessionEndedBy } from './protocol.js'
 import { SessionStore, listRestorableSessions, newId } from './store.js'
-import { writeRegistry, clearRegistry } from './registry.js'
+import { clearRegistry, launchDaemon, probeDaemon, readRegistry, writeRegistry } from './registry.js'
+import { installVersion, pruneInstalledVersions } from './installer.js'
+import { latestVersion, updateChecksDisabled } from './update-check.js'
+import { Updater, type UpdateWire } from './updater.js'
 import { versionGate } from './version.js'
 
 const distDir = dirname(fileURLToPath(import.meta.url))
@@ -44,7 +49,7 @@ const SHELL_HTML = `<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Review</title>
+<title>${PKG_NAME}</title>
 <link rel="stylesheet" href="${URL_PREFIX}/shell.css">
 </head>
 <body>
@@ -54,6 +59,9 @@ const SHELL_HTML = `<!doctype html>
 </html>`
 
 interface SnapshotWire {
+  /** The daemon's version. The shell compares it across reconnects: a change
+   *  means a different daemon took the port, and its assets are stale. */
+  version: string
   state: 'active' | 'ended'
   endedBy?: SessionEndedBy
   targetOrigin: string
@@ -71,6 +79,29 @@ interface SnapshotWire {
   activeBatchId?: string
   /** SPIKE: present when this session drives its agent over ACP. */
   acp?: AcpSnapshot
+  /** A newer version or a stale skill to offer, and the update's progress once
+   *  taken up. Daemon-wide: every session's shell shows the same one. */
+  update?: UpdateWire
+}
+
+/** Bind `app` on the loopback at `port`, or reject. Deliberately not
+ *  `app.listen`: Express 5 calls its callback on a bind error too, error-first,
+ *  and a callback that ignores its argument mistakes a taken port for a bound one. */
+function listen(app: express.Express, port: number): Promise<Server> {
+  return new Promise<Server>((resolve, reject) => {
+    const server = createServer(app)
+    server.once('error', reject)
+    server.listen(port, '127.0.0.1', () => {
+      // Bind failures are the promise's business; anything after that would
+      // reject a settled promise and vanish, so log it instead.
+      server.off('error', reject)
+      server.on('error', (err: Error) => {
+        // eslint-disable-next-line no-console
+        console.error(`server on port ${port} failed: ${err.message}`)
+      })
+      resolve(server)
+    })
+  })
 }
 
 /** First port in `candidates` that binds. A `0` entry always succeeds, so keep
@@ -79,19 +110,7 @@ async function listenOn(app: express.Express, candidates: number[]): Promise<Ser
   let lastError: unknown
   for (const port of candidates) {
     try {
-      return await new Promise<Server>((resolve, reject) => {
-        const server = app.listen(port, '127.0.0.1', () => {
-          // Bind failures are the promise's business; anything after that would
-          // reject a settled promise and vanish, so log it instead.
-          server.off('error', reject)
-          server.on('error', (err: Error) => {
-            // eslint-disable-next-line no-console
-            console.error(`session proxy on port ${port} failed: ${err.message}`)
-          })
-          resolve(server)
-        })
-        server.on('error', reject)
-      })
+      return await listen(app, port)
     } catch (err) {
       lastError = err
     }
@@ -133,6 +152,11 @@ function turnEndNote(stopReason: string): string {
   }
 }
 
+/** What the thread is told when a daemon restart took the agent's context with
+ *  it - the same thing the shell's update card promises in advance, in the same
+ *  words, because it is the same event seen from either side of it. */
+const AGENT_RESTARTED_NOTE = '已開啟新 session，之前的對話不會延續'
+
 class SessionRuntime {
   readonly store: SessionStore
   readonly bus = new EventEmitter()
@@ -159,6 +183,7 @@ class SessionRuntime {
     readonly targetOrigin: string,
     readonly project: string,
     private readonly version: string,
+    private readonly updater: Updater,
   ) {
     this.store = new SessionStore(targetOrigin, project)
     // Session start is the one moment no composer can be holding a fresh upload,
@@ -190,7 +215,9 @@ class SessionRuntime {
 
   snapshot(): SnapshotWire {
     const s = this.store.session
+    const update = this.updater.snapshot()
     return {
+      version: this.version,
       state: s.state,
       endedBy: s.endedBy,
       targetOrigin: this.targetOrigin,
@@ -202,6 +229,7 @@ class SessionRuntime {
       ...(this.agentProgress ? { agentProgress: this.agentProgress } : {}),
       ...(this.agentBusy && this.activeBatch ? { activeBatchId: this.activeBatch } : {}),
       ...(this.acp ? { acp: this.acp.snapshot() } : {}),
+      ...(update ? { update } : {}),
     }
   }
 
@@ -210,12 +238,33 @@ class SessionRuntime {
     for (const res of this.sseClients) res.write(data)
   }
 
+  /** Bring back the agent a previous daemon was driving. Its context died with
+   *  that daemon, and the batch it was on comes round again unacked, so the one
+   *  thing owed here is telling the thread that the reply will not remember -
+   *  which is what the update card said would happen, in the same words. */
+  restoreAcpAgent(command: string): void {
+    this.attachAcpAgent(command)
+    // Only when there is context to have lost, and only once per loss: an empty
+    // thread had none, and a restart that follows another with nothing said in
+    // between is the same loss reported twice. A dev daemon restarts on every
+    // save, which is what makes both cases the common ones.
+    const thread = this.store.visibleConversation
+    const last = thread.at(-1)
+    if (thread.length === 0 || last?.text === AGENT_RESTARTED_NOTE) return
+    this.store.appendConversation({
+      role: 'system',
+      text: AGENT_RESTARTED_NOTE,
+      ts: Date.now(),
+    })
+  }
+
   /** SPIKE: attach an ACP-driven agent to this session. Replaces a dead one;
    *  a live one stays - two agents on one review is never what anyone meant. */
   attachAcpAgent(command: string): boolean {
     if (this.acp && this.acp.snapshot().state !== 'exited') {
       return this.acp.snapshot().agent === command
     }
+    this.store.setAgent(command)
     this.acp = new AcpAgent({
       command,
       cwd: this.project,
@@ -558,6 +607,25 @@ class SessionRuntime {
       res.json({ ok: true })
     })
 
+    // The user took up the update offer. Progress comes back over `/events`,
+    // and a daemon update ends with this port changing hands. The one endpoint
+    // that installs and runs code, so it insists on the JSON content type the
+    // shell always sends: a cross-site form post cannot set it without a
+    // preflight, and there is no CORS here to pass one.
+    api.post('/update', (req, res) => {
+      if ((req.get('content-type') ?? '').split(';')[0]?.trim() !== 'application/json') {
+        return res.status(415).json({ error: 'expected application/json' })
+      }
+      switch (this.updater.run()) {
+        case 'busy':
+          return res.status(409).json({ error: 'an update is already running' })
+        case 'nothing':
+          return res.status(409).json({ error: 'nothing to update' })
+        default:
+          return res.json({ ok: true })
+      }
+    })
+
     api.post('/end', (req, res) => {
       const by: SessionEndedBy = req.body?.by === 'agent' ? 'agent' : 'user'
       this.acp?.stop()
@@ -649,9 +717,15 @@ class SessionRuntime {
 
     const rk = Router()
     rk.get('/shell', (_req, res) => res.type('html').send(SHELL_HTML))
+    // Never cached. These assets are the daemon's, and the daemon is replaceable
+    // under an open shell - by a self-update, or by a `@latest` CLI run. The
+    // reload that follows has to fetch the new code, and a heuristically cached
+    // copy would leave the previous version's UI driving the new daemon.
     for (const file of ['overlay.js', 'overlay.css', 'shell.js', 'shell.css']) {
       const type = file.endsWith('.css') ? 'text/css' : 'text/javascript'
-      rk.get(`/${file}`, (_req, res) => res.type(type).send(asset(file)))
+      rk.get(`/${file}`, (_req, res) =>
+        res.type(type).set('cache-control', 'no-store').send(asset(file)),
+      )
     }
     rk.use('/api', this.apiRouter())
     app.use(URL_PREFIX, rk)
@@ -722,44 +796,121 @@ async function findLiveDaemonInRange(range: {
   return null
 }
 
-export async function daemonMain(version: string): Promise<void> {
+const delay = (ms: number) => new Promise((r) => setTimeout(r, ms))
+
+/** Resolves when `pid` is gone, or after `timeoutMs` if it never goes. */
+async function waitForExit(pid: number, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    try {
+      process.kill(pid, 0)
+    } catch {
+      return true
+    }
+    await delay(100)
+  }
+  return false
+}
+
+/** Start the daemon at `cliEntry` as this one's successor and wait until it owns
+ *  the registry and answers healthy. It binds and registers before touching any
+ *  session, so this resolving means "a working daemon is up" - and rejecting
+ *  means nothing has changed hands yet, and this daemon carries on. */
+async function handoverTo(cliEntry: string): Promise<void> {
+  const child = launchDaemon(cliEntry, ['--succeed', String(process.pid)])
+  const deadline = Date.now() + 20_000
+  while (Date.now() < deadline) {
+    await delay(150)
+    if (child.exitCode !== null) {
+      throw new Error(`new daemon exited with ${child.exitCode} (see ${DAEMON_LOG})`)
+    }
+    const info = readRegistry()
+    if (info && info.pid !== process.pid && (await probeDaemon(info.port, info.pid))) return
+  }
+  child.kill('SIGKILL')
+  throw new Error(`new daemon did not come up within 20s (see ${DAEMON_LOG})`)
+}
+
+export interface DaemonOptions {
+  /** The daemon handing over to this one. Set, this daemon skips adoption, takes
+   *  the registry as soon as it binds, and restores sessions only once that pid
+   *  has released their ports. */
+  succeed?: number
+}
+
+export async function daemonMain(version: string, opts: DaemonOptions = {}): Promise<void> {
   const range = controlPortRange()
-  const adopted = await findLiveDaemonInRange(range)
-  if (adopted) {
-    writeRegistry({ ...adopted, startedAt: Date.now() })
-    // eslint-disable-next-line no-console
-    console.log(`adopted existing daemon on 127.0.0.1:${adopted.port} (pid ${adopted.pid})`)
-    return
+  if (opts.succeed === undefined) {
+    const adopted = await findLiveDaemonInRange(range)
+    if (adopted) {
+      writeRegistry({ ...adopted, startedAt: Date.now() })
+      // eslint-disable-next-line no-console
+      console.log(`adopted existing daemon on 127.0.0.1:${adopted.port} (pid ${adopted.pid})`)
+      return
+    }
   }
 
   const sessions = new Map<string, SessionRuntime>()
+  const broadcastAll = () => {
+    for (const s of sessions.values()) s.broadcast()
+  }
+
+  let stopping = false
+
+  const updater = new Updater({
+    current: version,
+    latestVersion: updateChecksDisabled() ? async () => null : () => latestVersion(),
+    install: installVersion,
+    handover: handoverTo,
+    // Exit is the release: it frees every port at once and takes the agent
+    // children with it, which is what the successor is waiting for.
+    retire: async () => process.exit(0),
+    onChange: broadcastAll,
+  })
 
   /** Rebuild the session map from disk. Without this a restarted daemon answers
    *  `/sessions/find` with 404 and a reconnecting `poll` gives up on a session
    *  whose queued feedback is sitting right there on disk. */
-  for (const persisted of listRestorableSessions()) {
-    try {
-      const runtime = new SessionRuntime(persisted.targetOrigin, persisted.project, version)
-      await runtime.start()
-      sessions.set(persisted.targetOrigin, runtime)
-    } catch (err) {
-      // eslint-disable-next-line no-console
-      console.error(
-        `could not restore session for ${persisted.targetOrigin}: ${err instanceof Error ? err.message : String(err)}`,
-      )
+  const restoreSessions = async () => {
+    for (const persisted of listRestorableSessions()) {
+      try {
+        const runtime = new SessionRuntime(
+          persisted.targetOrigin,
+          persisted.project,
+          version,
+          updater,
+        )
+        await runtime.start()
+        if (persisted.agent) runtime.restoreAcpAgent(persisted.agent)
+        sessions.set(persisted.targetOrigin, runtime)
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.error(
+          `could not restore session for ${persisted.targetOrigin}: ${err instanceof Error ? err.message : String(err)}`,
+        )
+      }
     }
   }
 
   const control = express()
   control.use(express.json())
 
-  let stopping = false
-
   control.get('/control/health', (_req, res) => {
     // A daemon on its way out must not look healthy, or a daemon starting up in
     // that window adopts it and exits — leaving no daemon at all.
     if (stopping) return res.status(503).json({ ok: false, stopping: true })
     res.json({ ok: true, service: PKG_NAME, version, pid: process.pid })
+  })
+
+  // Registered before sessions are restored, so a CLI that finds this daemon
+  // straight away is held here until its sessions exist rather than told
+  // there are none.
+  let ready!: () => void
+  const restored = new Promise<void>((resolve) => {
+    ready = resolve
+  })
+  control.use('/control/sessions', (_req, _res, next) => {
+    restored.then(() => next(), next)
   })
 
   // Health and stop stay ungated: a mismatched CLI must still be able to see
@@ -798,7 +949,7 @@ export async function daemonMain(version: string): Promise<void> {
       runtime = undefined
     }
     if (!runtime) {
-      runtime = new SessionRuntime(origin, project, version)
+      runtime = new SessionRuntime(origin, project, version, updater)
       await runtime.start()
       sessions.set(origin, runtime)
     }
@@ -840,41 +991,43 @@ export async function daemonMain(version: string): Promise<void> {
 
   control.post('/control/stop', (_req, res) => {
     stopping = true
-    clearRegistry()
+    clearRegistry(process.pid)
     res.json({ ok: true })
     setTimeout(() => process.exit(0), 100)
   })
 
-  let port = 0
-  for (let p = range.start; p <= range.end; p++) {
-    try {
-      await new Promise<void>((resolve, reject) => {
-        const server = control.listen(p, '127.0.0.1', () => resolve())
-        server.on('error', reject)
-      })
-      port = p
-      break
-    } catch {
-      /* port busy — try next */
-    }
-  }
-  if (!port) {
-    await new Promise<void>((resolve) => {
-      const server = control.listen(0, '127.0.0.1', () => {
-        const address = server.address()
-        port = typeof address === 'object' && address ? address.port : 0
-        resolve()
-      })
-    })
-  }
+  const candidates = Array.from({ length: range.end - range.start + 1 }, (_, i) => range.start + i)
+  const controlServer = await listenOn(control, [...candidates, 0])
+  const controlAddress = controlServer.address()
+  const port = typeof controlAddress === 'object' && controlAddress ? controlAddress.port : 0
 
   writeRegistry({ port, pid: process.pid, startedAt: Date.now() })
   const cleanup = () => {
-    clearRegistry()
+    clearRegistry(process.pid)
     process.exit(0)
   }
   process.on('SIGTERM', cleanup)
   process.on('SIGINT', cleanup)
+
+  // The predecessor lets go of its session ports only once this daemon is
+  // registered, so restoring before it has exited would land them elsewhere
+  // and orphan every open shell. If it never exits, restore anyway - a daemon
+  // on other ports beats no daemon.
+  const predecessorGone =
+    opts.succeed === undefined || (await waitForExit(opts.succeed, 15_000))
+  if (!predecessorGone) {
+    // eslint-disable-next-line no-console
+    console.error(`predecessor pid ${opts.succeed} is still running; restoring sessions anyway`)
+  }
+  await restoreSessions()
+  ready()
+  // Only once the daemon we replaced is gone. It serves its shell assets by
+  // reading them per request, so pruning the version it runs from while it is
+  // still answering would break every session it has not handed over.
+  if (predecessorGone) pruneInstalledVersions(join(distDir, 'cli.mjs'))
+
+  void updater.check()
+  setInterval(() => void updater.check(), UPDATE_CHECK_TTL_MS / 4).unref()
 
   setInterval(() => {
     const now = Date.now()

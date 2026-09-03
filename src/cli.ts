@@ -44,6 +44,7 @@ Environment:
       Set both to run an isolated second instance: a starting daemon adopts any
       live daemon inside its own control range, so a separate data dir alone
       still lands you on the shared one.
+  ${PKG_NAME.toUpperCase()}_NO_UPDATE_CHECK=1  never ask the npm registry whether a newer version exists
 
 A restarted daemon picks its sessions back up from disk and re-binds each to the
 port it last held, so an open review shell only needs a reload and queued
@@ -309,8 +310,12 @@ async function main(): Promise<void> {
   }
 
   switch (first) {
-    case '__daemon':
-      return daemonMain(pkg.version)
+    case '__daemon': {
+      const succeedIdx = rest.indexOf('--succeed')
+      const succeed = succeedIdx >= 0 ? Number(rest[succeedIdx + 1]) : undefined
+      if (succeed !== undefined && !Number.isInteger(succeed)) fail('invalid --succeed pid')
+      return daemonMain(pkg.version, { succeed })
+    }
     case 'poll': {
       const replyIdx = rest.indexOf('--agent-reply')
       const reply = replyIdx >= 0 ? rest[replyIdx + 1] : undefined
