@@ -727,6 +727,7 @@ body.ez-arranging .ez-frame {
 
 .ez-seg-device[data-open] .ez-menu,
 .ez-shown[data-open] .ez-menu,
+.ez-config[data-open] .ez-menu,
 .ez-update-hint[data-open] .ez-menu {
   display: flex;
 }
@@ -736,6 +737,47 @@ body.ez-arranging .ez-frame {
 .ez-menu-right {
   left: auto;
   right: 0;
+}
+
+/* Opens upward. Its control sits at the foot of the sidebar with the composer
+   and the send button below it, so downward there is nothing to open into. The
+   cap keeps a long option list - five models, six effort levels and a mode each
+   with a row - from running off the top of the window; the header is what it
+   would run into, and that is a control, not chrome it may cover. */
+.ez-menu-up {
+  top: auto;
+  bottom: calc(100% + 6px);
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+/* One option's rows. A group rather than a run of siblings because the rule
+   between two of them belongs to the boundary, not to whichever row happens to
+   sit at the top of the next one - a boolean option is a single row with no
+   heading, and without this "Fast mode" under six effort levels reads as a
+   seventh. */
+.ez-menu-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ez-menu-group + .ez-menu-group {
+  margin-top: 4px;
+  border-top: 1px solid var(--border);
+  padding-top: 4px;
+}
+
+/* Names the group of rows under it. Not a row itself: it takes no click, so it
+   is set apart by weight and size rather than by looking like a target that
+   refuses one. */
+.ez-menu-label {
+  padding: 4px 8px 2px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted-foreground);
 }
 
 /* Holds the column whether or not there is a tick in it, so the names do not
@@ -1012,7 +1054,13 @@ body.ez-arranging .ez-frame {
   text-underline-offset: 2px;
 }
 
+/* An author `display` outranks the UA's `[hidden] { display: none }`, so every
+   element here that is both flagged hidden and given a display of its own has to
+   say so again - otherwise `hidden` leaves the box laid out and only looks empty,
+   which in the config row's case was 6px of dead space above the composer for
+   every review that has no ACP agent. */
 .ez-update-hint[hidden],
+.ez-config[hidden],
 .ez-update[hidden] {
   display: none;
 }
@@ -1534,6 +1582,68 @@ body.ez-arranging .ez-frame {
    claim about the file rather than about the target. */
 .ez-attach-field[data-drop] {
   background: var(--paper-sunken);
+}
+
+/* ------------------------------------------------------- agent config pill */
+
+/* The positioning context its menu hangs from, and a row of its own above the
+   composer. `flex` with the pill as the only child so the pill takes its content
+   width instead of the sidebar's - a full-width target for a three-word label
+   would read as a second send button. */
+.ez-config {
+  display: flex;
+  position: relative;
+  margin-bottom: 6px;
+}
+
+/* Quieter than the composer it sits above: this says what the batch will be
+   answered by, and the composer is what the user is doing. Borderless until
+   hovered for the same reason - a permanent outline here would compete with the
+   field below, which is the one that wants the eye. */
+.ez-config-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  max-width: 100%;
+  border: none;
+  background: transparent;
+  color: var(--muted-foreground);
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 5px 3px 7px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition:
+    background 0.12s ease,
+    color 0.12s ease;
+}
+
+.ez-config-pill:hover:not(:disabled),
+.ez-config[data-open] .ez-config-pill {
+  background: var(--muted);
+  color: var(--foreground);
+}
+
+/* Between sessions there is nothing to set. Greyed rather than removed: it is
+   about to come back holding the same label, and a control that vanishes for a
+   moment reads as one that broke. */
+.ez-config-pill:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.ez-config-pill svg {
+  flex-shrink: 0;
+}
+
+/* The label is the agent's own name for the value and there is no bound on its
+   length, so it truncates rather than widening the row past the sidebar. The
+   part it drops is in the pill's tooltip. */
+.ez-config-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* A contenteditable, not a textarea: attachment chips are elements, and they

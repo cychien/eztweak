@@ -22,12 +22,14 @@ import {
   type CreateElicitationResponse,
   type RequestPermissionRequest,
   type RequestPermissionResponse,
+  type SessionConfigOption,
   type SessionNotification,
   PROTOCOL_VERSION,
   client,
   methods,
   ndJsonStream,
 } from '@agentclientprotocol/sdk'
+import type { AcpConfigValue } from './acp-config.js'
 
 export type AcpState = 'starting' | 'idle' | 'working' | 'exited'
 
@@ -70,6 +72,16 @@ export interface AcpSnapshot {
   state: AcpState
   feed: AcpFeedItem[]
   ask?: AcpAsk
+  /** Everything the agent lets this session be configured with - model, mode,
+   *  effort, and whatever else it offers - in the agent's own order.
+   *
+   *  Passed through as the protocol's `SessionConfigOption` rather than reduced
+   *  to a model field: the set is not fixed. It changes *with* the choice, and
+   *  not only in its values - selecting a model that supports neither effort
+   *  levels nor Fast mode drops both options from the list. A client that names
+   *  the options it knows would have to be taught each new one; this one only
+   *  has to be taught how to *draw* a select and a boolean. */
+  configOptions?: SessionConfigOption[]
   /** A cancel is out and the agent has not yet said the turn is over. The button
    *  that sent it has to stop offering to send it again. */
   cancelling?: true
@@ -86,6 +98,17 @@ export interface AcpAgentOptions {
    *  which a cancelled turn can still have part of - and why it stopped. */
   onTurnEnd: (reply: string, stopReason: string) => void
   onExit: (error: string | null) => void
+  /** The picks to re-assert on every session this agent opens. Read at open
+   *  time rather than taken once: `/new` and a daemon restart both open a fresh
+   *  session, and by then the user may have changed the pick. */
+  pinnedConfig?: () => Record<string, AcpConfigValue>
+  /** The user set an option. Only ever called for a pick *they* made - an option
+   *  the agent moved on its own is reported, not remembered, because carrying it
+   *  forward would propagate a change nobody asked for into every later session.
+   *  The clearest case is a model without Auto-mode support: selecting it
+   *  downgrades the permission mode, and pinning that would keep the session
+   *  downgraded long after the model that caused it was switched away from. */
+  onConfigChange?: (configId: string, value: AcpConfigValue, option: SessionConfigOption) => void
 }
 
 const FEED_CAP = 100
@@ -115,6 +138,11 @@ export class AcpAgent {
   private retire: (() => void) | null = null
   private state: AcpState = 'starting'
   private feed: AcpFeedItem[] = []
+  /** The live session's options. Kept across a session swap rather than cleared:
+   *  the next session is about to be pinned back to the same picks, and a control
+   *  that vanishes and returns reads as a failure where a stale label for the
+   *  moment the swap takes does not. `state` already says it cannot be used. */
+  private configOptions: SessionConfigOption[] = []
   private ask: AcpAsk | null = null
   private askResolve: ((answers: Record<string, string> | null) => void) | null = null
   private askSeq = 0
@@ -170,8 +198,87 @@ export class AcpAgent {
       state: this.state,
       feed: this.feed,
       ...(this.ask ? { ask: this.ask } : {}),
+      ...(this.configOptions.length ? { configOptions: this.configOptions } : {}),
       ...(this.cancelling ? { cancelling: true as const } : {}),
       ...(this.error ? { error: this.error } : {}),
+    }
+  }
+
+  /** The user picked a value for one of the agent's config options.
+   *
+   *  The answer carries the whole option set back, because one pick reshapes the
+   *  others: switching to a model with no effort levels removes that option
+   *  outright. So the response replaces the list rather than patching a value
+   *  into it, and the caller's own idea of what the options are never has to be
+   *  reconciled with the agent's.
+   *
+   *  Allowed mid-turn. The agent accepts it and the turn in flight still ends
+   *  normally; the change applies from the next one. Refusing it would take the
+   *  control away at the one moment it is most wanted - watching a turn go wrong
+   *  is what prompts a switch. */
+  async setConfigOption(configId: string, value: AcpConfigValue): Promise<boolean> {
+    const session = this.session
+    if (!session || !this.ctx) return false
+    if (this.state !== 'idle' && this.state !== 'working') return false
+    const option = this.configOptions.find((o) => o.id === configId)
+    if (!option) return false
+    const epoch = this.epoch
+    const answer = await this.ctx.request(methods.agent.session.setConfigOption, {
+      sessionId: session.sessionId,
+      configId,
+      ...(typeof value === 'boolean' ? { type: 'boolean' as const, value } : { value }),
+    })
+    // The session this was asked of is gone - `/new`, or the agent died while the
+    // request was out. Installing its answer would describe a session nobody is
+    // on any more.
+    if (epoch !== this.epoch) return false
+    if (answer?.configOptions) this.configOptions = answer.configOptions
+    // Only what actually took is remembered, and the answer is what says so - a
+    // request can succeed without the change landing, which is what a
+    // `PreModelSwitch` hook refusing a model does. Pinning a value the agent
+    // declined would re-offer it to every later session and be declined again
+    // each time, and the thread would carry a switch that never happened.
+    const applied = this.configOptions.find((o) => o.id === configId)
+    if (applied?.currentValue !== value) {
+      this.opts.onChange()
+      return false
+    }
+    this.opts.onConfigChange?.(configId, value, applied)
+    this.opts.onChange()
+    return true
+  }
+
+  /** Re-assert the user's picks on a session that has just opened.
+   *
+   *  Sequential rather than parallel, because the options are interdependent: a
+   *  pinned effort level is only offered once the pinned model is in place, and
+   *  the agent's answer to each request is what says whether the next one is
+   *  still on the list.
+   *
+   *  Every failure is survivable and none of them is the session's fault - a
+   *  model that has since left the account's list, an effort level the new
+   *  default model does not have. The pick is skipped and the session opens on
+   *  whatever the agent chose; refusing to open would cost the user their review
+   *  over a preference. */
+  private async applyPinnedConfig(epoch: number): Promise<void> {
+    const pinned = this.opts.pinnedConfig?.() ?? {}
+    for (const [configId, value] of Object.entries(pinned)) {
+      if (epoch !== this.epoch) return
+      const option = this.configOptions.find((o) => o.id === configId)
+      // Already where the user wanted it, or not on offer for this model. Asking
+      // anyway would spend a round trip to be told what we can already see.
+      if (!option || option.currentValue === value) continue
+      try {
+        const answer = await this.ctx?.request(methods.agent.session.setConfigOption, {
+          sessionId: this.session?.sessionId ?? '',
+          configId,
+          ...(typeof value === 'boolean' ? { type: 'boolean' as const, value } : { value }),
+        })
+        if (epoch !== this.epoch) return
+        if (answer?.configOptions) this.configOptions = answer.configOptions
+      } catch {
+        /* the pick is no longer available - the agent's own choice stands */
+      }
     }
   }
 
@@ -276,6 +383,15 @@ export class AcpAgent {
       return
     }
     this.session = session
+    this.configOptions = session.newSessionResponse.configOptions ?? []
+    // Before `idle`, and this is load-bearing. Going idle is what `onChange`
+    // turns into a delivery, so a queued batch leaves the moment the flag flips -
+    // and a pick re-asserted after that point would arrive one turn too late,
+    // every time. `/new` with feedback already waiting is the common path, not
+    // the corner case: the first turn of the fresh session is exactly the one the
+    // user chose the model for.
+    await this.applyPinnedConfig(epoch)
+    if (epoch !== this.epoch) return
     this.state = 'idle'
     this.opts.onChange()
     void this.pump(session, epoch).catch((err: unknown) => {
@@ -474,6 +590,27 @@ export class AcpAgent {
         else this.feed.push({ kind: 'plan', entries })
         break
       }
+      // Not the feed's business, and not the turn's: these describe the session,
+      // so they must not be capped away with the turn's activity or cleared when
+      // it ends. Both arrive unprompted - the agent can change its own mind about
+      // the model, and does.
+      case 'config_option_update':
+        this.configOptions = update.configOptions
+        this.opts.onChange()
+        return
+      // The mode has its own notification as well as its place in the option
+      // list, and an agent is free to send only this one. Matched on the category
+      // rather than on an id, because `mode` is what the *spec* names the concept
+      // and the id holding it is the agent's to choose.
+      case 'current_mode_update': {
+        const mode = this.configOptions.find((o) => o.category === 'mode')
+        if (!mode || mode.type !== 'select' || mode.currentValue === update.currentModeId) return
+        this.configOptions = this.configOptions.map((o) =>
+          o === mode ? { ...o, currentValue: update.currentModeId } : o,
+        )
+        this.opts.onChange()
+        return
+      }
       default:
         return
     }
@@ -497,7 +634,14 @@ export class AcpAgent {
           protocolVersion: PROTOCOL_VERSION,
           // Form elicitation is what unlocks the agent's own question tool -
           // claude-agent-acp disallows AskUserQuestion without it.
-          clientCapabilities: { elicitation: { form: {} } },
+          //
+          // A boolean config option is only sent to a client that says it can
+          // draw one; without this an on/off toggle arrives as a two-value
+          // select, which is the same question asked in more clicks.
+          clientCapabilities: {
+            elicitation: { form: {} },
+            session: { configOptions: { boolean: {} } },
+          },
         })
         this.canClose = !!init.agentCapabilities?.sessionCapabilities?.close
         this.ctx = ctx

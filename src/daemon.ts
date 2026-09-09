@@ -4,6 +4,7 @@ import { type Server, createServer } from 'node:http'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { Socket } from 'node:net'
+import type { SessionConfigOption } from '@agentclientprotocol/sdk'
 import express, { type ErrorRequestHandler, type Response, Router } from 'express'
 import { createProxyMiddleware, responseInterceptor } from 'http-proxy-middleware'
 import {
@@ -18,6 +19,7 @@ import {
 } from './constants.js'
 import { AcpAgent } from './acp-agent.js'
 import type { AcpSnapshot } from './acp-agent.js'
+import { type AcpConfigValue, configLabel, configValueName } from './acp-config.js'
 import { attachmentIds, parseReferences } from './anchor.js'
 import { injectOverlay, wantsHtml } from './inject.js'
 import { toAgentAttachments, toAgentItem, toConversationItem } from './label.js'
@@ -156,6 +158,27 @@ function turnEndNote(stopReason: string): string {
  *  it - the same thing the shell's update card promises in advance, in the same
  *  words, because it is the same event seen from either side of it. */
 const AGENT_RESTARTED_NOTE = '已開啟新 session，之前的對話不會延續'
+
+/** A pick the user made, for the thread.
+ *
+ *  Recorded because a reply's worth is not separable from which model wrote it:
+ *  a thread read back a month later without the switches in it says three
+ *  answers came from one agent when they came from three. It also happens to be
+ *  the only place a mode change becomes visible, and selecting some models
+ *  changes the mode as a side effect.
+ *
+ *  Every switch gets a line, including a run of them. Collapsing a run was the
+ *  first instinct and it is wrong here: the log is append-only and stamped in
+ *  real time - that is what makes it the record - and rewriting the last entry
+ *  to tidy the display would trade the property for the tidying. A deliberate
+ *  keystroke is also not the kind of thing that arrives in floods; the note this
+ *  sits beside is de-duplicated because a dev daemon restarts on every file save,
+ *  which is a machine repeating itself, not a person changing their mind. */
+function configChangeNote(option: SessionConfigOption, value: AcpConfigValue): string {
+  const label = configLabel(option)
+  if (typeof value === 'boolean') return `${label}已${value ? '開啟' : '關閉'}`
+  return `已切換${label}：${configValueName(option, value)}`
+}
 
 class SessionRuntime {
   readonly store: SessionStore
@@ -308,12 +331,31 @@ class SessionRuntime {
         this.activeBatch = null
         this.broadcast()
       },
+      pinnedConfig: () => this.store.session.agentConfig ?? {},
+      onConfigChange: (configId, value, option) => {
+        this.store.setAgentConfig(configId, value)
+        this.store.appendConversation({
+          role: 'system',
+          text: configChangeNote(option, value),
+          ts: Date.now(),
+        })
+      },
     })
     return true
   }
 
   answerAcp(id: string, answers: Record<string, string>): boolean {
     return this.acp?.answer(id, answers) ?? false
+  }
+
+  /** The user picked a model, an effort level, a mode - whatever this agent
+   *  offers. Awaited, because the answer carries the reshaped option set and the
+   *  broadcast that follows is what the picker redraws from. */
+  async setAcpConfig(configId: string, value: AcpConfigValue): Promise<boolean> {
+    if (!this.acp) return false
+    if (!(await this.acp.setConfigOption(configId, value))) return false
+    this.broadcast()
+    return true
   }
 
   /** SPIKE: stop the turn the agent is in the middle of. The turn's own end does
@@ -597,6 +639,31 @@ class SessionRuntime {
       }
       this.broadcast()
       res.json({ ok: true })
+    })
+
+    // The user set one of the agent's config options - which model to carry on
+    // with, how hard to think, which mode to be in.
+    api.post('/acp/config', (req, res) => {
+      const configId = String(req.body?.configId ?? '')
+      const value = req.body?.value
+      if (!configId || (typeof value !== 'string' && typeof value !== 'boolean')) {
+        return res
+          .status(400)
+          .json({ error: 'configId and a string or boolean value are required' })
+      }
+      // The agent can refuse - a value it no longer offers, or a hook that blocks
+      // the switch - and its refusal is not this daemon's fault, so it travels as
+      // the conflict it is rather than as a 500.
+      this.setAcpConfig(configId, value).then(
+        (ok) =>
+          ok
+            ? res.json({ ok: true })
+            : res.status(409).json({ error: 'that option cannot be set right now' }),
+        (err: unknown) =>
+          res
+            .status(409)
+            .json({ error: err instanceof Error ? err.message : 'the agent refused the change' }),
+      )
     })
 
     // SPIKE: clear the agent's context and carry on in a fresh session.

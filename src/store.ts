@@ -2,6 +2,7 @@ import { createHash, randomBytes } from 'node:crypto'
 import { mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { ATTACHMENT_GRACE_MS, SESSIONS_DIR } from './constants.js'
+import type { AcpConfigValue } from './acp-config.js'
 import type {
   Annotation,
   Attachment,
@@ -84,6 +85,12 @@ export interface PersistedSession {
    *  daemon - though it does lose the agent's context, which is what the shell
    *  is told. */
   agent?: string
+  /** The agent-config picks the user made - model, effort, mode - keyed by the
+   *  agent's own config ids. Re-asserted on every session this agent opens, so a
+   *  `/new` or a daemon restart does not quietly hand the review back to the
+   *  agent's default model. Only the user's own picks live here: see
+   *  `AcpAgentOptions.onConfigChange`. */
+  agentConfig?: Record<string, AcpConfigValue>
   /** Where the *visible* thread starts, set by `/new`. A window onto the log, not
    *  a cut in it: the record of the review stays whole on disk, and only the shell
    *  is shown a fresh start - which is what "new chat" means to the person who
@@ -431,10 +438,18 @@ export class SessionStore {
     this.patchSession({ agent: command })
   }
 
+  /** Remember one of the user's agent-config picks - the model, and anything else
+   *  the agent offers - so the next session opens on it. */
+  setAgentConfig(configId: string, value: AcpConfigValue): void {
+    this.patchSession({ agentConfig: { ...this.session.agentConfig, [configId]: value } })
+  }
+
   /** Ending drops the agent with the session: a reopen decides afresh whether
-   *  it is ACP-driven, and a restore must not resurrect an agent nobody asked for. */
+   *  it is ACP-driven, and a restore must not resurrect an agent nobody asked for.
+   *  The picks go with it - they described that agent's options, and the next one
+   *  need not have them. */
   end(by: SessionEndedBy): void {
-    const { agent: _agent, ...rest } = this.session
+    const { agent: _agent, agentConfig: _agentConfig, ...rest } = this.session
     this.writeJson('session.json', { ...rest, state: 'ended', endedBy: by })
   }
 

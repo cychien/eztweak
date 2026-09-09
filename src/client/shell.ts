@@ -12,6 +12,14 @@ import Select01Icon from '@hugeicons/core-free-icons/Select01Icon'
 import Navigation03Icon from '@hugeicons/core-free-icons/Navigation03Icon'
 import BubbleChatAddIcon from '@hugeicons/core-free-icons/BubbleChatAddIcon'
 import Edit02Icon from '@hugeicons/core-free-icons/Edit02Icon'
+import type { SessionConfigOption } from '@agentclientprotocol/sdk'
+import {
+  type AcpConfigValue,
+  configLabel,
+  configValueName,
+  configValues,
+  shortConfigValueName,
+} from '../acp-config.js'
 import { attachify } from './attach.js'
 import type { Device, Size } from './devices.js'
 import {
@@ -126,6 +134,11 @@ interface AcpWire {
     | { kind: 'plan'; entries: { content: string; status: string }[] }
   )[]
   ask?: AcpAskWire
+  /** What this agent lets the session be configured with. The protocol's own
+   *  type rather than a mirror of it: the shell draws whatever is in the list
+   *  without naming the options, so a hand-written copy would only be a second
+   *  place for the shape to drift. */
+  configOptions?: SessionConfigOption[]
   /** A cancel is out and the turn has not ended yet. */
   cancelling?: true
   error?: string
@@ -1234,7 +1247,31 @@ const noteAttach = attachify({
 })
 const note = noteAttach.editable
 note.title = '寫補充說明（N）'
-queueSection.append(queueScroll, noteAttach.wrap, sendBtn)
+
+/** What the batch about to be sent will be answered by: the model, and whatever
+ *  else the agent lets a session be set to.
+ *
+ *  One pill rather than a pill per option, and it names the model, because the
+ *  model is the one of them worth a permanent line - and because the set is not
+ *  a fixed size. Selecting a model with no effort levels and no Fast mode drops
+ *  two options from the list, so a row of siblings would change height as the
+ *  user picked through it, moving the composer under the cursor that was doing
+ *  the picking. The rest live in the menu this opens, where a list that grows
+ *  and shrinks costs nothing.
+ *
+ *  Built once, outside `render()`, for the same reason the note box is: a turn
+ *  broadcasts a snapshot per streamed chunk, and a control rebuilt with each of
+ *  them would swap the row being clicked out from under the pointer. */
+const configPill = h('button', 'ez-config-pill')
+configPill.setAttribute('aria-haspopup', 'menu')
+configPill.setAttribute('aria-expanded', 'false')
+const configMenu = h('div', 'ez-menu ez-menu-up')
+configMenu.setAttribute('role', 'menu')
+const configWrap = h('div', 'ez-config')
+configWrap.hidden = true
+configWrap.append(configPill, configMenu)
+
+queueSection.append(queueScroll, configWrap, noteAttach.wrap, sendBtn)
 
 /** The editor for a queued annotation: the row's own comment, in place. One
  *  composer, built once and moved into whichever row is open - nothing else on
@@ -1895,6 +1932,171 @@ async function newChat(): Promise<void> {
   await api('/acp/new', { method: 'POST' })
 }
 
+// -------------------------------------------------------------- agent config
+
+let configMenuOpen = false
+/** What the control currently draws. `render()` runs on every snapshot, and the
+ *  option list is unchanged across almost all of them - so without this the rows
+ *  are rebuilt under a pointer that is on its way to one of them. */
+let configDrawn: string | null = null
+
+function paintConfigMenuState(): void {
+  configWrap.toggleAttribute('data-open', configMenuOpen)
+  configPill.setAttribute('aria-expanded', String(configMenuOpen))
+}
+
+function closeConfigMenu(): void {
+  if (!configMenuOpen) return
+  configMenuOpen = false
+  paintConfigMenuState()
+}
+
+configPill.onclick = () => {
+  configMenuOpen = !configMenuOpen
+  paintConfigMenuState()
+}
+
+document.addEventListener('click', (e) => {
+  if (e.target instanceof Node && !configWrap.contains(e.target)) closeConfigMenu()
+})
+
+configWrap.addEventListener('focusout', (e) => {
+  const to = e.relatedTarget
+  if (to instanceof Node && configWrap.contains(to)) return
+  closeConfigMenu()
+})
+
+configMenu.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return
+  closeConfigMenu()
+  configPill.focus()
+  e.preventDefault()
+})
+
+/** Set one option. The menu closes on the click rather than on the answer: the
+ *  request is a round trip to a child process, and a menu that sat open through
+ *  it would read as a click that did not land. What actually changed arrives in
+ *  the next snapshot, which is the only thing the control draws from - so a
+ *  refusal simply leaves the value where it was. */
+async function setConfig(configId: string, value: AcpConfigValue): Promise<void> {
+  closeConfigMenu()
+  await api('/acp/config', { method: 'POST', body: JSON.stringify({ configId, value }) })
+}
+
+/** The option the pill names. The model, when the agent offers one - it is the
+ *  choice with consequences the user is tracking. Falling back to the first
+ *  option rather than to nothing keeps the control meaningful on an agent whose
+ *  options we have never seen. */
+function pillOption(options: SessionConfigOption[]): SessionConfigOption | undefined {
+  return options.find((o) => o.category === 'model') ?? options[0]
+}
+
+function paintConfig(acp: AcpWire | undefined): void {
+  const options = acp?.configOptions ?? []
+  // Nothing offered, or no ACP agent at all: no control. An empty panel above the
+  // composer would be permanent chrome that answers no question.
+  configWrap.hidden = options.length === 0
+  if (options.length === 0) {
+    closeConfigMenu()
+    configDrawn = null
+    return
+  }
+  // Between sessions - `/new`, or an agent still starting - there is no session
+  // to set anything on. The pill keeps its label rather than emptying: it is
+  // about to be the same one, and a control that blanks reads as a failure.
+  const settable = acp?.state === 'idle' || acp?.state === 'working'
+  configPill.disabled = !settable
+  if (!settable) closeConfigMenu()
+
+  const signature = JSON.stringify([options, settable])
+  if (signature === configDrawn) return
+  configDrawn = signature
+
+  const named = pillOption(options)
+  const label =
+    named && named.type === 'select'
+      ? shortConfigValueName(configValueName(named, named.currentValue))
+      : (named && configLabel(named)) || ''
+  configPill.textContent = ''
+  configPill.append(h('span', 'ez-config-name', label), icon(ArrowDown01Icon as IconNode, 11))
+  // The qualifier the label dropped, plus the agent's own description of the
+  // value - which is where "Best for everyday, complex tasks" lives.
+  const full = named && named.type === 'select' ? configValueName(named, named.currentValue) : ''
+  const detail =
+    named && named.type === 'select'
+      ? configValues(named).find((o) => o.value === named.currentValue)?.description
+      : undefined
+  configPill.title = [named ? configLabel(named) : '', full, detail].filter(Boolean).join(' · ')
+
+  configMenu.textContent = ''
+  for (const option of [...options].sort(byCategory)) {
+    // A group per option, so the rule that separates one from the next is the
+    // grouping itself rather than a mark placed on whichever row happens to come
+    // first - and so a screen reader is told which option a row belongs to. A
+    // heading alone would be neither: it is a div in a menu, announced to nobody.
+    const group = h('div', 'ez-menu-group')
+    group.setAttribute('role', 'group')
+    group.setAttribute('aria-label', configLabel(option))
+    // A boolean is one row that is either on or off, so its own name is the row's
+    // - a heading above a single row would say the same word twice. It still needs
+    // the group's rule above it, or "Fast mode" sitting under six effort levels
+    // reads as a seventh.
+    if (option.type === 'boolean') {
+      group.append(
+        configRow(option, !option.currentValue, configLabel(option), option, option.currentValue),
+      )
+    } else {
+      group.append(h('div', 'ez-menu-label', configLabel(option)))
+      for (const value of configValues(option)) {
+        group.append(
+          configRow(option, value.value, value.name, value, value.value === option.currentValue),
+        )
+      }
+    }
+    configMenu.append(group)
+  }
+}
+
+/** The order the options are offered in. The agent's own order leads with the
+ *  mode, which leaves the menu opening on something other than the choice its
+ *  own button is named after. Sorting by category is what the spec says the
+ *  field is for - "keyboard shortcuts, icons, placement" - and anything
+ *  uncategorised keeps its place at the end, in the order the agent gave. */
+const CATEGORY_ORDER = ['model', 'thought_level', 'mode', 'model_config']
+
+function byCategory(a: SessionConfigOption, b: SessionConfigOption): number {
+  const rank = (o: SessionConfigOption) => {
+    const at = CATEGORY_ORDER.indexOf(o.category ?? '')
+    return at === -1 ? CATEGORY_ORDER.length : at
+  }
+  return rank(a) - rank(b)
+}
+
+/** One settable row, in the vocabulary the header's menus already use: a tick
+ *  column that holds its width whether or not there is a tick in it, so the
+ *  names do not step sideways as the choice moves.
+ *
+ *  `describes` is whichever of the option or the value carries the sentence worth
+ *  showing - for a select that is the value ("Sonnet 5 · Efficient for routine
+ *  tasks"), for a boolean the option itself. */
+function configRow(
+  option: SessionConfigOption,
+  value: AcpConfigValue,
+  name: string,
+  describes: { description?: string | null },
+  on: boolean,
+): HTMLElement {
+  const row = h('button', `ez-menu-item${on ? ' ez-on' : ''}`)
+  row.setAttribute('role', option.type === 'boolean' ? 'menuitemcheckbox' : 'menuitemradio')
+  row.setAttribute('aria-checked', String(on))
+  const tick = h('span', 'ez-menu-tick')
+  tick.append(icon(Tick02Icon as IconNode, 14))
+  row.append(tick, h('span', 'ez-menu-name', name))
+  if (describes.description) row.title = describes.description
+  row.onclick = () => void setConfig(option.id, value)
+  return row
+}
+
 /** Signature of what the queue currently draws. `render()` runs on every
  *  snapshot - an ACP turn broadcasts one per streamed chunk - and the queue is
  *  rebuilt from scratch, so without this a delete button is swapped out from under
@@ -2198,6 +2400,7 @@ function render(): void {
   paintUpdate(s)
   for (const { btn } of annotateBtns) btn.disabled = ended
   paintSendState()
+  paintConfig(s.acp)
 
   if (s.acp?.cancelling) {
     // The cancel is out and the agent has not answered yet. With no button to grey
