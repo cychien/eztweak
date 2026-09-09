@@ -4,7 +4,8 @@ Verified against ACP SDK `1.4.0`, `@agentclientprotocol/claude-agent-acp` `0.75.
 `@agentclientprotocol/codex-acp` `1.10.0`, and the Claude Code `2.1.266` binary's own
 control-protocol schema.
 
-**Status.** Model switching is built. Session restore and the skill list are research only.
+**Status.** Model switching is built. Session restore is designed and agreed, not yet built.
+The skill list is research only.
 
 ## Summary
 
@@ -230,6 +231,21 @@ agent back in a fresh context, with `AGENT_RESTARTED_NOTE` posted into the threa
 `acpSessionId` in `PersistedSession` and restoring via `session/resume` removes that loss, and the
 note with it.
 
+### Measured behaviour
+
+**`session/resume` survives a process restart**, which is the daemon-restart case exactly. Process 1
+opened a session and told it to remember `8261`, then was killed with `SIGKILL`; a second process
+resumed that `sessionId` and answered `8261`. It **replayed 0 updates**, so it is cheap and does not
+put anything in the thread. It returns `configOptions`, and the resumed session came back on the
+agent's default model - so a remembered model pick has to be re-asserted on the resume path too.
+
+**Fork-at-message works and is non-destructive.** A session was told `111`, then `222`; forking with
+`_meta.jetbrains.air.fork = { version: 1, messageId: <reply to the 111 turn> }` produced a session
+that recalled `111` alone, while the original still recalled `111, 222`. The handle is the
+`messageId` on `agent_message_chunk` - the Anthropic API message id (`msg_...`).
+
+Both capabilities are advertised as `{}` by `claude-agent-acp` (`resume`, `fork`).
+
 ### The code-change half: not supported
 
 ACP's schema has no `rewind`, `checkpoint`, `revert` or `undo` - and neither does the adapter.
@@ -268,10 +284,72 @@ agent. It does not supply content, but it does say which files to touch.
 **(a) + (c)** is the strongest combination: content from the git tree, scope limited by the report,
 so a file the user edited by hand in the meantime is not silently reverted.
 
-Keep "restore conversation" and "restore files" as two separate actions. The first is harmless and
-can be a single click; the second overwrites the working tree, needs a confirmation, and needs an
-honest refusal when the project is not a git repo or the tree is dirty in ways the checkpoint cannot
-account for. One button that does both is a button nobody will dare press.
+### Decisions taken (not yet built)
+
+The ask decomposes into three features whose cost and risk differ by an order of magnitude, and all
+three are in scope:
+
+- **R1 - resume across a daemon restart.** No UI. Store the `acpSessionId`, restore through
+  `session/resume`. Removes the context loss the README currently promises, and the
+  `AGENT_RESTARTED_NOTE` with it. A dev daemon restarts on every file save, so this is the one that
+  changes day-to-day work on eztweak itself.
+- **R2 - continue an earlier conversation.** A picker over eztweak's own chats. Touches no files.
+- **R3 - rewind this review to before batch N, files included.** The only destructive one.
+
+**R3's two halves are one action, not two.** An earlier draft of this document said to keep
+"restore conversation" and "restore files" separate; that is wrong. Restoring files to before batch
+N while leaving the agent's context after it means the agent's next turn reasons from a false
+picture - it will skip work it believes it did, or "fix" what is already right. The mirror case is
+the same defect. Either both or neither. R2 is unaffected: continuing an old conversation never
+claimed to undo anything.
+
+**R3 uses `/new`, not fork-at-message.** Fork preserves the context before N and is verified to
+work, but it rests on two unstable things: `session/fork` is marked UNSTABLE in the spec ("may be
+removed or changed at any point") and the fork point travels in `_meta.jetbrains.air.fork`, another
+editor's vendor namespace inside the Claude adapter. Pinning the correctness of a destructive
+feature to that is the wrong trade. With `/new` the agent's memory is *empty* rather than *wrong* -
+and an empty memory does not lie - while the conversation before N stays in eztweak's own thread
+where the user can still read it. The cost is the lost context; if that proves annoying, fork can be
+added later behind a capability check, as an optimisation rather than the foundation.
+
+**Files come back from a git checkpoint, one click, behind a file list.** Before each batch is
+handed over: `GIT_INDEX_FILE=<tmp> git add -A`, `write-tree`, `commit-tree`, and a ref under
+`refs/eztweak/<sessionKey>/<batchId>`. That includes untracked files, respects `.gitignore`, never
+touches the working tree, and stays out of the user's own ref namespace; the session's refs are
+pruned when it ends. `ToolCallContent.diff` carries `oldText` and could rebuild a file without git,
+but it is optional and blind to anything a shell command wrote - an undo that silently misses a file
+is worse than none - so a project that is not a git repo is refused outright rather than served a
+best-effort. Scope comes from the agent's own per-turn `agentFileChangeReport`, supplemented by the
+`diff` paths, intersected with the checkpoint's diff.
+
+The confirmation is not politeness. A checkpoint captures the whole worktree, so it also holds the
+user's own edits, and restoring it undoes anything they changed by hand after that point. Scoping to
+the agent's reported paths covers most of it, but a file both parties touched is irreducibly
+ambiguous - the file list is what makes that the user's call instead of ours.
+
+**UI.** R3 hangs off each user bubble in the thread ("rewind to before this"), because which batch is
+the action's only parameter and the bubble is where that lives; clicking it expands the file list and
+the confirm. R2's list is eztweak's own chats only, drawn from `chats[]` - every one of those has a
+thread to show, where a session the user ran in their terminal would open on an empty one.
+`session/list` is still used, for two things: dropping chats the agent no longer has on disk, and
+borrowing its `title` (the agent's own summary).
+
+**Data model.** `PersistedSession` gains `chats: Chat[]` (`{ id, acpSessionId?, startedAt }`) and
+`currentChatId`; `ConversationEntry` gains `chatId`. The thread window stops being "ts >= clear.at"
+and becomes "chatId === currentChatId", because R2 breaks the time window: return to an earlier chat
+and keep talking, and its new entries are stamped later than the chat that followed it. `chatId` is
+also append-only, which the log requires. `conversationClear` stays readable for migration.
+
+**Engineering risk, and it is not the protocol.** The SDK's `ActiveSession` wraps `session/new`
+alone and `attachSession` is private, so resume and fork need their own update routing. The SDK's
+`SessionUpdateRouter.handleMessage` returns `Handled.no`, so it does not consume the notification and
+a client's own `onNotification(session/update)` handler can coexist; `ActiveSession.prompt` enqueues
+the turn's `stop` in a `.then()` microtask into the same queue the notification handler fills
+synchronously, and *that* is the whole ordering guarantee `pump`'s comment is about. Reproducing it
+is roughly 40 lines. It should then be the only path, `session/new` included: resume becomes the
+common case after R1, so it cannot be the second-class one, and two queue implementations would
+drift - the divergent one announcing itself as an empty reply about one turn in ten. The existing
+ordering test is the guard.
 
 ---
 
