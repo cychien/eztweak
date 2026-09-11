@@ -4,8 +4,9 @@ Verified against ACP SDK `1.4.0`, `@agentclientprotocol/claude-agent-acp` `0.75.
 `@agentclientprotocol/codex-acp` `1.10.0`, and the Claude Code `2.1.266` binary's own
 control-protocol schema.
 
-**Status.** Model switching is built. Session restore is designed and agreed, not yet built.
-The skill list is research only.
+**Status.** Model switching is built. Of session restore, R1 (resume across a daemon restart) and
+R2 (a picker over earlier conversations) are built; R3 (the rewind that takes the code with it) is
+designed and agreed, not yet built. The skill list is research only.
 
 ## Summary
 

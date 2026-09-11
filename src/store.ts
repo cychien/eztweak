@@ -91,17 +91,42 @@ export interface PersistedSession {
    *  agent's default model. Only the user's own picks live here: see
    *  `AcpAgentOptions.onConfigChange`. */
   agentConfig?: Record<string, AcpConfigValue>
-  /** Where the *visible* thread starts, set by `/new`. A window onto the log, not
-   *  a cut in it: the record of the review stays whole on disk, and only the shell
-   *  is shown a fresh start - which is what "new chat" means to the person who
-   *  asked for one. */
+  /** The conversations this review has had, oldest first. A window onto the log,
+   *  never a cut in it: the record stays whole on disk and the shell is shown one
+   *  chat at a time, which is what "new chat" means to the person who asked for
+   *  one - and what lets an earlier one be picked back up.
+   *
+   *  Written on first use, so a session recorded before chats existed gets one
+   *  built from its `conversationClear`. */
+  chats?: Chat[]
+  /** Which of `chats` the shell is showing and the agent is on. */
+  currentChatId?: string
+  /** Superseded by `chats`. Read once, to migrate; never written again. */
   conversationClear?: ConversationClear
 }
 
+/** One conversation: a window onto the log, and the ACP session that remembers
+ *  it. */
+export interface Chat {
+  id: string
+  /** The agent-side session backing this chat, once one is open. Absent on a
+   *  chat that has never reached an agent, and replaced when the agent turns out
+   *  not to have the old one any more. */
+  acpSessionId?: string
+  startedAt: number
+}
+
+/** One chat, with what it takes to choose between them: when, how much, and
+ *  whether it is the one showing. */
+export interface ChatSummary {
+  id: string
+  startedAt: number
+  entries: number
+  current: boolean
+}
+
 export interface ConversationClear {
-  /** Entries stamped at or after this are the new thread. Nothing is carried over
-   *  across it: `/new` drops every batch the agent had not finished with, so there
-   *  is no answer still coming that would need its question kept. */
+  /** Entries stamped at or after this are the new thread. */
   at: number
 }
 
@@ -426,8 +451,12 @@ export class SessionStore {
     }
   }
 
+  /** Stamped with the chat it was written during, which is what lets the window
+   *  be a filter rather than a time range - an earlier chat picked back up goes
+   *  on collecting entries stamped later than the chat that followed it. */
   appendConversation(entry: ConversationEntry): void {
-    this.writeJson('conversation.json', [...this.conversation, entry])
+    const stamped: ConversationEntry = { chatId: this.currentChat.id, ...entry }
+    this.writeJson('conversation.json', [...this.conversation, stamped])
   }
 
   setPort(port: number): void {
@@ -453,17 +482,103 @@ export class SessionStore {
     this.writeJson('session.json', { ...rest, state: 'ended', endedBy: by })
   }
 
-  /** Start the visible thread here. Nothing is deleted - see `conversationClear`. */
-  clearConversation(): void {
-    this.patchSession({ conversationClear: { at: Date.now() } })
+  /** This review's conversations, oldest first, with one guaranteed to exist.
+   *
+   *  Built on demand rather than at session creation so a store recorded before
+   *  chats existed grows one: its `conversationClear` becomes the first chat's
+   *  `startedAt`, which is the same window under a new name. */
+  get chats(): Chat[] {
+    const session = this.session
+    if (session.chats?.length) return session.chats
+    const chats: Chat[] = [
+      { id: newId(), startedAt: session.conversationClear?.at ?? session.createdAt },
+    ]
+    this.patchSession({ chats, currentChatId: chats[0]!.id })
+    return chats
   }
 
-  /** The thread as the shell should draw it: everything since the last `/new`,
-   *  plus whatever that `/new` left the user still waiting on. */
+  /** The conversation the shell is showing and the agent is on. */
+  get currentChat(): Chat {
+    const chats = this.chats
+    const id = this.session.currentChatId
+    return chats.find((c) => c.id === id) ?? chats[chats.length - 1]!
+  }
+
+  /** Begin a conversation. Nothing is deleted: the log keeps every word, and only
+   *  the window moves. */
+  startChat(): Chat {
+    const chat: Chat = { id: newId(), startedAt: Date.now() }
+    this.patchSession({ chats: [...this.chats, chat], currentChatId: chat.id })
+    return chat
+  }
+
+  /** Show an earlier conversation and put the agent back on it. */
+  switchChat(id: string): Chat | null {
+    const chat = this.chats.find((c) => c.id === id)
+    if (!chat) return null
+    this.patchSession({ currentChatId: chat.id })
+    return chat
+  }
+
+  /** Record the agent-side session now backing the current chat. Replaces what
+   *  was there: a resume the agent could not honour leaves the chat on a
+   *  different session than it started with, and the old id names nothing. */
+  setChatSession(acpSessionId: string): void {
+    const current = this.currentChat
+    this.patchSession({
+      chats: this.chats.map((c) => (c.id === current.id ? { ...c, acpSessionId } : c)),
+    })
+  }
+
+  /** Whether one logged entry belongs to one chat.
+   *
+   *  Two rules, because the log outlived the change. An entry stamped with a chat
+   *  belongs to that chat. An entry from before stamping belongs to the first
+   *  chat, gated by its `startedAt` - which is the `conversationClear` it was
+   *  migrated from, so an old session draws exactly what it drew before.
+   *
+   *  One predicate, used by both the thread window and the chat list: they were
+   *  written twice once, and the copy disagreeing with the original is how a
+   *  conversation comes to be counted as empty while its thread is on screen. */
+  private belongsTo(entry: ConversationEntry, chat: Chat, isFirst: boolean): boolean {
+    return entry.chatId === undefined
+      ? isFirst && entry.ts >= chat.startedAt
+      : entry.chatId === chat.id
+  }
+
+  /** The thread as the shell should draw it: the current chat, and nothing else. */
   get visibleConversation(): ConversationEntry[] {
-    const clear = this.session.conversationClear
-    if (!clear) return this.conversation
-    return this.conversation.filter((e) => e.ts >= clear.at)
+    const current = this.currentChat
+    const isFirst = this.chats[0]?.id === current.id
+    return this.conversation.filter((entry) => this.belongsTo(entry, current, isFirst))
+  }
+
+  /** Every chat with enough about it to be chosen between, oldest first.
+   *
+   *  Every one, including a chat nothing has been said in yet: the caller reads
+   *  "an earlier conversation is showing" off the current chat's position in this
+   *  list, so dropping an empty newer one would make an older one look like the
+   *  newest and take that signal away in the one state it exists to report. */
+  chatSummaries(): ChatSummary[] {
+    const chats = this.chats
+    const current = this.currentChat.id
+    const firstId = chats[0]?.id
+    const log = this.conversation
+    return chats.map((chat) => ({
+      id: chat.id,
+      startedAt: chat.startedAt,
+      entries: log.filter((entry) => this.belongsTo(entry, chat, chat.id === firstId)).length,
+      current: chat.id === current,
+    }))
+  }
+
+  /** Whether the newest chat is showing and has nothing in it - i.e. the review
+   *  is already on a fresh conversation, and being asked for one again has
+   *  nothing to do. */
+  get onEmptyNewestChat(): boolean {
+    const summaries = this.chatSummaries()
+    const last = summaries[summaries.length - 1]
+    return !!last?.current && last.entries === 0
   }
 
   reopen(): void {

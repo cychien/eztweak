@@ -112,7 +112,16 @@ interface SnapshotWire {
   agentBusy: boolean
   agentProgress?: string
   acp?: AcpWire
+  /** The conversations this review has had, newest first. ACP mode only. */
+  chats?: ChatWire[]
   update?: UpdateWire
+}
+
+interface ChatWire {
+  id: string
+  startedAt: number
+  entries: number
+  current: boolean
 }
 
 /** A newer daemon on the registry, and how far the update has got once the user
@@ -1325,7 +1334,24 @@ const convSection = h('section', 'ez-section ez-conv-section')
 const convList = h('div', 'ez-conv')
 const convScroll = h('div', 'ez-fade ez-conv-scroll')
 convScroll.appendChild(convList)
-convSection.append(convScroll)
+
+/** Which conversation the thread is showing, and the way back to the others.
+ *
+ *  Quiet while it has nothing to say - absent on a review that has only ever had
+ *  one conversation, and unremarkable while the newest one is showing, which is
+ *  the normal state. It speaks up in the one case that matters: an *earlier*
+ *  conversation is on screen, feedback sent now goes to that one, and nothing
+ *  else on screen would say so. */
+const chatPill = h('button', 'ez-chat-pill')
+chatPill.setAttribute('aria-haspopup', 'menu')
+chatPill.setAttribute('aria-expanded', 'false')
+const chatMenu = h('div', 'ez-menu')
+chatMenu.setAttribute('role', 'menu')
+chatMenu.setAttribute('aria-label', '對話紀錄')
+const chatWrap = h('div', 'ez-chat')
+chatWrap.hidden = true
+chatWrap.append(chatPill, chatMenu)
+convSection.append(chatWrap, convScroll)
 
 const resizer = h('div', 'ez-resizer')
 resizer.tabIndex = 0
@@ -1932,6 +1958,119 @@ async function newChat(): Promise<void> {
   await api('/acp/new', { method: 'POST' })
 }
 
+// --------------------------------------------------------------- chat picker
+
+let chatMenuOpen = false
+let chatDrawn: string | null = null
+
+function paintChatMenuState(): void {
+  chatWrap.toggleAttribute('data-open', chatMenuOpen)
+  chatPill.setAttribute('aria-expanded', String(chatMenuOpen))
+}
+
+function closeChatMenu(): void {
+  if (!chatMenuOpen) return
+  chatMenuOpen = false
+  paintChatMenuState()
+}
+
+chatPill.onclick = () => {
+  chatMenuOpen = !chatMenuOpen
+  paintChatMenuState()
+}
+
+document.addEventListener('click', (e) => {
+  if (e.target instanceof Node && !chatWrap.contains(e.target)) closeChatMenu()
+})
+
+chatWrap.addEventListener('focusout', (e) => {
+  const to = e.relatedTarget
+  if (to instanceof Node && chatWrap.contains(to)) return
+  closeChatMenu()
+})
+
+chatMenu.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return
+  closeChatMenu()
+  chatPill.focus()
+  e.preventDefault()
+})
+
+/** When a conversation happened, in as few characters as say which one it is.
+ *  A date only once the day stops being today - the time alone is what tells two
+ *  of this afternoon's apart, and the date would be the same on both. */
+function chatTime(at: number): string {
+  const when = new Date(at)
+  const clock = `${when.getHours()}:${String(when.getMinutes()).padStart(2, '0')}`
+  const today = new Date()
+  const sameDay =
+    when.getFullYear() === today.getFullYear() &&
+    when.getMonth() === today.getMonth() &&
+    when.getDate() === today.getDate()
+  return sameDay ? clock : `${when.getMonth() + 1}/${when.getDate()} ${clock}`
+}
+
+async function switchChat(id: string): Promise<void> {
+  closeChatMenu()
+  await api('/acp/chat', { method: 'POST', body: JSON.stringify({ id }) })
+}
+
+function paintChats(s: SnapshotWire): void {
+  const chats = s.chats ?? []
+  // One conversation is not a choice, and a review that has never started a
+  // second one should not be carrying a control that says it might have.
+  chatWrap.hidden = chats.length < 2
+  if (chatWrap.hidden) {
+    closeChatMenu()
+    chatDrawn = null
+    return
+  }
+  // Between sessions there is nothing to switch onto.
+  const settable = s.acp?.state === 'idle' || s.acp?.state === 'working'
+  chatPill.disabled = !settable
+  if (!settable) closeChatMenu()
+
+  const signature = JSON.stringify([chats, settable])
+  if (signature === chatDrawn) return
+  chatDrawn = signature
+
+  // `chats` is newest first, so the newest is the head - the ordinary place to
+  // be, and the only one the pill stays quiet about.
+  const current = chats.find((c) => c.current)
+  const past = !!current && chats[0]?.id !== current.id
+  chatWrap.toggleAttribute('data-past', past)
+  chatPill.textContent = ''
+  chatPill.append(
+    h('span', 'ez-chat-name', past ? `${chatTime(current.startedAt)} 的對話` : '對話紀錄'),
+    icon(ArrowDown01Icon as IconNode, 11),
+  )
+  chatPill.title = past
+    ? '正在看之前的對話，送出的回饋會接在這一段後面'
+    : `這次 review 有 ${chats.length} 段對話`
+
+  chatMenu.textContent = ''
+  for (const chat of chats) {
+    const row = h('button', `ez-menu-item${chat.current ? ' ez-on' : ''}`)
+    row.setAttribute('role', 'menuitemradio')
+    row.setAttribute('aria-checked', String(chat.current))
+    const tick = h('span', 'ez-menu-tick')
+    tick.append(icon(Tick02Icon as IconNode, 14))
+    row.append(
+      tick,
+      h('span', 'ez-menu-name', chatTime(chat.startedAt)),
+      h('span', 'ez-chat-count', chat.entries ? `${chat.entries} 則` : '尚無內容'),
+    )
+    row.onclick = () => {
+      if (chat.current) {
+        closeChatMenu()
+        return
+      }
+      void switchChat(chat.id)
+    }
+    chatMenu.append(row)
+  }
+}
+
 // -------------------------------------------------------------- agent config
 
 let configMenuOpen = false
@@ -2401,6 +2540,7 @@ function render(): void {
   for (const { btn } of annotateBtns) btn.disabled = ended
   paintSendState()
   paintConfig(s.acp)
+  paintChats(s)
 
   if (s.acp?.cancelling) {
     // The cancel is out and the agent has not answered yet. With no button to grey

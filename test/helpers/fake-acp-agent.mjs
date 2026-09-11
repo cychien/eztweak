@@ -11,9 +11,13 @@
  *    CONFIGPUSH  push a `config_option_update` nobody asked for, then end the turn
  *    MODEPUSH  push a bare `current_mode_update`, then end the turn
  *    REFUSEHAIKU  from here on, take the request to switch to haiku and decline it
+ *
+ *  Env: EZ_FAKE_NO_RESUME     do not advertise session/resume
+ *       EZ_FAKE_REFUSE_RESUME advertise it, then refuse every resume
  *    REPORT    reply with {opened, closed, prompts, log} as JSON
  *    else      reply with `<sessionId>:<prompt>` and stop with `end_turn` */
 
+import { readFileSync, writeFileSync } from 'node:fs'
 import { Readable, Writable } from 'node:stream'
 import { PROTOCOL_VERSION, agent, methods, ndJsonStream } from '@agentclientprotocol/sdk'
 
@@ -46,6 +50,37 @@ const FAST_MODELS = new Set(['opus', 'sonnet'])
 const config = { model: 'opus', mode: 'default', fast: false }
 /** Armed by a REFUSEHAIKU prompt. Stands in for a hook that blocks a switch. */
 let refuseHaiku = false
+/** Whether this agent advertises `session/resume` at all, and whether it honours
+ *  one when asked. `EZ_FAKE_NO_RESUME` makes it an agent that cannot;
+ *  `EZ_FAKE_REFUSE_RESUME` an agent that says it can and then cannot find the
+ *  session - a deleted transcript. Both are real cases and they differ: one is
+ *  known before asking, the other only after. */
+const canResume = !process.env.EZ_FAKE_NO_RESUME
+const refuseResume = !!process.env.EZ_FAKE_REFUSE_RESUME
+/** Where the sessions this agent has live, when a test wants them to outlast the
+ *  process. A real agent keeps transcripts on disk, which is the whole reason a
+ *  restarted daemon can resume one; an agent that forgot them on exit would make
+ *  the resume path untestable for the case it exists to serve. */
+const STATE = process.env.EZ_FAKE_STATE
+const persisted = (() => {
+  if (!STATE) return null
+  try {
+    return JSON.parse(readFileSync(STATE, 'utf8'))
+  } catch {
+    return null
+  }
+})()
+
+/** Sessions this agent still has. A resume of anything else is refused. */
+const live = new Set(persisted?.live ?? [])
+/** How many sessions have ever been opened, so ids do not restart at s1 in a
+ *  second process and quietly collide with the first one's. */
+let everOpened = persisted?.everOpened ?? 0
+
+function persist() {
+  if (!STATE) return
+  writeFileSync(STATE, JSON.stringify({ live: [...live], everOpened }))
+}
 
 function configOptions() {
   return [
@@ -87,12 +122,14 @@ const app = agent({ name: 'fake-acp-agent' })
     log.push(`initialize:boolean=${!!ctx.params.clientCapabilities?.session?.configOptions?.boolean}`)
     return {
       protocolVersion: PROTOCOL_VERSION,
-      agentCapabilities: { sessionCapabilities: { close: {} } },
+      agentCapabilities: { sessionCapabilities: { close: {}, ...(canResume ? { resume: {} } : {}) } },
     }
   })
   .onRequest(methods.agent.session.new, () => {
-    const sessionId = `s${opened.length + 1}`
+    const sessionId = `s${++everOpened}`
     opened.push(sessionId)
+    live.add(sessionId)
+    persist()
     log.push(`new:${sessionId}`)
     // Each session starts on the agent's own defaults, the way a real one does -
     // which is what makes a re-asserted pick observable.
@@ -116,8 +153,21 @@ const app = agent({ name: 'fake-acp-agent' })
     config[configId] = value
     return { configOptions: configOptions() }
   })
+  .onRequest(methods.agent.session.resume, (ctx) => {
+    const { sessionId } = ctx.params
+    log.push(`resume:${sessionId}`)
+    if (refuseResume || !live.has(sessionId)) throw new Error(`no such session: ${sessionId}`)
+    // A resumed session comes back on this agent's defaults, the way the real one
+    // does - which is what makes a re-asserted pick observable on this path too.
+    config.model = 'opus'
+    config.mode = 'default'
+    config.fast = false
+    return { configOptions: configOptions() }
+  })
   .onRequest(methods.agent.session.close, (ctx) => {
     closed.push(ctx.params.sessionId)
+    // Closing is the client letting go, not the session being deleted: a closed
+    // session is still resumable, which is exactly the daemon-restart case.
     return {}
   })
   .onNotification(methods.agent.session.cancel, (ctx) => {

@@ -15,8 +15,6 @@
 import { type ChildProcess, spawn } from 'node:child_process'
 import { Readable, Writable } from 'node:stream'
 import {
-  type ActiveSession,
-  type ActiveSessionMessage,
   type ClientContext,
   type CreateElicitationRequest,
   type CreateElicitationResponse,
@@ -30,6 +28,7 @@ import {
   ndJsonStream,
 } from '@agentclientprotocol/sdk'
 import type { AcpConfigValue } from './acp-config.js'
+import { type AttachedSession, SessionRouter } from './acp-session.js'
 
 export type AcpState = 'starting' | 'idle' | 'working' | 'exited'
 
@@ -109,7 +108,19 @@ export interface AcpAgentOptions {
    *  downgrades the permission mode, and pinning that would keep the session
    *  downgraded long after the model that caused it was switched away from. */
   onConfigChange?: (configId: string, value: AcpConfigValue, option: SessionConfigOption) => void
+  /** The ACP session this review already had, if any. Read at open time, not
+   *  taken once: every session this agent opens asks again, and the answer
+   *  changes as the review moves between its own conversations. */
+  resumeSessionId?: () => string | undefined
+  /** A session is up, and how. The two mean different things to the thread - one
+   *  conversation continued, the other started over - so the caller is told
+   *  which rather than left to assume the pessimistic one. */
+  onSessionOpen?: (sessionId: string, how: AcpSessionStart) => void
 }
+
+/** Whether the session on the other end remembers this review or is meeting it
+ *  for the first time. */
+export type AcpSessionStart = 'new' | 'resumed'
 
 const FEED_CAP = 100
 
@@ -129,13 +140,11 @@ process.on('exit', () => {
 export class AcpAgent {
   private child: ChildProcess
   private ctx: ClientContext | null = null
-  /** The live session. Held as the SDK's `ActiveSession` for one reason: it funnels
-   *  this session's updates *and* its turn's `stop` into a single queue, in stream
-   *  order. That ordering is load-bearing - see `pump`. */
-  private session: ActiveSession | null = null
-  /** Retires the pump on the session being replaced, so it stops waiting on a
-   *  `nextUpdate` that will never come. */
-  private retire: (() => void) | null = null
+  /** Routes this connection's session updates into whichever session is live. */
+  private readonly router = new SessionRouter()
+  /** The live session. One ordered queue carrying its updates *and* its turn's
+   *  `stop` - see `acp-session.ts`, which is where that matters. */
+  private session: AttachedSession | null = null
   private state: AcpState = 'starting'
   private feed: AcpFeedItem[] = []
   /** The live session's options. Kept across a session swap rather than cleared:
@@ -154,6 +163,9 @@ export class AcpAgent {
   /** Set when the agent advertises `session/close`, which is the only way to
    *  tell it a session it is still holding is finished with. */
   private canClose = false
+  /** Set when the agent advertises `session/resume`, which is what lets a review
+   *  pick its own conversation back up after the daemon that held it went away. */
+  private canResume = false
   /** Resolved when the agent is done, and nothing else: it is what holds the
    *  connection open, so a session swap must not disturb it. */
   private finish: (() => void) | null = null
@@ -325,14 +337,19 @@ export class AcpAgent {
     return true
   }
 
-  /** Throw away the agent's memory of this review and carry on in a fresh
-   *  session. The child process and the connection both stay: what costs tokens
+  /** Let go of the session this agent is on and open whichever one it should be
+   *  on now - which `resumeSessionId` answers, so the caller decides by moving
+   *  the review before calling this. A fresh conversation is that answer being
+   *  nothing; going back to an earlier one is it being that one's id.
+   *
+   *  The child process and the connection both stay either way. What costs tokens
    *  is the history the agent replays on every turn, and that belongs to the
    *  session, not to the process.
    *
-   *  A turn in flight is cancelled rather than waited on - starting over is the
-   *  whole point of asking - and its end is then dropped on the epoch. */
-  newChat(): boolean {
+   *  A turn in flight is cancelled rather than waited on - moving off this
+   *  conversation is the whole point of asking - and its end is then dropped on
+   *  the epoch. */
+  reopenSession(): boolean {
     if (!this.ctx || !this.session) return false
     if (this.state !== 'idle' && this.state !== 'working') return false
     const old = this.session
@@ -346,8 +363,7 @@ export class AcpAgent {
     // agent is blocked on it, and it has to be released before we let go.
     this.settleAsk()
     this.opts.onChange()
-    this.retire?.()
-    old.dispose()
+    old.retire()
     void this.closeSession(old.sessionId)
     void this.openSession().catch((err: unknown) => {
       this.fail(err instanceof Error ? err.message : String(err))
@@ -368,31 +384,75 @@ export class AcpAgent {
     } catch {}
   }
 
-  /** Starts the session this agent is currently meant to be on, and installs it
-   *  only if it is still the one wanted by the time the agent answers. */
+  /** The session this agent should be on: the one the review already had, picked
+   *  back up, or a fresh one.
+   *
+   *  Resume is tried first, because a review that still has a session id wants
+   *  *that* conversation rather than a copy of it, and resume is cheap - the
+   *  agent replays nothing. Its failure is ordinary rather than fatal: the
+   *  transcript can be gone, the project can have moved, the agent may not do
+   *  resume at all. A fresh session is the fallback, and the caller is told which
+   *  of the two it got.
+   *
+   *  The session is only installed if it is still the one wanted by the time the
+   *  agent answers. */
   private async openSession(): Promise<void> {
     const ctx = this.ctx
     if (!ctx) return
     const epoch = this.epoch
-    const session = await ctx.buildSession(this.opts.cwd).start()
-    // A newer `/new` landed while the agent was answering this one: that request
+    const wanted = this.opts.resumeSessionId?.()
+    let sessionId: string | null = null
+    let configOptions: SessionConfigOption[] = []
+    let how: AcpSessionStart = 'new'
+    if (wanted && this.canResume) {
+      try {
+        const resumed = await ctx.request(methods.agent.session.resume, {
+          sessionId: wanted,
+          cwd: this.opts.cwd,
+          mcpServers: [],
+        })
+        sessionId = wanted
+        configOptions = resumed?.configOptions ?? []
+        how = 'resumed'
+      } catch {
+        /* the agent does not have it any more - a fresh session it is */
+      }
+    }
+    if (epoch !== this.epoch) return
+    if (!sessionId) {
+      const created = await ctx.request(methods.agent.session.new, {
+        cwd: this.opts.cwd,
+        mcpServers: [],
+      })
+      sessionId = created.sessionId
+      configOptions = created.configOptions ?? []
+    }
+    // A newer request landed while the agent was answering this one: that request
     // owns the session now, so this one is closed rather than installed.
     if (epoch !== this.epoch) {
-      session.dispose()
-      void this.closeSession(session.sessionId)
+      void this.closeSession(sessionId)
       return
     }
+    const session = this.router.attach(ctx, sessionId)
     this.session = session
-    this.configOptions = session.newSessionResponse.configOptions ?? []
+    this.configOptions = configOptions
     // Before `idle`, and this is load-bearing. Going idle is what `onChange`
     // turns into a delivery, so a queued batch leaves the moment the flag flips -
     // and a pick re-asserted after that point would arrive one turn too late,
-    // every time. `/new` with feedback already waiting is the common path, not
-    // the corner case: the first turn of the fresh session is exactly the one the
-    // user chose the model for.
+    // every time. A reopened session with feedback already waiting is the common
+    // path, not the corner case: its first turn is the one the model was chosen
+    // for. A resumed session needs it too - resume comes back on the agent's
+    // default, not on what the review was last running.
     await this.applyPinnedConfig(epoch)
-    if (epoch !== this.epoch) return
+    if (epoch !== this.epoch) {
+      session.retire()
+      return
+    }
     this.state = 'idle'
+    // Before `onChange`, which is what turns going idle into a delivery: the
+    // caller records the session id here, and a batch must not go out against a
+    // session nothing has written down yet.
+    this.opts.onSessionOpen?.(sessionId, how)
     this.opts.onChange()
     void this.pump(session, epoch).catch((err: unknown) => {
       if (epoch !== this.epoch) return
@@ -400,38 +460,23 @@ export class AcpAgent {
     })
   }
 
-  /** Drains one session's messages in the order the agent wrote them.
-   *
-   *  This is the whole reason the session is held as an `ActiveSession`: its
-   *  queue carries the streamed updates *and* the turn's own `stop`, and a reply
-   *  chunk written before the prompt response is therefore *seen* before it.
-   *  Reading the two off separate promises loses that - they are independent
-   *  microtask chains, and the response can settle first, ending the turn before
-   *  the words it was made of have arrived. That produced an empty reply about
-   *  one turn in ten.
-   *
-   *  Retired rather than abandoned: a pump parked on a session `/new` replaced
-   *  would hold that session's queue - and everything the agent still sends to it
-   *  - for the life of the process. */
-  private async pump(session: ActiveSession, epoch: number): Promise<void> {
-    const retired = new Promise<'retired'>((resolve) => {
-      this.retire = () => resolve('retired')
-    })
+  /** Drains one session's messages in the order the agent wrote them. The
+   *  ordering that makes this correct belongs to the queue - see
+   *  `acp-session.ts`. This only has to stop when the session is retired, which
+   *  the queue answers rather than leaving it parked forever. */
+  private async pump(session: AttachedSession, epoch: number): Promise<void> {
     for (;;) {
-      const msg: ActiveSessionMessage | 'retired' = await Promise.race([
-        session.nextUpdate(),
-        retired,
-      ])
-      if (msg === 'retired' || epoch !== this.epoch) return
-      if (msg.kind === 'session_update') this.onUpdate(msg.notification)
-      else if (msg.kind === 'stop') this.turnEnded(msg.stopReason, epoch)
+      const message = await session.next()
+      if (message.kind === 'retired' || epoch !== this.epoch) return
+      if (message.kind === 'update') this.onUpdate(message.notification)
+      else this.turnEnded(message.stopReason, epoch)
     }
   }
 
   stop(): void {
     this.state = 'exited'
     this.settleAsk()
-    this.retire?.()
+    this.session?.retire()
     this.finish?.()
     this.child.kill('SIGTERM')
     const child = this.child
@@ -444,7 +489,7 @@ export class AcpAgent {
     const tail = this.stderrTail.join('').trim().split('\n').slice(-3).join('\n')
     this.error = tail ? `${message}\n${tail}` : message
     this.settleAsk()
-    this.retire?.()
+    this.session?.retire()
     this.finish?.()
     this.opts.onExit(this.error)
     this.opts.onChange()
@@ -625,6 +670,9 @@ export class AcpAgent {
       Readable.toWeb(this.child.stdout) as ReadableStream<Uint8Array>,
     )
     await client({ name: 'eztweak' })
+      // Every session update this connection carries, sorted to whichever session
+      // is live. The SDK's own router leaves these unconsumed, so both can watch.
+      .onNotification(methods.client.session.update, (ctx) => this.router.route(ctx.params))
       .onRequest(methods.client.session.requestPermission, (ctx) =>
         this.requestPermission(ctx.params),
       )
@@ -644,6 +692,7 @@ export class AcpAgent {
           },
         })
         this.canClose = !!init.agentCapabilities?.sessionCapabilities?.close
+        this.canResume = !!init.agentCapabilities?.sessionCapabilities?.resume
         this.ctx = ctx
         await this.openSession()
         // `connectWith` closes the stream when this returns, so this is the

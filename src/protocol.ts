@@ -118,6 +118,10 @@ export interface ConversationEntry {
    *  own question when the two are not adjacent in the log. Absent on anything
    *  that belongs to no batch. */
   batchId?: string
+  /** Which conversation this was written during. The thread is drawn by filtering
+   *  on it. Absent on entries logged before chats existed - those belong to the
+   *  first one, by date; see `SessionStore.visibleConversation`. */
+  chatId?: string
   items?: ConversationItem[]
   attachments?: string[]
   references?: ReferenceEcho[]

@@ -61,9 +61,9 @@ successor: the successor binds and registers first, and only once it is up does 
 go - so a version that fails to start leaves you on the one you had, with the error in the card.
 Your sessions come back on the ports they held and the shell reloads itself.
 
-An ACP agent is restarted along with the daemon and comes back in a fresh session, so the review's
-conversation does not carry across - the same as `/new`. The card says so before you click, and the
-thread says so afterwards.
+An ACP agent is restarted along with the daemon and asked to resume the conversation it was having,
+so an update no longer costs the review its context. An agent that cannot resume comes back in a
+fresh session, the same as `/new`, and the thread says so when it happens.
 
 The close button in the card's corner puts the offer away; the version beside the name in the
 header turns into a pill you can click to bring it back. Nothing is installed or restarted without
@@ -256,7 +256,10 @@ Sessions outlive the daemon that served them. On start, the daemon picks each se
 from disk and re-binds it to the port it last held, so a review shell tab you already have open
 only needs a reload, and feedback you queued before the restart is still waiting. If that port has
 since been taken, the session moves to a free one and the CLI re-resolves it. A session that was
-driving an ACP agent starts that agent again, in a fresh context; the thread says so.
+driving an ACP agent starts that agent again **and asks it to resume the conversation they were
+having**, so the review carries on where it stopped. Whether that works is the agent's answer to
+give - a transcript it no longer has, or an agent that cannot resume at all, leaves the review in a
+fresh context, and only then does the thread say so.
 
 A session belongs to one project on one origin, not to the origin alone. Dev servers all default
 to the same port, so reviewing a second project on `localhost:5173` would otherwise inherit the
@@ -292,6 +295,11 @@ Three controls come with owning the agent:
   silent. Whatever it had already said stays in the thread, and the batch is not handed back: you
   stopped it on purpose.
 - **`/new`** in the note box clears the agent's context. See [The comment box](#the-comment-box).
+  Every conversation a review has had stays reachable: once there is more than one, a control at the
+  head of the thread lists them by time and by how much was said, and picking one shows its thread
+  and puts the agent back on it. While an earlier conversation is showing the control says so in
+  colour, because feedback sent then joins *that* conversation and nothing else on screen would
+  mention it.
 - **The pill above the note box** names the model the next batch will be answered by, and opens
   everything else the agent lets the session be set to - reasoning effort, permission mode, and any
   toggle it offers. It is a permanent slot because unlike a cancel it is *state*: it says what you

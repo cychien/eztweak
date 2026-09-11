@@ -1,13 +1,22 @@
 import assert from 'node:assert/strict'
+import { mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { after, test } from 'node:test'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { AcpAgent } from '../src/acp-agent.js'
-import type { AcpSnapshot } from '../src/acp-agent.js'
+import type { AcpSessionStart, AcpSnapshot } from '../src/acp-agent.js'
 
 const FAKE = join(dirname(fileURLToPath(import.meta.url)), 'helpers', 'fake-acp-agent.mjs')
 /** Mirrors CHUNK_COUNT in the fake agent. */
 const CHUNK_COUNT = 80
+
+/** A file two fake agents can share their session list through, so the second
+ *  one has the first one's sessions to resume - which is what a real agent's
+ *  on-disk transcripts do for a restarted daemon. */
+function sharedAgentState(): Record<string, string> {
+  return { EZ_FAKE_STATE: join(mkdtempSync(join(tmpdir(), 'ez-fake-')), 'state.json') }
+}
 
 interface Turn {
   reply: string
@@ -15,6 +24,11 @@ interface Turn {
 }
 
 interface HarnessOptions {
+  /** The session id the review already has, as `Chat.acpSessionId` would supply
+   *  it. Read on every open, so the test can change it between them. */
+  resume?: () => string | undefined
+  /** Env for the spawned fake agent, for the agents that cannot resume. */
+  env?: Record<string, string>
   /** The picks to re-assert on every session, as `PersistedSession.agentConfig`
    *  would supply them. */
   pinned?: Record<string, string | boolean>
@@ -56,8 +70,12 @@ function harness(options: HarnessOptions = {}) {
     acp.prompt(pending.shift()!)
   }
 
+  /** Every session this agent opened, and whether it was new or picked up. */
+  const opens: { sessionId: string; how: AcpSessionStart }[] = []
   const acp = new AcpAgent({
-    command: `node ${FAKE}`,
+    command: `${Object.entries(options.env ?? {})
+      .map(([k, v]) => `${k}=${v}`)
+      .join(' ')} node ${FAKE}`.trim(),
     cwd: process.cwd(),
     onChange: () => {
       const s = acp.snapshot()
@@ -71,6 +89,11 @@ function harness(options: HarnessOptions = {}) {
     },
     onExit: wake,
     ...(options.pinned ? { pinnedConfig: () => options.pinned! } : {}),
+    ...(options.resume ? { resumeSessionId: options.resume } : {}),
+    onSessionOpen: (sessionId, how) => {
+      opens.push({ sessionId, how })
+      wake()
+    },
     onConfigChange: (configId, value) => {
       configChanges.push({ configId, value })
       wake()
@@ -119,7 +142,7 @@ function harness(options: HarnessOptions = {}) {
     deliver(acp.snapshot())
   }
 
-  return { acp, turns, strays, configChanges, deliveredWith, until, idle, ask, queue }
+  return { acp, turns, strays, configChanges, deliveredWith, opens, until, idle, ask, queue }
 }
 
 /** The agent's bookkeeping, read back through the protocol. */
@@ -172,12 +195,12 @@ test('cancel is refused when no turn is in flight', async () => {
 
 // The whole point of /new: the next prompt lands on a session the agent has no
 // history for, which is what stops the review paying for one.
-test('a new chat moves to a fresh session and closes the old one', async () => {
+test('reopening moves to a fresh session and closes the old one', async () => {
   const h = harness()
   after(() => h.acp.stop())
   assert.equal((await h.ask('first')).reply, 's1:first')
 
-  assert.equal(h.acp.newChat(), true)
+  assert.equal(h.acp.reopenSession(), true)
   await h.idle()
   assert.equal((await h.ask('second')).reply, 's2:second')
 
@@ -203,7 +226,7 @@ test('a new chat mid-turn cancels it and drops its outcome', async () => {
   h.acp.prompt('SLOW')
   await h.until('the turn to be under way', (s) => s.state === 'working')
 
-  assert.equal(h.acp.newChat(), true)
+  assert.equal(h.acp.reopenSession(), true)
   assert.equal(h.acp.snapshot().state, 'starting')
   assert.deepEqual(h.acp.snapshot().feed, [])
   await h.idle()
@@ -222,7 +245,7 @@ test('a new chat is refused before the first session is up', () => {
   const h = harness()
   after(() => h.acp.stop())
   assert.equal(h.acp.snapshot().state, 'starting')
-  assert.equal(h.acp.newChat(), false, 'there is no context to clear yet')
+  assert.equal(h.acp.reopenSession(), false, 'there is no context to clear yet')
 })
 
 // The turn's end and the words it is made of travel the same stream, and the end
@@ -341,7 +364,7 @@ test('a remembered pick is re-asserted on every session', async () => {
   after(() => h.acp.stop())
   assert.equal(option(await h.idle(), 'model')?.currentValue, 'sonnet')
 
-  assert.equal(h.acp.newChat(), true)
+  assert.equal(h.acp.reopenSession(), true)
   await h.idle()
   assert.equal(option(h.acp.snapshot(), 'model')?.currentValue, 'sonnet', 'and again on the next one')
 })
@@ -369,7 +392,7 @@ test('a remembered pick lands before the first turn of a session opened by /new'
   after(() => h.acp.stop())
   await h.idle()
 
-  assert.equal(h.acp.newChat(), true)
+  assert.equal(h.acp.reopenSession(), true)
   assert.equal(h.acp.snapshot().state, 'starting')
   h.queue('after')
   await h.until('the turn on the fresh session to end', () => h.turns.length > 0)
@@ -419,4 +442,92 @@ test('a change the agent did not actually make is not remembered', async () => {
   assert.equal(await h.acp.setConfigOption('model', 'haiku'), false)
   assert.equal(option(h.acp.snapshot(), 'model')?.currentValue, 'opus')
   assert.deepEqual(h.configChanges, [])
+})
+
+// ------------------------------------------------------------ session resume
+
+// The daemon-restart case: the review still knows which session it was having,
+// and the agent still has it. Nothing is replayed and nothing is lost.
+test('a session the review already had is picked back up', async () => {
+  const env = sharedAgentState()
+  const first = harness({ env })
+  after(() => first.acp.stop())
+  assert.equal((await first.ask('hello')).reply, 's1:hello')
+  const sessionId = first.opens[0]!.sessionId
+  assert.deepEqual(first.opens, [{ sessionId: 's1', how: 'new' }])
+  first.acp.stop()
+
+  // A second agent, as a restarted daemon would start one, pointed at that id.
+  const next = harness({ resume: () => sessionId, env })
+  after(() => next.acp.stop())
+  await next.idle()
+  assert.deepEqual(next.opens, [{ sessionId: 's1', how: 'resumed' }])
+  assert.equal((await next.ask('again')).reply, 's1:again', 'the same session takes the turn')
+})
+
+// An agent with no resume at all. Asking would be a protocol error, so it is not
+// asked; the review carries on in a fresh session and is told which it got.
+test('an agent that cannot resume gets a fresh session instead', async () => {
+  const h = harness({ resume: () => 'sX', env: { EZ_FAKE_NO_RESUME: '1' } })
+  after(() => h.acp.stop())
+  await h.idle()
+  assert.deepEqual(h.opens, [{ sessionId: 's1', how: 'new' }])
+
+  const report = JSON.parse((await h.ask('REPORT')).reply) as Report
+  assert.ok(!report.log.some((l) => l.startsWith('resume:')), report.log.join(','))
+})
+
+// An agent that says it can and then cannot: a transcript deleted since. The
+// failure is ordinary - the review opens a fresh session rather than losing the
+// agent over a conversation that is gone.
+test('a resume the agent refuses falls back to a fresh session', async () => {
+  const h = harness({ resume: () => 'gone', env: { EZ_FAKE_REFUSE_RESUME: '1' } })
+  after(() => h.acp.stop())
+  await h.idle()
+  assert.deepEqual(h.opens, [{ sessionId: 's1', how: 'new' }])
+  assert.equal((await h.ask('after')).reply, 's1:after', 'and still takes turns')
+
+  const report = JSON.parse((await h.ask('REPORT')).reply) as Report
+  assert.ok(report.log.includes('resume:gone'), 'it was asked, once')
+})
+
+// Reopening reads the resume id afresh, which is how the same call serves both
+// "start a new conversation" and "go back to that one".
+test('reopening follows the resume id it is given at the time', async () => {
+  let resume: string | undefined
+  const h = harness({ resume: () => resume })
+  after(() => h.acp.stop())
+  assert.equal((await h.ask('first')).reply, 's1:first')
+
+  // Nothing to resume: a fresh conversation.
+  assert.equal(h.acp.reopenSession(), true)
+  await h.idle()
+  assert.equal((await h.ask('second')).reply, 's2:second')
+  assert.deepEqual(h.opens.at(-1), { sessionId: 's2', how: 'new' })
+
+  // Back to the first one.
+  resume = 's1'
+  assert.equal(h.acp.reopenSession(), true)
+  await h.idle()
+  assert.deepEqual(h.opens.at(-1), { sessionId: 's1', how: 'resumed' })
+  assert.equal((await h.ask('third')).reply, 's1:third')
+})
+
+// Resume comes back on the agent's default, not on what the review was last
+// running - so the pin has to be re-asserted on this path too, and before the
+// first turn like everywhere else.
+test('a remembered pick is re-asserted on a resumed session', async () => {
+  const env = sharedAgentState()
+  const first = harness({ pinned: { model: 'sonnet' }, env })
+  after(() => first.acp.stop())
+  await first.idle()
+  const sessionId = first.opens[0]!.sessionId
+  first.acp.stop()
+
+  const next = harness({ pinned: { model: 'sonnet' }, resume: () => sessionId, env })
+  after(() => next.acp.stop())
+  next.queue('after')
+  await next.until('the delivered turn to end', () => next.turns.length > 0)
+  assert.deepEqual(next.opens, [{ sessionId: 's1', how: 'resumed' }])
+  assert.deepEqual(next.deliveredWith, [{ model: 'sonnet', mode: 'default', fast: false }])
 })

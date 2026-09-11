@@ -728,6 +728,7 @@ body.ez-arranging .ez-frame {
 .ez-seg-device[data-open] .ez-menu,
 .ez-shown[data-open] .ez-menu,
 .ez-config[data-open] .ez-menu,
+.ez-chat[data-open] .ez-menu,
 .ez-update-hint[data-open] .ez-menu {
   display: flex;
 }
@@ -1582,6 +1583,81 @@ body.ez-arranging .ez-frame {
    claim about the file rather than about the target. */
 .ez-attach-field[data-drop] {
   background: var(--paper-sunken);
+}
+
+/* ---------------------------------------------------------- chat picker */
+
+/* Sits at the head of the thread, because what it names is which thread this is.
+   Its menu drops downward: unlike the composer's controls there is a whole
+   thread below it to open over. */
+.ez-chat {
+  display: flex;
+  position: relative;
+  margin-bottom: 6px;
+}
+
+.ez-chat[hidden] {
+  display: none;
+}
+
+.ez-chat-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  max-width: 100%;
+  border: none;
+  background: transparent;
+  color: var(--muted-foreground);
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 5px 3px 7px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition:
+    background 0.12s ease,
+    color 0.12s ease;
+}
+
+.ez-chat-pill:hover:not(:disabled),
+.ez-chat[data-open] .ez-chat-pill {
+  background: var(--muted);
+  color: var(--foreground);
+}
+
+.ez-chat-pill:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+/* An earlier conversation is on screen and feedback sent now joins *it*. That is
+   not a preference, it is a state the rest of the sidebar gives no sign of, so
+   this is the one place the control stops being quiet. Borrowed from the update
+   flag, which is the shell's existing colour for "this needs your attention and
+   is not an error". */
+.ez-chat[data-past] .ez-chat-pill {
+  color: var(--update-ink);
+  background: color-mix(in oklab, var(--update-ink) 8%, transparent);
+}
+
+.ez-chat-pill svg {
+  flex-shrink: 0;
+}
+
+.ez-chat-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* How much was said in that conversation, set against the row's far edge the way
+   the keyboard hints are. It is what tells two unnamed conversations apart when
+   their times alone do not. */
+.ez-chat-count {
+  margin-left: 10px;
+  color: var(--muted-foreground);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
 }
 
 /* ------------------------------------------------------- agent config pill */

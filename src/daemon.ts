@@ -81,9 +81,23 @@ interface SnapshotWire {
   activeBatchId?: string
   /** SPIKE: present when this session drives its agent over ACP. */
   acp?: AcpSnapshot
+  /** The conversations this review has had, newest first, and which one is shown.
+   *  Only ever sent in ACP mode: a poll-mode agent owns its own context and
+   *  nothing here can move it. */
+  chats?: ChatWire[]
   /** A newer version or a stale skill to offer, and the update's progress once
    *  taken up. Daemon-wide: every session's shell shows the same one. */
   update?: UpdateWire
+}
+
+/** One conversation as the picker draws it. The count is what tells two of them
+ *  apart when neither has anything else to go on - a chat is not named, it is
+ *  when it happened and how much was said. */
+interface ChatWire {
+  id: string
+  startedAt: number
+  entries: number
+  current: boolean
 }
 
 /** Bind `app` on the loopback at `port`, or reject. Deliberately not
@@ -251,9 +265,17 @@ class SessionRuntime {
       agentBusy: this.agentBusy,
       ...(this.agentProgress ? { agentProgress: this.agentProgress } : {}),
       ...(this.agentBusy && this.activeBatch ? { activeBatchId: this.activeBatch } : {}),
-      ...(this.acp ? { acp: this.acp.snapshot() } : {}),
+      ...(this.acp ? { acp: this.acp.snapshot(), chats: this.chatsWire() } : {}),
       ...(update ? { update } : {}),
     }
+  }
+
+  /** The chat list as the shell draws it: newest first, because that is the one
+   *  a review is normally on. The projection itself is the store's - it shares the
+   *  entry-belongs-to-chat rule with the thread window, which is the only way the
+   *  two can agree. */
+  private chatsWire(): ChatWire[] {
+    return this.store.chatSummaries().reverse()
   }
 
   broadcast(): void {
@@ -261,16 +283,23 @@ class SessionRuntime {
     for (const res of this.sseClients) res.write(data)
   }
 
-  /** Bring back the agent a previous daemon was driving. Its context died with
-   *  that daemon, and the batch it was on comes round again unacked, so the one
-   *  thing owed here is telling the thread that the reply will not remember -
-   *  which is what the update card said would happen, in the same words. */
+  /** Bring back the agent a previous daemon was driving.
+   *
+   *  Nothing is said to the thread here any more. The agent is asked to resume the
+   *  conversation this review was already having, and whether it can is its answer
+   *  to give - so the note about a lost context is written from `onSessionOpen`,
+   *  by what actually happened, rather than from here by assuming the worst. */
   restoreAcpAgent(command: string): void {
     this.attachAcpAgent(command)
-    // Only when there is context to have lost, and only once per loss: an empty
-    // thread had none, and a restart that follows another with nothing said in
-    // between is the same loss reported twice. A dev daemon restarts on every
-    // save, which is what makes both cases the common ones.
+  }
+
+  /** The thread is told its agent no longer remembers what came before.
+   *
+   *  Only when there is context to have lost, and only once per loss: an empty
+   *  thread had none, and a restart that follows another with nothing said in
+   *  between is the same loss reported twice. A dev daemon restarts on every save,
+   *  which is what makes both cases the common ones. */
+  private noteContextLost(): void {
     const thread = this.store.visibleConversation
     const last = thread.at(-1)
     if (thread.length === 0 || last?.text === AGENT_RESTARTED_NOTE) return
@@ -331,6 +360,17 @@ class SessionRuntime {
         this.activeBatch = null
         this.broadcast()
       },
+      resumeSessionId: () => this.store.currentChat.acpSessionId,
+      onSessionOpen: (sessionId, how) => {
+        const wanted = this.store.currentChat.acpSessionId
+        this.store.setChatSession(sessionId)
+        // The conversation was there to be picked up and the agent could not do
+        // it: a transcript that has been deleted, or an agent that does not do
+        // resume at all. That is the one case the thread has to hear about, and
+        // the only one - a chat that never had a session had nothing to lose.
+        if (wanted && how === 'new') this.noteContextLost()
+        this.broadcast()
+      },
       pinnedConfig: () => this.store.session.agentConfig ?? {},
       onConfigChange: (configId, value, option) => {
         this.store.setAgentConfig(configId, value)
@@ -365,7 +405,7 @@ class SessionRuntime {
     return this.acp?.cancelTurn() ?? false
   }
 
-  /** SPIKE: drop the agent's context and carry on in a fresh ACP session.
+  /** Carry on in a fresh conversation.
    *
    *  The shell shows an empty thread afterwards, because that is what "new chat"
    *  means to the person who asked for one - a notice explaining that the history
@@ -373,16 +413,49 @@ class SessionRuntime {
    *  either way: it is the record of the review, and windowing it costs nothing
    *  while deleting it would cost the only copy. */
   newAcpChat(): boolean {
-    if (!this.acp?.newChat()) return false
+    // Already on a fresh one. Asking again is asking for what is already there,
+    // and honouring it literally would pile up empty conversations in the picker
+    // and throw away a session that has nothing to throw away.
+    if (this.store.onEmptyNewestChat) return !!this.acp
+    return this.moveToChat(() => this.store.startChat().id)
+  }
+
+
+
+  /** Show an earlier conversation and put the agent back on it. */
+  switchAcpChat(id: string): boolean {
+    if (!this.store.chats.some((c) => c.id === id)) return false
+    if (id === this.store.currentChat.id) return true
+    return this.moveToChat(() => this.store.switchChat(id)?.id)
+  }
+
+  /** Move the review onto another conversation and the agent with it.
+   *
+   *  The store moves first and the agent second, because what the agent opens is
+   *  read back off the store: a chat with a session id is resumed, one without
+   *  starts fresh. Ordered the other way it would reopen the conversation it was
+   *  already on.
+   *
+   *  A failure to move the store leaves the agent alone; a refusal from the agent
+   *  puts the store back, because a thread showing one conversation while the
+   *  agent is on another is the one state nothing downstream can make sense of. */
+  private moveToChat(move: () => string | undefined): boolean {
+    if (!this.acp) return false
+    const from = this.store.currentChat.id
+    const to = move()
+    if (!to) return false
+    if (!this.acp.reopenSession()) {
+      this.store.switchChat(from)
+      return false
+    }
     this.agentBusy = false
     this.activeBatch = null
     this.agentProgress = null
     // Everything the agent had not finished with, not just the turn it was on: the
-    // one in flight died with its session, and the ones queued behind it were
-    // asked of a context the user has just said to start over from. Acking is what
-    // stops the fresh session being handed them the moment it goes idle.
+    // one in flight went with the session it was asked of, and the ones queued
+    // behind it were asked of a conversation the review has just moved off.
+    // Acking is what stops the session that opens next being handed them.
     for (const id of this.store.pendingBatchIds()) this.store.ack(id)
-    this.store.clearConversation()
     this.broadcast()
     return true
   }
@@ -664,6 +737,16 @@ class SessionRuntime {
             .status(409)
             .json({ error: err instanceof Error ? err.message : 'the agent refused the change' }),
       )
+    })
+
+    // Show an earlier conversation and put the agent back on it.
+    api.post('/acp/chat', (req, res) => {
+      const id = String(req.body?.id ?? '')
+      if (!id) return res.status(400).json({ error: 'id is required' })
+      if (!this.switchAcpChat(id)) {
+        return res.status(409).json({ error: 'that conversation cannot be opened right now' })
+      }
+      res.json({ ok: true })
     })
 
     // SPIKE: clear the agent's context and carry on in a fresh session.
