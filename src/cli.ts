@@ -9,6 +9,7 @@ import {
   URL_PREFIX,
   assertControlPortEnv,
 } from './constants.js'
+import { agentCommand } from './agents.js'
 import { daemonMain } from './daemon.js'
 import { ensureDaemon, findRunningDaemon } from './registry.js'
 import { VERSION_HEADER } from './version.js'
@@ -146,13 +147,6 @@ async function openShell(shellUrl: string): Promise<void> {
   }
 }
 
-/** SPIKE: launch profiles for `--agent`. A known name maps to the command that
- *  starts that agent's ACP server; anything else is taken as the command line. */
-const AGENT_PROFILES: Record<string, string> = {
-  claude: 'npx -y @agentclientprotocol/claude-agent-acp',
-  gemini: 'gemini --experimental-acp',
-  codex: 'npx -y @agentclientprotocol/codex-acp',
-}
 
 async function cmdOpen(
   rawUrl: string | undefined,
@@ -175,7 +169,7 @@ async function cmdOpen(
       url: target.href,
       reopen: flags.has('--reopen'),
       project: projectRoot(),
-      ...(agentArg ? { agent: AGENT_PROFILES[agentArg] ?? agentArg } : {}),
+      ...(agentArg ? { agent: agentCommand(agentArg) } : {}),
     }),
   })
   const body = (await res.json()) as { shellUrl?: string; error?: string; hint?: string }
@@ -184,7 +178,7 @@ async function cmdOpen(
   console.log(`session: ${target.origin}`)
   console.log(`shell:   ${body.shellUrl}`)
   if (agentArg) {
-    console.log(`agent:   ${AGENT_PROFILES[agentArg] ?? agentArg} (ACP) - review runs in the shell`)
+    console.log(`agent:   ${agentCommand(agentArg)} (ACP) - review runs in the shell`)
   } else {
     console.log(`next:    run \`${PKG_NAME} poll ${target.origin}/\` and wait for feedback`)
   }

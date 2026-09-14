@@ -113,6 +113,12 @@ export interface Chat {
    *  chat that has never reached an agent, and replaced when the agent turns out
    *  not to have the old one any more. */
   acpSessionId?: string
+  /** Which agent issued `acpSessionId`. A session id is only meaningful to the
+   *  agent that made it - Claude keeps its conversations in one store and Codex
+   *  in another, and neither can resolve the other's - so without this a review
+   *  that changed agent would offer one of them the other's id and be told, at
+   *  best, that no such session exists. */
+  agent?: string
   startedAt: number
 }
 
@@ -530,14 +536,23 @@ export class SessionStore {
     return chat
   }
 
-  /** Record the agent-side session now backing the current chat. Replaces what
-   *  was there: a resume the agent could not honour leaves the chat on a
-   *  different session than it started with, and the old id names nothing. */
-  setChatSession(acpSessionId: string): void {
+  /** Record the agent-side session now backing the current chat, and which agent
+   *  issued it. Replaces what was there: a resume the agent could not honour
+   *  leaves the chat on a different session than it started with, and the old id
+   *  names nothing. */
+  setChatSession(acpSessionId: string, agent: string): void {
     const current = this.currentChat
     this.patchSession({
-      chats: this.chats.map((c) => (c.id === current.id ? { ...c, acpSessionId } : c)),
+      chats: this.chats.map((c) => (c.id === current.id ? { ...c, acpSessionId, agent } : c)),
     })
+  }
+
+  /** The session to ask this agent to resume, if the current chat has one *it*
+   *  issued. A chat from another agent has an id that agent cannot resolve, so
+   *  the honest answer is nothing and a fresh session. */
+  resumableSessionId(agent: string): string | undefined {
+    const chat = this.currentChat
+    return chat.agent === agent ? chat.acpSessionId : undefined
   }
 
   /** Whether one logged entry belongs to one chat.

@@ -27,7 +27,7 @@ import {
   methods,
   ndJsonStream,
 } from '@agentclientprotocol/sdk'
-import type { AcpConfigValue } from './acp-config.js'
+import { type AcpConfigValue, configValues } from './acp-config.js'
 import { type AttachedSession, SessionRouter } from './acp-session.js'
 
 export type AcpState = 'starting' | 'idle' | 'working' | 'exited'
@@ -108,6 +108,11 @@ export interface AcpAgentOptions {
    *  downgrades the permission mode, and pinning that would keep the session
    *  downgraded long after the model that caused it was switched away from. */
   onConfigChange?: (configId: string, value: AcpConfigValue, option: SessionConfigOption) => void
+  /** The permission mode moved without anyone here asking it to - which is the
+   *  only way it moves, since the shell does not offer it. Selecting a model the
+   *  current mode is not available on is what does it, and the change outlives
+   *  the model that caused it, so it is reported rather than left silent. */
+  onModeChange?: (name: string) => void
   /** The ACP session this review already had, if any. Read at open time, not
    *  taken once: every session this agent opens asks again, and the answer
    *  changes as the review moves between its own conversations. */
@@ -152,6 +157,10 @@ export class AcpAgent {
    *  that vanishes and returns reads as a failure where a stale label for the
    *  moment the swap takes does not. `state` already says it cannot be used. */
   private configOptions: SessionConfigOption[] = []
+  /** The mode as it stood when this session's options were last installed. Null
+   *  until a session has one, so opening a session establishes a baseline rather
+   *  than reporting a change against the session before it. */
+  private modeValue: string | null = null
   private ask: AcpAsk | null = null
   private askResolve: ((answers: Record<string, string> | null) => void) | null = null
   private askSeq = 0
@@ -204,6 +213,18 @@ export class AcpAgent {
     })
   }
 
+  /** Install a fresh option set and report a mode that moved with it. */
+  private setConfigOptions(options: SessionConfigOption[]): void {
+    this.configOptions = options
+    const mode = options.find((o) => o.category === 'mode')
+    const value = mode && mode.type === 'select' ? String(mode.currentValue) : null
+    if (value && this.modeValue && value !== this.modeValue) {
+      const name = configValues(mode!).find((o) => o.value === value)?.name ?? value
+      this.opts.onModeChange?.(name)
+    }
+    this.modeValue = value
+  }
+
   snapshot(): AcpSnapshot {
     return {
       agent: this.opts.command,
@@ -244,7 +265,7 @@ export class AcpAgent {
     // request was out. Installing its answer would describe a session nobody is
     // on any more.
     if (epoch !== this.epoch) return false
-    if (answer?.configOptions) this.configOptions = answer.configOptions
+    if (answer?.configOptions) this.setConfigOptions(answer.configOptions)
     // Only what actually took is remembered, and the answer is what says so - a
     // request can succeed without the change landing, which is what a
     // `PreModelSwitch` hook refusing a model does. Pinning a value the agent
@@ -287,7 +308,7 @@ export class AcpAgent {
           ...(typeof value === 'boolean' ? { type: 'boolean' as const, value } : { value }),
         })
         if (epoch !== this.epoch) return
-        if (answer?.configOptions) this.configOptions = answer.configOptions
+        if (answer?.configOptions) this.setConfigOptions(answer.configOptions)
       } catch {
         /* the pick is no longer available - the agent's own choice stands */
       }
@@ -435,7 +456,9 @@ export class AcpAgent {
     }
     const session = this.router.attach(ctx, sessionId)
     this.session = session
-    this.configOptions = configOptions
+    // Baseline, not a change: this is a different conversation's options.
+    this.modeValue = null
+    this.setConfigOptions(configOptions)
     // Before `idle`, and this is load-bearing. Going idle is what `onChange`
     // turns into a delivery, so a queued batch leaves the moment the flag flips -
     // and a pick re-asserted after that point would arrive one turn too late,
@@ -640,7 +663,7 @@ export class AcpAgent {
       // it ends. Both arrive unprompted - the agent can change its own mind about
       // the model, and does.
       case 'config_option_update':
-        this.configOptions = update.configOptions
+        this.setConfigOptions(update.configOptions)
         this.opts.onChange()
         return
       // The mode has its own notification as well as its place in the option
@@ -650,8 +673,10 @@ export class AcpAgent {
       case 'current_mode_update': {
         const mode = this.configOptions.find((o) => o.category === 'mode')
         if (!mode || mode.type !== 'select' || mode.currentValue === update.currentModeId) return
-        this.configOptions = this.configOptions.map((o) =>
-          o === mode ? { ...o, currentValue: update.currentModeId } : o,
+        this.setConfigOptions(
+          this.configOptions.map((o) =>
+            o === mode ? { ...o, currentValue: update.currentModeId } : o,
+          ),
         )
         this.opts.onChange()
         return

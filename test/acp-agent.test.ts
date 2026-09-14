@@ -531,3 +531,21 @@ test('a remembered pick is re-asserted on a resumed session', async () => {
   assert.deepEqual(next.opens, [{ sessionId: 's1', how: 'resumed' }])
   assert.deepEqual(next.deliveredWith, [{ model: 'sonnet', mode: 'default', fast: false }])
 })
+
+// A session that has said nothing has no transcript, so it cannot be resumed.
+// Recording one against the chat at *open* time meant two restarts with nothing
+// said in between replaced a resumable session with an unresumable one - which
+// is every `npm run dev` save. The fix is the daemon's, but this pins the fact
+// the fix rests on: a session's open and its first turn are separate events, and
+// the second is the one worth recording.
+test('a session reports its open and its turns as separate events', async () => {
+  const h = harness()
+  after(() => h.acp.stop())
+  await h.idle()
+  assert.equal(h.opens.length, 1, 'open is reported once')
+  assert.equal(h.turns.length, 0, 'and no turn has happened yet')
+
+  await h.ask('something')
+  assert.equal(h.opens.length, 1, 'a turn does not reopen the session')
+  assert.equal(h.turns.length, 1)
+})

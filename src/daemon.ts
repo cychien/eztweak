@@ -20,6 +20,7 @@ import {
 import { AcpAgent } from './acp-agent.js'
 import type { AcpSnapshot } from './acp-agent.js'
 import { type AcpConfigValue, configLabel, configValueName } from './acp-config.js'
+import { AGENT_PROFILES, agentInstalled, agentProfileFor } from './agents.js'
 import { attachmentIds, parseReferences } from './anchor.js'
 import { injectOverlay, wantsHtml } from './inject.js'
 import { toAgentAttachments, toAgentItem, toConversationItem } from './label.js'
@@ -179,6 +180,13 @@ function turnEndNote(stopReason: string): string {
  *  words, because it is the same event seen from either side of it. */
 const AGENT_RESTARTED_NOTE = '已開啟新 session，之前的對話不會延續'
 
+/** What the thread is told when the review changes agent. Names the one it moved
+ *  to, because the thread above belongs to a different one and the reader needs
+ *  to know which. */
+function agentSwitchNote(command: string): string {
+  return `已改用 ${agentProfileFor(command)?.name ?? command}，這是新的對話`
+}
+
 /** A pick the user made, for the thread.
  *
  *  Recorded because a reply's worth is not separable from which model wrote it:
@@ -222,6 +230,9 @@ class SessionRuntime {
    *  portable CLI contract, and a slash command is meaningless to an agent that
    *  is not the one expanding it. */
   private activeSkill: string | null = null
+  /** The agent-side session this review is on right now, recorded against the
+   *  chat only once it has taken a turn. */
+  private liveSession: string | null = null
   private agentProgress: string | null = null
   /** SPIKE: the ACP-driven agent, when this session owns one. */
   private acp: AcpAgent | null = null
@@ -321,6 +332,44 @@ class SessionRuntime {
     })
   }
 
+  /** Drive this review with a different agent.
+   *
+   *  Always into a fresh conversation, because a session id belongs to the agent
+   *  that issued it: Claude keeps its conversations in one store and Codex in
+   *  another, and neither can resolve the other's. There is no protocol for
+   *  handing a conversation over, so the new agent starts knowing nothing - and
+   *  a chat is what a *conversation* is here, so it gets its own.
+   *
+   *  Nothing is lost that eztweak owns. Every earlier chat stays in the picker
+   *  with the agent that had it, and switching back finds that conversation
+   *  again, resumable by the agent that remembers it. */
+  switchAcpAgent(command: string): boolean {
+    if (!command.trim()) return false
+    if (this.acp?.snapshot().agent === command && this.acp.snapshot().state !== 'exited') {
+      return true
+    }
+    this.acp?.stop()
+    this.acp = null
+    this.agentBusy = false
+    this.activeBatch = null
+    this.activeSkill = null
+    this.agentProgress = null
+    // Anything the old agent had not finished with. It is not coming back to
+    // them, and the new agent was never asked.
+    for (const id of this.store.pendingBatchIds()) this.store.ack(id)
+    // Before the agent starts, so the session it opens is recorded against the
+    // new chat rather than against the one the old agent was on.
+    if (!this.store.onEmptyNewestChat) this.store.startChat()
+    this.store.appendConversation({
+      role: 'system',
+      text: agentSwitchNote(command),
+      ts: Date.now(),
+    })
+    this.attachAcpAgent(command)
+    this.broadcast()
+    return true
+  }
+
   /** SPIKE: attach an ACP-driven agent to this session. Replaces a dead one;
    *  a live one stays - two agents on one review is never what anyone meant. */
   attachAcpAgent(command: string): boolean {
@@ -338,6 +387,13 @@ class SessionRuntime {
         this.broadcast()
       },
       onTurnEnd: (text, stopReason) => {
+        // Now, and not when the session opened. A session with no turns has no
+        // transcript, so it cannot be resumed - recording one at open time meant
+        // that two restarts with nothing said in between replaced a resumable
+        // session with an unresumable one and lost the conversation that had the
+        // content. A dev daemon restarts on every file save, which is exactly
+        // where that happened.
+        if (this.liveSession) this.store.setChatSession(this.liveSession, command)
         this.agentBusy = false
         this.agentProgress = null
         this.activeSkill = null
@@ -373,15 +429,25 @@ class SessionRuntime {
         this.activeSkill = null
         this.broadcast()
       },
-      resumeSessionId: () => this.store.currentChat.acpSessionId,
+      resumeSessionId: () => this.store.resumableSessionId(command),
       onSessionOpen: (sessionId, how) => {
-        const wanted = this.store.currentChat.acpSessionId
-        this.store.setChatSession(sessionId)
+        const wanted = this.store.resumableSessionId(command)
+        // Held, not recorded. A session is only worth remembering once it has
+        // said something - see `onTurnEnd`.
+        this.liveSession = sessionId
         // The conversation was there to be picked up and the agent could not do
         // it: a transcript that has been deleted, or an agent that does not do
         // resume at all. That is the one case the thread has to hear about, and
         // the only one - a chat that never had a session had nothing to lose.
         if (wanted && how === 'new') this.noteContextLost()
+        this.broadcast()
+      },
+      onModeChange: (name) => {
+        this.store.appendConversation({
+          role: 'system',
+          text: `agent 把權限模式改成了「${name}」`,
+          ts: Date.now(),
+        })
         this.broadcast()
       },
       pinnedConfig: () => this.store.session.agentConfig ?? {},
@@ -760,6 +826,35 @@ class SessionRuntime {
             .status(409)
             .json({ error: err instanceof Error ? err.message : 'the agent refused the change' }),
       )
+    })
+
+    // The agents this review can be driven by, and which one is on.
+    api.get('/acp/agents', (_req, res) => {
+      const running = this.acp?.snapshot().agent
+      res.json({
+        agents: AGENT_PROFILES.map((profile) => ({
+          id: profile.id,
+          name: profile.name,
+          installed: agentInstalled(profile),
+          current: profile.command === running,
+        })),
+      })
+    })
+
+    // Drive the review with a different agent. Always a new conversation - the
+    // shell says so before it asks for this.
+    api.post('/acp/agent', (req, res) => {
+      const id = String(req.body?.id ?? '')
+      const profile = AGENT_PROFILES.find((p) => p.id === id)
+      // By id, never by a command from the wire: this starts a process.
+      if (!profile) return res.status(400).json({ error: 'unknown agent' })
+      if (!this.acp) {
+        return res.status(409).json({ error: 'this review is not driving an agent' })
+      }
+      if (!this.switchAcpAgent(profile.command)) {
+        return res.status(409).json({ error: 'that agent cannot be started right now' })
+      }
+      res.json({ ok: true })
     })
 
     // The skills this project can ask the agent to run. Read on request rather

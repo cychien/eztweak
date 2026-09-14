@@ -495,11 +495,11 @@ test('a pre-chats session migrates its conversationClear into the first chat', (
 test('the chat remembers the agent session backing it', () => {
   const store = new SessionStore('http://localhost:7005', PROJECT)
   assert.equal(store.currentChat.acpSessionId, undefined)
-  store.setChatSession('acp-1')
+  store.setChatSession('acp-1', 'claude')
   assert.equal(store.currentChat.acpSessionId, 'acp-1')
 
   // A resume the agent could not honour lands the chat on a different session.
-  store.setChatSession('acp-2')
+  store.setChatSession('acp-2', 'claude')
   assert.equal(store.currentChat.acpSessionId, 'acp-2')
 
   // A fresh chat starts with none, and the old one keeps its own.
@@ -507,6 +507,26 @@ test('the chat remembers the agent session backing it', () => {
   store.startChat()
   assert.equal(store.currentChat.acpSessionId, undefined)
   assert.equal(store.chats.find((c) => c.id === old)?.acpSessionId, 'acp-2')
+})
+
+// A session id is only meaningful to the agent that issued it. Handing Codex a
+// Claude id gets "no rollout found for thread id ..." - so it is never offered.
+test('a session is only offered back to the agent that made it', () => {
+  const store = new SessionStore('http://localhost:7008', PROJECT)
+  store.setChatSession('claude-session', 'claude')
+
+  assert.equal(store.resumableSessionId('claude'), 'claude-session')
+  assert.equal(store.resumableSessionId('codex'), undefined, "another agent's id is not offered")
+
+  // Switching to that agent and back finds the original conversation again.
+  store.setChatSession('codex-session', 'codex')
+  assert.equal(store.resumableSessionId('codex'), 'codex-session')
+  assert.equal(store.resumableSessionId('claude'), undefined)
+})
+
+test('a chat that never reached an agent has nothing to resume', () => {
+  const store = new SessionStore('http://localhost:7009', PROJECT)
+  assert.equal(store.resumableSessionId('claude'), undefined)
 })
 
 // The regression this pins: an empty chat used to be dropped from the list, so a

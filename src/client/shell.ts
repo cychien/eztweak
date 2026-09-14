@@ -351,6 +351,21 @@ document.addEventListener('click', (e) => {
 const target = h('span', 'ez-target')
 const agentStatus = h('div', 'ez-badge')
 
+/** Which agent is driving this review, and the way to another.
+ *
+ *  Beside the status badge because that is already the agent's corner of the
+ *  header, and session-scoped where the model pill is batch-scoped: changing it
+ *  replaces the process, so it does not belong down with the composer. */
+const agentPill = h('button', 'ez-agent-pill')
+agentPill.setAttribute('aria-haspopup', 'menu')
+agentPill.setAttribute('aria-expanded', 'false')
+const agentMenu = h('div', 'ez-menu ez-menu-right')
+agentMenu.setAttribute('role', 'menu')
+agentMenu.setAttribute('aria-label', 'Agent')
+const agentWrap = h('div', 'ez-agent')
+agentWrap.hidden = true
+agentWrap.append(agentPill, agentMenu)
+
 // ---------------------------------------------------------------- shortcuts
 
 /** Matched against real key events and against ones the overlay forwards from
@@ -531,7 +546,7 @@ document.addEventListener('click', (e) => {
 })
 
 const headRow = h('div', 'ez-head-row')
-headRow.append(brand, version, updateHint, h('div', 'ez-spacer'), keysWrap, agentStatus)
+headRow.append(brand, version, updateHint, h('div', 'ez-spacer'), keysWrap, agentWrap, agentStatus)
 
 /** A menu rather than three buttons in a row: one size is on at a time, and the
  *  other two only matter at the moment of switching. It leaves the header a
@@ -1991,6 +2006,100 @@ async function newChat(): Promise<void> {
   await api('/acp/new', { method: 'POST' })
 }
 
+// -------------------------------------------------------------- agent picker
+
+interface AgentWire {
+  id: string
+  name: string
+  installed: boolean
+  current: boolean
+}
+
+let agentMenuOpen = false
+let agentsDrawn: string | null = null
+let agents: AgentWire[] = []
+
+function paintAgentMenuState(): void {
+  agentWrap.toggleAttribute('data-open', agentMenuOpen)
+  agentPill.setAttribute('aria-expanded', String(agentMenuOpen))
+}
+
+function closeAgentMenu(): void {
+  if (!agentMenuOpen) return
+  agentMenuOpen = false
+  paintAgentMenuState()
+}
+
+agentPill.onclick = () => {
+  agentMenuOpen = !agentMenuOpen
+  paintAgentMenuState()
+  if (agentMenuOpen) void loadAgents()
+}
+
+document.addEventListener('click', (e) => {
+  if (e.target instanceof Node && !agentWrap.contains(e.target)) closeAgentMenu()
+})
+
+agentMenu.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return
+  closeAgentMenu()
+  agentPill.focus()
+  e.preventDefault()
+})
+
+async function loadAgents(): Promise<void> {
+  const res = await api('/acp/agents')
+  if (!res.ok) return
+  agents = ((await res.json()) as { agents: AgentWire[] }).agents
+  agentsDrawn = null
+  paintAgents()
+}
+
+/** Confirmed, and this is the one control here that asks. Changing agent cannot
+ *  carry the conversation: a session id belongs to the agent that issued it, and
+ *  no protocol hands a conversation from one to another - so the new agent
+ *  starts knowing nothing, and that is worth saying before it happens rather
+ *  than reporting afterwards. */
+async function switchAgent(agent: AgentWire): Promise<void> {
+  closeAgentMenu()
+  if (agent.current) return
+  const ok = confirm(
+    `改用 ${agent.name} 會開一段新對話。\n\n` +
+      '對話沒有辦法在不同 agent 之間延續，所以新的 agent 不會記得目前這段。\n' +
+      '目前的對話會留在「對話紀錄」裡，隨時可以切回來。',
+  )
+  if (!ok) return
+  await api('/acp/agent', { method: 'POST', body: JSON.stringify({ id: agent.id }) })
+}
+
+function paintAgents(): void {
+  const running = agents.find((a) => a.current)
+  agentPill.textContent = ''
+  agentPill.append(
+    h('span', 'ez-agent-name', running?.name ?? 'Agent'),
+    icon(ArrowDown01Icon as IconNode, 10),
+  )
+  const signature = JSON.stringify(agents)
+  if (signature === agentsDrawn) return
+  agentsDrawn = signature
+
+  agentMenu.textContent = ''
+  for (const agent of agents) {
+    const row = h('button', `ez-menu-item${agent.current ? ' ez-on' : ''}`)
+    row.setAttribute('role', 'menuitemradio')
+    row.setAttribute('aria-checked', String(agent.current))
+    const tick = h('span', 'ez-menu-tick')
+    tick.append(icon(Tick02Icon as IconNode, 14))
+    row.append(tick, h('span', 'ez-menu-name', agent.name))
+    // Not hidden when it is not found: an agent can be installed somewhere this
+    // cannot see, and the honest report of one that will not start is it failing
+    // with its own error in the thread.
+    if (!agent.installed) row.append(h('span', 'ez-agent-missing', '未偵測到'))
+    row.onclick = () => void switchAgent(agent)
+    agentMenu.append(row)
+  }
+}
+
 // ------------------------------------------------------------------- skills
 
 /** The skill this batch will ask the agent to run, if any. Batch-level, not a
@@ -2213,7 +2322,9 @@ function pillOption(options: SessionConfigOption[]): SessionConfigOption | undef
 }
 
 function paintConfig(acp: AcpWire | undefined): void {
-  const options = acp?.configOptions ?? []
+  const options = (acp?.configOptions ?? []).filter(
+    (o) => !HIDDEN_CATEGORIES.has(o.category ?? ''),
+  )
   // Nothing offered, or no ACP agent at all: no control. An empty panel above the
   // composer would be permanent chrome that answers no question.
   configWrap.hidden = options.length === 0
@@ -2278,12 +2389,19 @@ function paintConfig(acp: AcpWire | undefined): void {
   }
 }
 
-/** The order the options are offered in. The agent's own order leads with the
- *  mode, which leaves the menu opening on something other than the choice its
- *  own button is named after. Sorting by category is what the spec says the
- *  field is for - "keyboard shortcuts, icons, placement" - and anything
+/** Categories this picker does not offer.
+ *
+ *  The permission mode and the fast-mode toggle are the agent's own business:
+ *  they are set where the agent is configured, and a review is not the place to
+ *  be deciding them. A mode the *agent* changes is still reported - see
+ *  `paintModeChange` - because silence was the actual problem with it, not the
+ *  absence of a control. */
+const HIDDEN_CATEGORIES = new Set(['mode', 'model_config'])
+
+/** The order the rest are offered in. Sorting by category is what the spec says
+ *  the field is for - "keyboard shortcuts, icons, placement" - and anything
  *  uncategorised keeps its place at the end, in the order the agent gave. */
-const CATEGORY_ORDER = ['model', 'thought_level', 'mode', 'model_config']
+const CATEGORY_ORDER = ['model', 'thought_level']
 
 function byCategory(a: SessionConfigOption, b: SessionConfigOption): number {
   const rank = (o: SessionConfigOption) => {
@@ -2633,6 +2751,8 @@ function render(): void {
   paintSendState()
   paintConfig(s.acp)
   paintChats(s)
+  agentWrap.hidden = !s.acp
+  if (s.acp && !agents.length) void loadAgents()
 
   if (s.acp?.cancelling) {
     // The cancel is out and the agent has not answered yet. With no button to grey

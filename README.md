@@ -321,6 +321,13 @@ Three controls come with owning the agent:
   toggle it offers. It is a permanent slot because unlike a cancel it is *state*: it says what you
   are about to send your feedback to.
 
+  What it offers is the model and, where the agent has one, the reasoning effort. Not the permission
+  mode and not the fast-mode toggle: those are the agent's own configuration, and a review is not
+  where they should be decided. A mode the *agent* changes is still reported in the thread - some
+  models do not support every mode, and selecting one moves it as a side effect that outlives the
+  model that caused it, so the problem worth solving there was the silence rather than the missing
+  control.
+
   A switch keeps the conversation. The model changes on the running session, so nothing is replayed
   and nothing is forgotten - which is what makes it worth reaching for mid-review: point at the easy
   half on a cheap model, move up for the layout problem that needs it. Sending mid-turn is allowed
@@ -336,6 +343,13 @@ Three controls come with owning the agent:
   Your pick is remembered for the session and re-asserted on the next one, so `/new` and a daemon
   restart do not hand the review back to the agent's default. Every switch goes into the thread, so
   a review read back later says which model answered which batch.
+
+The agent itself can be changed from the header, beside the status badge. That always starts a new
+conversation, and the shell says so before it does it: a session id belongs to the agent that issued
+it - Claude keeps its conversations in one store and Codex in another, and neither can resolve the
+other's - so there is no way to hand a conversation over. Nothing eztweak owns is lost. Every earlier
+conversation stays in the thread's own picker with the agent that had it, and switching back finds it
+again, resumable by the agent that remembers it.
 
 Three built-in profiles map short names to ACP server commands:
 

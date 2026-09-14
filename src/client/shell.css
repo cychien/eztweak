@@ -729,6 +729,7 @@ body.ez-arranging .ez-frame {
 .ez-shown[data-open] .ez-menu,
 .ez-config[data-open] .ez-menu,
 .ez-chat[data-open] .ez-menu,
+.ez-agent[data-open] .ez-menu,
 .ez-update-hint[data-open] .ez-menu {
   display: flex;
 }
@@ -1583,6 +1584,59 @@ body.ez-arranging .ez-frame {
    claim about the file rather than about the target. */
 .ez-attach-field[data-drop] {
   background: var(--paper-sunken);
+}
+
+/* ----------------------------------------------------------- agent picker */
+
+/* In the header beside the status badge, which is already the agent's corner.
+   Quiet: it names a thing that rarely changes, and the badge next to it is the
+   one carrying live state. */
+.ez-agent {
+  position: relative;
+  display: flex;
+}
+
+.ez-agent[hidden] {
+  display: none;
+}
+
+.ez-agent-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  border: none;
+  background: transparent;
+  color: var(--muted-foreground);
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 500;
+  padding: 3px 4px 3px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition:
+    background 0.12s ease,
+    color 0.12s ease;
+}
+
+.ez-agent-pill:hover,
+.ez-agent[data-open] .ez-agent-pill {
+  background: var(--muted);
+  color: var(--foreground);
+}
+
+.ez-agent-name {
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Not a warning: the agent may be installed somewhere the PATH check cannot
+   see, so this says what was looked for, not what is wrong. */
+.ez-agent-missing {
+  margin-left: 10px;
+  color: var(--muted-foreground);
+  font-weight: 500;
 }
 
 /* ------------------------------------------------------------ skill pill */
