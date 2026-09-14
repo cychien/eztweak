@@ -353,13 +353,14 @@ const agentStatus = h('div', 'ez-badge')
 
 /** Which agent is driving this review, and the way to another.
  *
- *  Beside the status badge because that is already the agent's corner of the
- *  header, and session-scoped where the model pill is batch-scoped: changing it
- *  replaces the process, so it does not belong down with the composer. */
+ *  Left of the model, because the two answer one question between them - what is
+ *  about to read this feedback - and reading them as a pair only works if they
+ *  sit as a pair. The agent goes first: the model is a choice *within* it, and
+ *  changing the agent replaces the list the model was chosen from. */
 const agentPill = h('button', 'ez-agent-pill')
 agentPill.setAttribute('aria-haspopup', 'menu')
 agentPill.setAttribute('aria-expanded', 'false')
-const agentMenu = h('div', 'ez-menu ez-menu-right')
+const agentMenu = h('div', 'ez-menu ez-menu-up')
 agentMenu.setAttribute('role', 'menu')
 agentMenu.setAttribute('aria-label', 'Agent')
 const agentWrap = h('div', 'ez-agent')
@@ -546,7 +547,7 @@ document.addEventListener('click', (e) => {
 })
 
 const headRow = h('div', 'ez-head-row')
-headRow.append(brand, version, updateHint, h('div', 'ez-spacer'), keysWrap, agentWrap, agentStatus)
+headRow.append(brand, version, updateHint, h('div', 'ez-spacer'), keysWrap, agentStatus)
 
 /** A menu rather than three buttons in a row: one size is on at a time, and the
  *  other two only matter at the moment of switching. It leaves the header a
@@ -1315,7 +1316,12 @@ const configWrap = h('div', 'ez-config')
 configWrap.hidden = true
 configWrap.append(configPill, configMenu)
 
-queueSection.append(queueScroll, configWrap, skillPill, noteAttach.wrap, sendBtn)
+/** The agent and its model, on one line above the composer. */
+const controlRow = h('div', 'ez-control-row')
+controlRow.hidden = true
+controlRow.append(agentWrap, configWrap)
+
+queueSection.append(queueScroll, controlRow, skillPill, noteAttach.wrap, sendBtn)
 
 /** The editor for a queued annotation: the row's own comment, in place. One
  *  composer, built once and moved into whichever row is open - nothing else on
@@ -2752,6 +2758,9 @@ function render(): void {
   paintConfig(s.acp)
   paintChats(s)
   agentWrap.hidden = !s.acp
+  // The row carries the gap below it, so it has to go when both of its controls
+  // do - otherwise a poll-mode review keeps six pixels of nothing.
+  controlRow.hidden = agentWrap.hidden && configWrap.hidden
   if (s.acp && !agents.length) void loadAgents()
 
   if (s.acp?.cancelling) {

@@ -344,8 +344,10 @@ Three controls come with owning the agent:
   restart do not hand the review back to the agent's default. Every switch goes into the thread, so
   a review read back later says which model answered which batch.
 
-The agent itself can be changed from the header, beside the status badge. That always starts a new
-conversation, and the shell says so before it does it: a session id belongs to the agent that issued
+The agent itself can be changed from the pill left of the model, which is where it belongs: the two
+answer one question between them - what is about to read this feedback - and the model is a choice
+*within* the agent, so changing the agent replaces the list the model was chosen from. That always
+starts a new conversation, and the shell says so before it does it: a session id belongs to the agent that issued
 it - Claude keeps its conversations in one store and Codex in another, and neither can resolve the
 other's - so there is no way to hand a conversation over. Nothing eztweak owns is lost. Every earlier
 conversation stays in the thread's own picker with the agent that had it, and switching back finds it

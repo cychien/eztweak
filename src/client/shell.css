@@ -1586,6 +1586,22 @@ body.ez-arranging .ez-frame {
   background: var(--paper-sunken);
 }
 
+/* ------------------------------------------------------------ control row */
+
+/* The agent and its model, side by side above the composer. Tight together:
+   they are one statement about what is about to read the feedback, and a gap
+   between them would read as two unrelated controls. */
+.ez-control-row {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  margin-bottom: 6px;
+}
+
+.ez-control-row[hidden] {
+  display: none;
+}
+
 /* ----------------------------------------------------------- agent picker */
 
 /* In the header beside the status badge, which is already the agent's corner.
@@ -1594,6 +1610,7 @@ body.ez-arranging .ez-frame {
 .ez-agent {
   position: relative;
   display: flex;
+  min-width: 0;
 }
 
 .ez-agent[hidden] {
@@ -1603,19 +1620,24 @@ body.ez-arranging .ez-frame {
 .ez-agent-pill {
   display: inline-flex;
   align-items: center;
-  gap: 2px;
+  gap: 3px;
+  max-width: 100%;
   border: none;
   background: transparent;
   color: var(--muted-foreground);
   font-family: inherit;
   font-size: 11px;
-  font-weight: 500;
-  padding: 3px 4px 3px 6px;
+  font-weight: 600;
+  padding: 3px 5px 3px 7px;
   border-radius: 6px;
   cursor: pointer;
   transition:
     background 0.12s ease,
     color 0.12s ease;
+}
+
+.ez-agent-pill svg {
+  flex-shrink: 0;
 }
 
 .ez-agent-pill:hover,
@@ -1625,7 +1647,6 @@ body.ez-arranging .ez-frame {
 }
 
 .ez-agent-name {
-  max-width: 120px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1797,7 +1818,6 @@ body.ez-arranging .ez-frame {
 .ez-config {
   display: flex;
   position: relative;
-  margin-bottom: 6px;
 }
 
 /* Quieter than the composer it sits above: this says what the batch will be
