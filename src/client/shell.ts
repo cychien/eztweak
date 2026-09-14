@@ -2159,6 +2159,8 @@ function paintBatchSkill(): void {
 
 let chatMenuOpen = false
 let chatDrawn: string | null = null
+/** The rows as drawn, for the arrow keys. */
+let chatRows: HTMLElement[] = []
 
 function paintChatMenuState(): void {
   chatWrap.toggleAttribute('data-open', chatMenuOpen)
@@ -2174,6 +2176,10 @@ function closeChatMenu(): void {
 chatPill.onclick = () => {
   chatMenuOpen = !chatMenuOpen
   paintChatMenuState()
+  // The one showing, so the arrows start from where the user is rather than from
+  // the top of a list they did not choose - and so the menu says which is on
+  // without spending a column on it.
+  if (chatMenuOpen) chatMenu.querySelector<HTMLElement>('[data-current]')?.focus()
 }
 
 document.addEventListener('click', (e) => {
@@ -2187,6 +2193,13 @@ chatWrap.addEventListener('focusout', (e) => {
 })
 
 chatMenu.addEventListener('keydown', (e) => {
+  const at = chatRows.indexOf(document.activeElement as HTMLButtonElement)
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    const step = e.key === 'ArrowDown' ? 1 : -1
+    chatRows[(at + step + chatRows.length) % chatRows.length]?.focus()
+    e.preventDefault()
+    return
+  }
   if (e.key !== 'Escape') return
   closeChatMenu()
   chatPill.focus()
@@ -2246,14 +2259,15 @@ function paintChats(s: SnapshotWire): void {
     : `這次 review 有 ${chats.length} 段對話`
 
   chatMenu.textContent = ''
-  for (const chat of chats) {
-    const row = h('button', `ez-menu-item${chat.current ? ' ez-on' : ''}`)
+  chatRows = chats.map((chat) => {
+    // No tick column, following the device menu: this is a short list with one
+    // of them on, and the menu opens with that one already under the cursor - a
+    // column of blanks to say so would only push the times off the edge.
+    const row = h('button', 'ez-menu-item')
     row.setAttribute('role', 'menuitemradio')
     row.setAttribute('aria-checked', String(chat.current))
-    const tick = h('span', 'ez-menu-tick')
-    tick.append(icon(Tick02Icon as IconNode, 14))
+    if (chat.current) row.dataset.current = ''
     row.append(
-      tick,
       h('span', 'ez-menu-name', chatTime(chat.startedAt)),
       h('span', 'ez-chat-count', chat.entries ? `${chat.entries} 則` : '尚無內容'),
     )
@@ -2265,7 +2279,8 @@ function paintChats(s: SnapshotWire): void {
       void switchChat(chat.id)
     }
     chatMenu.append(row)
-  }
+    return row
+  })
 }
 
 // -------------------------------------------------------------- agent config

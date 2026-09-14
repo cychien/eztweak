@@ -1594,8 +1594,8 @@ body.ez-arranging .ez-frame {
 .ez-control-row {
   display: flex;
   align-items: center;
-  gap: 1px;
-  margin-bottom: 6px;
+  gap: 5px;
+  margin-bottom: 8px;
 }
 
 .ez-control-row[hidden] {
@@ -1617,33 +1617,43 @@ body.ez-arranging .ez-frame {
   display: none;
 }
 
-.ez-agent-pill {
+/* Raised, and raised by default rather than on hover: these are controls that
+   are always live, and a target that only looks like one once the pointer is on
+   it reads as text until then. The same surface and shadow the device control
+   uses for its chosen segment, so the shell has one idiom for "a control sitting
+   on the page" rather than two. */
+.ez-agent-pill,
+.ez-config-pill {
   display: inline-flex;
   align-items: center;
-  gap: 3px;
+  gap: 4px;
   max-width: 100%;
   border: none;
-  background: transparent;
-  color: var(--muted-foreground);
+  background: var(--panel);
+  color: var(--foreground);
   font-family: inherit;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
-  padding: 3px 5px 3px 7px;
-  border-radius: 6px;
+  padding: 6px 7px 6px 10px;
+  border-radius: 7px;
   cursor: pointer;
+  box-shadow: 0 1px 2px oklch(14.1% 0.005 285.823 / 0.1);
   transition:
     background 0.12s ease,
     color 0.12s ease;
 }
 
-.ez-agent-pill svg {
+.ez-agent-pill svg,
+.ez-config-pill svg {
   flex-shrink: 0;
+  color: var(--muted-foreground);
 }
 
-.ez-agent-pill:hover,
-.ez-agent[data-open] .ez-agent-pill {
+.ez-agent-pill:hover:not(:disabled),
+.ez-config-pill:hover:not(:disabled),
+.ez-agent[data-open] .ez-agent-pill,
+.ez-config[data-open] .ez-config-pill {
   background: var(--muted);
-  color: var(--foreground);
 }
 
 .ez-agent-name {
@@ -1800,10 +1810,10 @@ body.ez-arranging .ez-frame {
 }
 
 /* How much was said in that conversation, set against the row's far edge the way
-   the keyboard hints are. It is what tells two unnamed conversations apart when
-   their times alone do not. */
+   the device menu's keyboard hints are. It is what tells two unnamed
+   conversations apart when their times alone do not. */
 .ez-chat-count {
-  margin-left: 10px;
+  margin-left: 16px;
   color: var(--muted-foreground);
   font-weight: 500;
   font-variant-numeric: tabular-nums;
@@ -1820,45 +1830,14 @@ body.ez-arranging .ez-frame {
   position: relative;
 }
 
-/* Quieter than the composer it sits above: this says what the batch will be
-   answered by, and the composer is what the user is doing. Borderless until
-   hovered for the same reason - a permanent outline here would compete with the
-   field below, which is the one that wants the eye. */
-.ez-config-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  max-width: 100%;
-  border: none;
-  background: transparent;
-  color: var(--muted-foreground);
-  font-family: inherit;
-  font-size: 11px;
-  font-weight: 600;
-  padding: 3px 5px 3px 7px;
-  border-radius: 6px;
-  cursor: pointer;
-  transition:
-    background 0.12s ease,
-    color 0.12s ease;
-}
-
-.ez-config-pill:hover:not(:disabled),
-.ez-config[data-open] .ez-config-pill {
-  background: var(--muted);
-  color: var(--foreground);
-}
-
-/* Between sessions there is nothing to set. Greyed rather than removed: it is
+/* Between sessions there is nothing to set. Faded rather than removed: it is
    about to come back holding the same label, and a control that vanishes for a
    moment reads as one that broke. */
+.ez-agent-pill:disabled,
 .ez-config-pill:disabled {
   cursor: default;
   opacity: 0.5;
-}
-
-.ez-config-pill svg {
-  flex-shrink: 0;
+  box-shadow: none;
 }
 
 /* The label is the agent's own name for the value and there is no bound on its
