@@ -91,3 +91,18 @@ test('a disabled command is off the menu, matched or not', () => {
   )
   assert.equal(filterCommands(commands, '').length, 3)
 })
+
+// A second menu shares the box with the first. They cannot both be open: a
+// trigger only counts at the start of the word being typed, so at any caret at
+// most one of them is the one being typed.
+test('a trigger only fires as its own character', () => {
+  assert.deepEqual(detectSlash('$dat', '$'), { start: 0, query: 'dat' })
+  assert.equal(detectSlash('/file', '$'), null)
+  assert.equal(detectSlash('$dat', '/'), null)
+})
+
+test('the same word-boundary rule applies to any trigger', () => {
+  assert.equal(detectSlash('cost$5', '$'), null, 'mid-word is not a trigger')
+  assert.deepEqual(detectSlash('run $verify', '$'), { start: 4, query: 'verify' })
+  assert.equal(detectSlash('$two words', '$'), null, 'a space ends the query')
+})

@@ -40,13 +40,18 @@ export interface SlashController {
 const MAX_QUERY = 24
 const BREAK = /[\s ]/
 
-/** Where the caret's own text run turns into a slash command, if it does.
- *  `before` is that run up to the caret.
+/** Where the caret's own text run turns into a command, if it does. `before` is
+ *  that run up to the caret.
  *
  *  The leading-boundary rule is what keeps `http://` and `src/client` quiet: a
- *  slash only counts at the start of a word. */
-export function detectSlash(before: string): { start: number; query: string } | null {
-  const start = before.lastIndexOf('/')
+ *  trigger only counts at the start of a word. That rule is why two menus can
+ *  share one box without a tie-break: at any caret at most one trigger can be
+ *  the start of the word being typed. */
+export function detectSlash(
+  before: string,
+  trigger = '/',
+): { start: number; query: string } | null {
+  const start = before.lastIndexOf(trigger)
   if (start === -1) return null
   const prev = start === 0 ? '' : before[start - 1]
   if (prev && !BREAK.test(prev)) return null
@@ -73,7 +78,22 @@ interface Trigger {
 
 export function attachSlashMenu(
   editable: HTMLElement,
-  { mk, commands }: { mk: Make; commands: SlashCommand[] },
+  {
+    mk,
+    commands,
+    triggerChar = '/',
+    title = '指令',
+    load,
+  }: {
+    mk: Make
+    commands: SlashCommand[]
+    triggerChar?: string
+    title?: string
+    /** A source fetched the first time the trigger is typed, for a list this
+     *  module cannot be handed up front - the agent's skills are read off disk,
+     *  and a review that never types `$` should never have gone looking. */
+    load?: () => SlashCommand[] | Promise<SlashCommand[]>
+  },
 ): SlashController {
   const doc = editable.ownerDocument
   const view = doc.defaultView
@@ -82,6 +102,10 @@ export function attachSlashMenu(
   let trigger: Trigger | null = null
   let shown: SlashCommand[] = []
   let active = 0
+  /** `load`'s answer, once. Re-syncing on arrival is what shows the list to a
+   *  user who typed faster than the disk. */
+  let loaded: SlashCommand[] | null = null
+  let loading = false
 
   function readTrigger(): Trigger | null {
     const selection = doc.getSelection()
@@ -90,12 +114,12 @@ export function attachSlashMenu(
     const node = range.startContainer
     if (!editable.contains(node) || node.nodeType !== Node.TEXT_NODE) return null
     const text = node as Text
-    const hit = detectSlash((text.nodeValue ?? '').slice(0, range.startOffset))
+    const hit = detectSlash((text.nodeValue ?? '').slice(0, range.startOffset), triggerChar)
     return hit ? { node: text, start: hit.start, query: hit.query } : null
   }
 
-  /** A range over the "/" itself. A collapsed range can measure to nothing, and
-   *  the slash is always there while the menu is up. */
+  /** A range over the trigger character itself. A collapsed range can measure to
+   *  nothing, and the trigger is always there while the menu is up. */
   function slashRect(): DOMRect | null {
     if (!trigger?.node.isConnected) return null
     const range = doc.createRange()
@@ -133,11 +157,11 @@ export function attachSlashMenu(
   function render(): void {
     if (!menu) return
     menu.textContent = ''
-    const head = mk('div', 'ez-slash-head')
-    head.textContent = '指令'
+    const headEl = mk('div', 'ez-slash-head')
+    headEl.textContent = title
     const list = mk('div', 'ez-slash-list')
     list.setAttribute('role', 'listbox')
-    menu.append(head, list)
+    menu.append(headEl, list)
     shown.forEach((command, i) => {
       const item = mk('div', 'ez-slash-item')
       item.setAttribute('role', 'option')
@@ -223,7 +247,25 @@ export function attachSlashMenu(
       close()
       return
     }
-    const matches = filterCommands(commands, hit.query)
+    if (load && !loaded && !loading) {
+      loading = true
+      void Promise.resolve(load())
+        .then((result) => {
+          loaded = result
+        })
+        .catch(() => {
+          // Nothing to offer and nothing to say about it here: an empty list
+          // closes the menu, which puts the `$` back to being a character.
+          loaded = []
+        })
+        .finally(() => {
+          loading = false
+          // Only if the user is still on the same trigger - they may have typed
+          // past it while this was out.
+          if (readTrigger()) sync()
+        })
+    }
+    const matches = filterCommands(load ? (loaded ?? []) : commands, hit.query)
     if (matches.length === 0) {
       // No "no results" row: closing lets the slash go back to being a character,
       // and a backspace brings the menu straight back.

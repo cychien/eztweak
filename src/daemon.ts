@@ -24,6 +24,7 @@ import { attachmentIds, parseReferences } from './anchor.js'
 import { injectOverlay, wantsHtml } from './inject.js'
 import { toAgentAttachments, toAgentItem, toConversationItem } from './label.js'
 import type { Annotation, PollResult, SessionEndedBy } from './protocol.js'
+import { listSkills } from './skills.js'
 import { SessionStore, listRestorableSessions, newId } from './store.js'
 import { clearRegistry, launchDaemon, probeDaemon, readRegistry, writeRegistry } from './registry.js'
 import { installVersion, pruneInstalledVersions } from './installer.js'
@@ -137,8 +138,13 @@ async function listenOn(app: express.Express, candidates: number[]): Promise<Ser
 /** The batch as one prompt turn. The JSON is exactly what `poll` prints, so an
  *  agent that knows the skill reads it unchanged; the preamble covers one that
  *  has never seen eztweak. */
-function acpPrompt(feedback: Extract<PollResult, { type: 'feedback' }>): string {
+function acpPrompt(feedback: Extract<PollResult, { type: 'feedback' }>, skill?: string): string {
   return [
+    // The agent expands a leading slash command itself, so this is an invocation
+    // rather than a request to consider one - and what follows is handed to the
+    // skill as its input. Its own line, because the expansion takes the rest of
+    // the first line as the command's argument.
+    ...(skill ? [`/${skill}`, ''] : []),
     'The user reviewed the running app in their browser and sent this feedback batch.',
     'Each item resolves to source: trust `anchor.source` (file:line) when present, else',
     'use `anchor.components` / `anchor.section` / `anchor.selector` / `anchor.text`.',
@@ -211,6 +217,11 @@ class SessionRuntime {
    *  agent comes back - it tracks `agentBusy`, except that `/agent/progress` can
    *  raise that flag with no batch behind it at all. */
   private activeBatch: string | null = null
+  /** The skill the batch being delivered asked for. Read out of the outbox at
+   *  delivery time rather than carried on the poll payload: `PollResult` is the
+   *  portable CLI contract, and a slash command is meaningless to an agent that
+   *  is not the one expanding it. */
+  private activeSkill: string | null = null
   private agentProgress: string | null = null
   /** SPIKE: the ACP-driven agent, when this session owns one. */
   private acp: AcpAgent | null = null
@@ -329,6 +340,7 @@ class SessionRuntime {
       onTurnEnd: (text, stopReason) => {
         this.agentBusy = false
         this.agentProgress = null
+        this.activeSkill = null
         // The batch this turn answered, read before it is cleared. Stamping it is
         // what lets the thread draw the reply under its own question rather than
         // under whatever the user typed while the turn was running.
@@ -358,6 +370,7 @@ class SessionRuntime {
       onExit: () => {
         this.agentBusy = false
         this.activeBatch = null
+        this.activeSkill = null
         this.broadcast()
       },
       resumeSessionId: () => this.store.currentChat.acpSessionId,
@@ -450,6 +463,7 @@ class SessionRuntime {
     }
     this.agentBusy = false
     this.activeBatch = null
+    this.activeSkill = null
     this.agentProgress = null
     // Everything the agent had not finished with, not just the turn it was on: the
     // one in flight went with the session it was asked of, and the ones queued
@@ -471,7 +485,7 @@ class SessionRuntime {
       this.acp = null
       return
     }
-    this.acp.prompt(acpPrompt(outcome))
+    this.acp.prompt(acpPrompt(outcome, this.activeSkill ?? undefined))
   }
 
   private wakePollers(): void {
@@ -492,6 +506,7 @@ class SessionRuntime {
     this.store.markDelivered(batch.batchId)
     this.agentBusy = true
     this.activeBatch = batch.batchId
+    this.activeSkill = batch.skill ?? null
     const attachments = toAgentAttachments(batch.attachments, this.store)
     return {
       type: 'feedback',
@@ -672,7 +687,14 @@ class SessionRuntime {
       if (!files) return res.status(400).json({ error: 'unknown attachment id' })
       const refs = parseReferences(req.body?.references)
       if (!refs) return res.status(400).json({ error: 'references must be an array of anchors' })
-      const batch = this.store.sendBatch(req.body?.note ?? null, files, refs)
+      const skill = typeof req.body?.skill === 'string' ? req.body.skill : undefined
+      // Checked against what is actually on disk: the name becomes a slash
+      // command in a prompt, and a name nobody vetted is a line of the user's
+      // text being handed to the agent as an instruction.
+      if (skill && !listSkills(this.project).some((s) => s.name === skill)) {
+        return res.status(400).json({ error: 'unknown skill' })
+      }
+      const batch = this.store.sendBatch(req.body?.note ?? null, files, refs, skill)
       if (!batch) return res.status(400).json({ error: 'nothing to send' })
       this.store.appendConversation({
         role: 'user',
@@ -686,6 +708,7 @@ class SessionRuntime {
         ...(batch.references?.length
           ? { references: batch.references.map((r) => ({ n: r.n, label: r.label })) }
           : {}),
+        ...(batch.skill ? { skill: batch.skill } : {}),
       })
       if (this.acp) this.deliverToAcp()
       this.wakePollers()
@@ -737,6 +760,13 @@ class SessionRuntime {
             .status(409)
             .json({ error: err instanceof Error ? err.message : 'the agent refused the change' }),
       )
+    })
+
+    // The skills this project can ask the agent to run. Read on request rather
+    // than carried in the snapshot: the snapshot goes out on every streamed
+    // chunk, and this reads the disk.
+    api.get('/acp/skills', (_req, res) => {
+      res.json({ skills: listSkills(this.project) })
     })
 
     // Show an earlier conversation and put the agent back on it.

@@ -278,9 +278,18 @@ export class SessionStore {
     note: string | null,
     attachments: Attachment[] = [],
     references: Reference[] = [],
+    skill?: string,
   ): FeedbackBatch | null {
     const items = this.annotations
-    if (items.length === 0 && !note?.trim() && attachments.length === 0 && references.length === 0) {
+    // A skill on its own is a batch: "run this over what you can see" is a
+    // request, even with nothing annotated and nothing typed.
+    if (
+      items.length === 0 &&
+      !note?.trim() &&
+      attachments.length === 0 &&
+      references.length === 0 &&
+      !skill
+    ) {
       return null
     }
     const batch: FeedbackBatch = {
@@ -289,6 +298,7 @@ export class SessionStore {
       note: note?.trim() || null,
       ...(attachments.length ? { attachments } : {}),
       ...(references.length ? { references } : {}),
+      ...(skill ? { skill } : {}),
       sentAt: Date.now(),
     }
     this.writeJson('outbox.json', [...this.outbox, batch])

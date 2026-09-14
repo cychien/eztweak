@@ -1585,6 +1585,80 @@ body.ez-arranging .ez-frame {
   background: var(--paper-sunken);
 }
 
+/* ------------------------------------------------------------ skill pill */
+
+/* The skill this batch will run, sitting on the composer it was chosen in. A
+   row of its own above the box rather than a chip inside it: it governs the
+   whole batch, so a position in the sentence would be a position that means
+   nothing.
+
+   Monochrome, deliberately. Every accent in this palette carries exactly one
+   meaning - orange is the thing annotated, green a file, pink a picked element,
+   blue a newer version - and a skill is none of them. Borrowing one would make
+   two things the same colour, which costs more than a skill gains by being
+   coloured: the pill shape, the icon and the cross already say what it is. */
+.ez-skill-pill {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  align-self: flex-start;
+  max-width: 100%;
+  margin-bottom: 6px;
+  padding: 3px 4px 3px 8px;
+  border-radius: 999px;
+  background: var(--muted);
+  color: var(--foreground);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.ez-skill-pill[hidden] {
+  display: none;
+}
+
+.ez-skill-pill svg {
+  flex-shrink: 0;
+  color: var(--muted-foreground);
+}
+
+.ez-skill-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ez-skill-clear {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  padding: 0;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+}
+
+.ez-skill-clear:hover {
+  color: var(--foreground);
+  background: var(--panel);
+}
+
+/* On the sent bubble, above what it was handed: a fact about a message already
+   sent rather than a control, so it drops the pill's shape and just labels. */
+.ez-bubble-skill {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 5px;
+  color: var(--muted-foreground);
+  font-size: 10px;
+  font-weight: 600;
+}
+
 /* ---------------------------------------------------------- chat picker */
 
 /* Sits at the head of the thread, because what it names is which thread this is.

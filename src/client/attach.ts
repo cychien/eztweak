@@ -41,6 +41,11 @@ interface Options {
    *  because the useful ones act on state only it has - picking an element needs
    *  the overlay's pointer, which the shell's note box can only ask for. */
   commands?: SlashCommand[]
+  /** Offered under `$` instead of `/`. Asked for at open time rather than passed
+   *  once: the agent's skills are read off disk and can change while a review is
+   *  running. Absent means the box has no `$` menu at all - a poll-mode review
+   *  has no agent to hand a skill to. */
+  skills?: () => SlashCommand[] | Promise<SlashCommand[]>
 }
 
 export interface AttachController {
@@ -95,6 +100,7 @@ export function attachify({
   placeholder,
   onChange,
   commands,
+  skills,
 }: Options): AttachController {
   const editable = mk('div', className)
   editable.setAttribute('contenteditable', 'plaintext-only')
@@ -136,6 +142,18 @@ export function attachify({
       },
       ...(commands ?? []),
     ],
+  })
+
+  /** Skills, on their own trigger. A second menu rather than more rows in the
+   *  first, because the two are different kinds of thing: `/file` and `/element`
+   *  act on this box, and a skill is handed to the agent. One symbol each is
+   *  what says which. */
+  const skillMenu = attachSlashMenu(editable, {
+    mk,
+    triggerChar: '$',
+    title: 'Skills',
+    commands: [],
+    load: skills,
   })
 
   /** Chips with an upload still in flight. Membership plus "still in the DOM" is
@@ -447,7 +465,9 @@ export function attachify({
     refs: () => draftRefs(snapshot()),
     pending: () => [...uploading].filter((c) => editable.contains(c)).length,
     pendingNames: () => draftPendingNames(snapshot()),
-    closeSlash: () => slash.close(),
+    // Either menu, whichever is up - at most one can be, since a trigger only
+    // counts at the start of the word being typed.
+    closeSlash: () => slash.close() || skillMenu.close(),
     beginRef,
     resolveRef,
     cancelRef,

@@ -11,6 +11,7 @@ import KeyboardIcon from '@hugeicons/core-free-icons/KeyboardIcon'
 import Select01Icon from '@hugeicons/core-free-icons/Select01Icon'
 import Navigation03Icon from '@hugeicons/core-free-icons/Navigation03Icon'
 import BubbleChatAddIcon from '@hugeicons/core-free-icons/BubbleChatAddIcon'
+import FlashIcon from '@hugeicons/core-free-icons/FlashIcon'
 import Edit02Icon from '@hugeicons/core-free-icons/Edit02Icon'
 import type { SessionConfigOption } from '@agentclientprotocol/sdk'
 import {
@@ -21,6 +22,7 @@ import {
   shortConfigValueName,
 } from '../acp-config.js'
 import { attachify } from './attach.js'
+import type { SlashCommand } from './slash.js'
 import type { Device, Size } from './devices.js'
 import {
   CANVAS_GAP,
@@ -89,6 +91,10 @@ interface ConversationWire {
   text: string
   ts: number
   batchId?: string
+  /** The skill this batch asked for. The only trace there is: an explicitly
+   *  invoked skill is expanded into the prompt by the agent, so it produces no
+   *  tool call for the activity feed to show. */
+  skill?: string
   items?: {
     comment: string
     where: string
@@ -1253,7 +1259,21 @@ const noteAttach = attachify({
       run: () => void newChat(),
     },
   ],
+  skills: () => fetchSkills(),
 })
+/** The skill this batch will run, above the box it was chosen in. A row of its
+ *  own rather than a chip in the text: it applies to the batch, and the cross is
+ *  the whole of its interface. */
+const skillName = h('span', 'ez-skill-name')
+const skillClear = h('button', 'ez-skill-clear')
+skillClear.title = '不要用這個 skill'
+skillClear.setAttribute('aria-label', '不要用這個 skill')
+skillClear.append(icon(Cancel01Icon as IconNode, 11))
+skillClear.onclick = () => setBatchSkill(null)
+const skillPill = h('div', 'ez-skill-pill')
+skillPill.hidden = true
+skillPill.append(icon(FlashIcon as IconNode, 12), skillName, skillClear)
+
 const note = noteAttach.editable
 note.title = '寫補充說明（N）'
 
@@ -1280,7 +1300,7 @@ const configWrap = h('div', 'ez-config')
 configWrap.hidden = true
 configWrap.append(configPill, configMenu)
 
-queueSection.append(queueScroll, configWrap, noteAttach.wrap, sendBtn)
+queueSection.append(queueScroll, configWrap, skillPill, noteAttach.wrap, sendBtn)
 
 /** The editor for a queued annotation: the row's own comment, in place. One
  *  composer, built once and moved into whichever row is open - nothing else on
@@ -1834,7 +1854,11 @@ async function sendBatch(): Promise<void> {
   const attachments = noteAttach.ids()
   const references = noteAttach.refs()
   const text = noteAttach.text()
-  if (count === 0 && !text && attachments.length === 0 && references.length === 0) return
+  // A skill on its own is a request: "run this over what you can see" needs no
+  // annotation and no note.
+  if (count === 0 && !text && attachments.length === 0 && references.length === 0 && !batchSkill) {
+    return
+  }
   // Called off before the box is emptied: an answer arriving after the reset
   // would land in a composer that no longer holds the comment it belonged to.
   abortPick('sent')
@@ -1843,10 +1867,19 @@ async function sendBatch(): Promise<void> {
   try {
     const res = await api('/send', {
       method: 'POST',
-      body: JSON.stringify({ note: text, attachments, references }),
+      body: JSON.stringify({
+        note: text,
+        attachments,
+        references,
+        ...(batchSkill ? { skill: batchSkill.name } : {}),
+      }),
     })
-    // Reset, not discard: the batch owns these files now.
-    if (res.ok) noteAttach.reset()
+    // Reset, not discard: the batch owns these files now. The skill goes with
+    // it: it was this batch's, and a later one that wants it can say so.
+    if (res.ok) {
+      noteAttach.reset()
+      setBatchSkill(null)
+    }
   } finally {
     // Restored even when the request threw: the note and its chips are still
     // there, so the send has to stay retryable.
@@ -1956,6 +1989,55 @@ async function cancelTurn(): Promise<void> {
 async function newChat(): Promise<void> {
   if (!snapshot?.acp) return
   await api('/acp/new', { method: 'POST' })
+}
+
+// ------------------------------------------------------------------- skills
+
+/** The skill this batch will ask the agent to run, if any. Batch-level, not a
+ *  chip in the note: it governs how the whole batch is handled, so a position
+ *  inside the sentence would be a position that means nothing. */
+let batchSkill: SkillWire | null = null
+
+interface SkillWire {
+  name: string
+  description: string
+  source: 'project' | 'user' | 'plugin'
+}
+
+const SOURCE_LABEL: Record<SkillWire['source'], string> = {
+  project: '專案',
+  user: '你安裝的',
+  plugin: 'plugin',
+}
+
+async function fetchSkills(): Promise<SlashCommand[]> {
+  // Only ACP mode has an agent to hand a skill to; a poll-mode agent is running
+  // somebody else's loop and a slash command means nothing to it.
+  if (!snapshot?.acp) return []
+  const res = await api('/acp/skills')
+  if (!res.ok) return []
+  const { skills } = (await res.json()) as { skills: SkillWire[] }
+  return skills.map((skill) => ({
+    id: skill.name,
+    label: skill.name,
+    hint: SOURCE_LABEL[skill.source],
+    keywords: [skill.description],
+    icon: FlashIcon as IconNode,
+    run: () => setBatchSkill(skill),
+  }))
+}
+
+function setBatchSkill(skill: SkillWire | null): void {
+  batchSkill = skill
+  paintBatchSkill()
+  paintSendState()
+}
+
+function paintBatchSkill(): void {
+  skillPill.hidden = !batchSkill
+  if (!batchSkill) return
+  skillName.textContent = batchSkill.name
+  skillPill.title = batchSkill.description || batchSkill.name
 }
 
 // --------------------------------------------------------------- chat picker
@@ -2324,6 +2406,16 @@ function annotationLabel(a: AnnotationWire): string {
 function buildSaid(entry: ConversationWire, isUser: boolean): HTMLElement {
   const said = h('div', isUser ? 'ez-bubble' : 'ez-said')
   const items = entry.items ?? []
+
+  // First, because it is what the rest of the batch was handed to. Nothing else
+  // in the thread would say a skill ran: the agent expands an explicitly invoked
+  // one into its prompt rather than calling its Skill tool, so there is no tool
+  // line for the activity feed to show.
+  if (entry.skill) {
+    const ran = h('div', 'ez-bubble-skill')
+    ran.append(icon(FlashIcon as IconNode, 11), h('span', undefined, entry.skill))
+    said.appendChild(ran)
+  }
 
   if (items.length) {
     const key = entry.batchId ?? String(entry.ts)

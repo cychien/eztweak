@@ -124,6 +124,22 @@ mid-word stays a slash, so urls and paths are left alone. The commands:
   to start over from, and a fresh session answering it would be answering something else. The 待送
   清單 is left alone: those you have not sent yet, so they were never the old context's to begin
   with. A note you were part-way through typing survives, so `/new` and then send is one move.
+- **`$`** opens a second menu, of the skills this machine can run, and picking one
+  asks the agent to run it over the batch you are about to send. The skill shows as a pill above
+  the box until the batch goes, and on the sent bubble afterwards - which is the only place it
+  appears, because an explicitly invoked skill is expanded into the agent's prompt rather than
+  loaded through its skill tool, so nothing in the turn's activity would otherwise say it ran.
+  A skill on its own is a batch: "run this over what you can see" needs no annotation and no note.
+
+  Its own symbol rather than more rows under `/`, because the two are different kinds of thing:
+  `/file` and `/element` act on the box you are typing in, and a skill is handed to the agent.
+  Only offered in [ACP mode](#acp-mode-experimental), and only in the note box.
+
+  The list is read off disk - `.claude/skills` and `.agents/skills`, in the project and in your
+  home directory, plus `.claude/plugins/*/skills`. Skills bundled inside the Claude Code binary
+  are **not** listed: they have no file to find, and the protocol's own command list cannot tell a
+  skill from `/doctor`, so including it would mean a menu of "skills" that offers things that are
+  not skills.
 - **`/element`** points the comment at a *second* element - "make this match that one". The page
   stays live while you choose, so a plain click still follows links and opens menus and only
   ⌘/Ctrl+click picks; the comment box steps aside and comes back when you are done. You can cross to

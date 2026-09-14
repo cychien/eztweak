@@ -93,6 +93,10 @@ export interface FeedbackBatch {
   attachments?: Attachment[]
   /** elements picked into the note box, i.e. pointed at by the batch, not an item */
   references?: Reference[]
+  /** A skill the user asked the agent to run for this batch. Batch-level by
+   *  nature: it governs how the whole batch is handled, which is why it is not a
+   *  marker inside the note the way a file or a reference is. */
+  skill?: string
   sentAt: number
   deliveredAt?: number
   ackedAt?: number
@@ -125,6 +129,11 @@ export interface ConversationEntry {
   items?: ConversationItem[]
   attachments?: string[]
   references?: ReferenceEcho[]
+  /** The skill this batch asked for. Worth recording because an explicitly
+   *  invoked skill leaves no other trace: the agent expands it into the prompt
+   *  rather than calling its Skill tool, so nothing in the turn's activity says
+   *  it ran. */
+  skill?: string
 }
 
 export type SessionEndedBy = 'user' | 'agent'
