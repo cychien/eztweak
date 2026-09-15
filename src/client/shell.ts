@@ -586,17 +586,22 @@ const deviceMenu = h('div', 'ez-menu')
 deviceMenu.setAttribute('role', 'menu')
 deviceMenu.setAttribute('aria-label', '預覽尺寸')
 
-const deviceItems = DEVICES.map((d, i) => {
+const deviceItems = DEVICES.map((d) => {
   const item = h('button', 'ez-menu-item')
   item.setAttribute('role', 'menuitemradio')
   item.dataset.device = d.id
   // The size belongs on the card that is showing it, not in the list of names:
   // here it is a number nobody is choosing by.
-  // No tick column here, unlike the canvas picker: this is a list of three where
-  // one is on, and the menu opens with that one already under the cursor - a
-  // column of blanks to say so would only push the names off the edge.
+  //
+  // Marked the way the agent and model menus mark theirs - a tick at the right
+  // edge of the row that is on. This is the same kind of control as those, one
+  // of a short list is current, and three selects in one sidebar wearing three
+  // different marks would make the reader learn each of them separately. The
+  // number keys that also pick a size are not printed here: a shortcut belongs
+  // where it is learned once, which is the control's own tooltip and the
+  // keyboard card, not down the side of every row forever.
   item.title = deviceLabel(d)
-  item.append(h('span', 'ez-menu-name', d.name), h('kbd', 'ez-kbd', String(i + 1)))
+  item.append(h('span', 'ez-menu-name', d.name), menuCheck())
   item.onclick = () => {
     closeDeviceMenu()
     setDevice(d.id)
@@ -684,8 +689,9 @@ function paintControls(): void {
   deviceName.title = `${deviceLabel(device)}（1 / 2 / 3）`
   deviceCaret.title = '換一個尺寸'
   for (const item of deviceItems) {
-    item.setAttribute('aria-checked', String(!multi && item.dataset.device === deviceId))
-    item.classList.toggle('ez-on', !multi && item.dataset.device === deviceId)
+    const on = !multi && item.dataset.device === deviceId
+    item.setAttribute('aria-checked', String(on))
+    item.toggleAttribute('data-current', on)
   }
   deviceGroup.classList.toggle('ez-on', !multi)
   multiBtn.classList.toggle('ez-on', multi)

@@ -873,20 +873,9 @@ body.ez-arranging .ez-frame {
   visibility: visible;
 }
 
-/* Against the row's own highlight, which is the same colour the key sits on when
-   the row is plain: on a highlighted row it would read as a hole rather than a
-   key. */
-.ez-menu-item:hover .ez-kbd,
-.ez-menu-item:focus-visible .ez-kbd {
-  background: var(--panel);
-  color: var(--foreground);
-}
-
 .ez-menu-name {
   flex: 1;
 }
-
-
 
 /* ---------------------------------------------------------------- buttons */
 
