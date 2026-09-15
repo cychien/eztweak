@@ -799,8 +799,6 @@ body.ez-arranging .ez-frame {
   color: var(--ink-ghost);
 }
 
-
-
 /* Holds the column whether or not there is a tick in it, so the names do not
    step sideways as boxes are checked. The green is the shell's own - the one it
    already uses for a thing that is attached and accounted for - and the stroke
@@ -1242,7 +1240,6 @@ body.ez-arranging .ez-frame {
   margin-top: -6px;
 }
 
-
 /* The agent's turns are unboxed, so whitespace is the only thing that separates
    one reply from the bubble on either side of it, and the only thing that
    separates two replies from each other. Both need more than the default gap,
@@ -1530,7 +1527,6 @@ body.ez-arranging .ez-frame {
   flex-direction: column;
   gap: 6px;
 }
-
 
 .ez-queue-item {
   border-radius: 12px;
@@ -2263,7 +2259,6 @@ body.ez-arranging .ez-frame {
   color: var(--ink-faint);
 }
 
-
 /* ------------------------------------------------- SPIKE: ACP live agent */
 
 /* What the agent is doing right now: plan ticks, tool lines, latest thought and
@@ -2915,6 +2910,18 @@ body.ez-arranging .ez-frame {
 .ez-strip-note {
   font-size: 11px;
   color: var(--muted-foreground);
+  /* Capped and clipped, with the whole of it in the chip's tooltip. A note is a
+     hint about what changed, and letting it set the chip's width means four
+     variants no longer fit on the strip - which costs the user the one thing the
+     strip is for, seeing what there is to choose between. */
+  max-width: 22ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ez-strip-chip > span:first-child {
+  white-space: nowrap;
 }
 
 .ez-strip-pending {
