@@ -1951,7 +1951,7 @@ body.ez-arranging .ez-frame {
 
 .ez-usage-title {
   font-size: 11px;
-  font-weight: 600;
+  font-weight: 500;
   color: var(--ink);
 }
 
@@ -1986,9 +1986,10 @@ body.ez-arranging .ez-frame {
   font-variant-numeric: tabular-nums;
 }
 
-/* The bar fills with what is *left*, not what is spent, so it says the same thing
-   as the number beside it. A bar that filled up as the allowance drained would
-   contradict the words it sits under. */
+/* The bar fills with what has been *spent*. That is the way every other meter on
+   a screen reads and the way both vendors draw this one - a bar that emptied as
+   the allowance drained would be this one control disagreeing with all of them.
+   The words beside it say what is left; between them the row answers both. */
 .ez-usage-bar {
   margin-top: 5px;
   height: 4px;
@@ -1997,9 +1998,9 @@ body.ez-arranging .ez-frame {
   overflow: hidden;
 }
 
-/* Muted, not ink: at four pixels tall and nearly the width of the card, a bar in
-   full ink stops reading as a measure and starts reading as a rule drawn across
-   the row. */
+/* Muted, not ink: at four pixels tall and, on a spent account, nearly the width
+   of the card, a bar in full ink stops reading as a measure and starts reading as
+   a rule drawn across the row. */
 .ez-usage-bar i {
   display: block;
   height: 100%;

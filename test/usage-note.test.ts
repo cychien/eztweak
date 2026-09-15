@@ -58,9 +58,9 @@ test('nothing reported is no line at all', () => {
 // `/status` print them.
 test('the card carries every window, labelled', () => {
   assert.deepEqual(usageRows(FULL, NOW), [
-    { label: '5 小時', percent: 91, when: '18:30 重置', low: false },
-    { label: '一週', percent: 40, when: '9/20 21:00 重置', low: false },
-    { label: '一週 · Fable', percent: 8, when: '9/20 21:00 重置', low: true },
+    { label: '5 小時', percent: 91, used: 9, when: '18:30 重置', low: false },
+    { label: '1 週', percent: 40, used: 60, when: '9/20 21:00 重置', low: false },
+    { label: '1 週 · Fable', percent: 8, used: 92, when: '9/20 21:00 重置', low: true },
   ])
 })
 
@@ -77,8 +77,10 @@ test('a window the agent never dated says only what it knows', () => {
   assert.equal(usageRows(undated, NOW)[0]?.when, '')
 })
 
+// Figures throughout: a spelt-out week beside a numeric five hours makes the
+// card's left column look like two different kinds of thing.
 test('window names', () => {
-  assert.equal(windowName(ONE_WEEK), '一週')
+  assert.equal(windowName(ONE_WEEK), '1 週')
   assert.equal(windowName(FIVE_HOURS), '5 小時')
   assert.equal(windowName(2 * 24 * 60), '2 天')
   assert.equal(windowName(45), '45 分鐘')

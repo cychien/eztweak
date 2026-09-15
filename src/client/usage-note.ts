@@ -27,9 +27,11 @@ export interface Usage {
   plan?: string
 }
 
-/** A window's length, as a person would say it. */
+/** A window's length, as a person would say it. Figures, never 「一」or「兩」: the
+ *  card reads down a column of them, and a spelt-out week beside a numeric five
+ *  hours makes the column look like two different kinds of thing. */
 export function windowName(minutes: number): string {
-  if (minutes === 7 * 24 * 60) return '一週'
+  if (minutes === 7 * 24 * 60) return '1 週'
   if (minutes % (24 * 60) === 0) return `${minutes / (24 * 60)} 天`
   if (minutes % 60 === 0) return `${minutes / 60} 小時`
   return `${minutes} 分鐘`
@@ -94,9 +96,12 @@ export function usageNote(usage: Usage | undefined, now = Date.now()): string {
 export interface UsageRow {
   /** The window's length, and whose allowance it is when that is worth saying. */
   label: string
-  /** What is left, 0-100. The bar reads the same number as the words beside it:
-   *  a bar that filled up as the allowance drained would contradict them. */
+  /** What is left, 0-100 - the number the row says out loud. */
   percent: number
+  /** What has been spent, 0-100. What the bar fills with: a bar fills up as a
+   *  thing is used up, which is the way every other meter on a screen reads and
+   *  the way both vendors draw this one. */
+  used: number
   /** "04:20 重置", or nothing when the agent never dated it. */
   when: string
   /** Little enough left that the row should say so on its own. */
@@ -111,11 +116,13 @@ const LOW = 0.15
 export function usageRows(usage: Usage | undefined, now = Date.now()): UsageRow[] {
   return (usage?.windows ?? []).map((window) => {
     const when = resetTime(window, now)
+    const percent = Math.round(window.remaining * 100)
     return {
       label: window.model
         ? `${windowName(window.windowMinutes)} · ${window.model}`
         : windowName(window.windowMinutes),
-      percent: Math.round(window.remaining * 100),
+      percent,
+      used: 100 - percent,
       when: when ? `${when} 重置` : '',
       low: window.remaining < LOW,
     }

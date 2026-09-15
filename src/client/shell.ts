@@ -2577,7 +2577,7 @@ function paintLimit(acp: AcpWire | undefined): void {
       h('span', 'ez-usage-left', `剩 ${row.percent}%`),
     )
     const fill = h('i')
-    fill.style.width = `${row.percent}%`
+    fill.style.width = `${row.used}%`
     const bar = h('div', 'ez-usage-bar')
     bar.append(fill)
     const item = h('div', 'ez-usage-row')
