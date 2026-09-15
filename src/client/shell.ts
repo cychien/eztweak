@@ -17,6 +17,7 @@ import BubbleChatAddIcon from '@hugeicons/core-free-icons/BubbleChatAddIcon'
 import BubbleChatOutcomeIcon from '@hugeicons/core-free-icons/BubbleChatOutcomeIcon'
 import Edit02Icon from '@hugeicons/core-free-icons/Edit02Icon'
 import type { SessionConfigOption } from '@agentclientprotocol/sdk'
+import type { AcpAskAnswer, AcpAskField, AcpAskOption } from '../acp-ask.js'
 import { AGENT_PROFILES, type AgentBrand, agentBrandFor, agentProfileFor } from '../agents.js'
 import {
   type AcpConfigValue,
@@ -178,16 +179,7 @@ interface AcpAskWire {
   id: string
   kind: 'permission' | 'question'
   title: string
-  questions: {
-    key: string
-    text?: string
-    options: {
-      id: string
-      name: string
-      description?: string
-      hint?: string
-    }[]
-  }[]
+  fields: AcpAskField[]
 }
 
 const PREFIX = (() => {
@@ -3193,40 +3185,271 @@ function acpFeedEl(acp: AcpWire): HTMLElement {
   return box
 }
 
-/** SPIKE: a decision routed out of the agent - AskUserQuestion, a permission
- *  prompt - answered here instead of in a terminal. Every question is a row of
- *  option buttons; the answer goes out the moment the last one is picked. */
+/** A decision routed out of the agent - a permission prompt, AskUserQuestion, an
+ *  elicitation form - answered here instead of in a terminal.
+ *
+ *  Two tempos. A card that is nothing but choices sends itself the moment an
+ *  option is picked for the last of them, which is how permission prompts have
+ *  always felt and how a one-question multiple choice should. Anything with a
+ *  typed field gets a 送出 button instead: a value someone is still writing must
+ *  not leave on its own, and one button for the whole card beats guessing which
+ *  field was last. Typing into a choice's own "Other" box moves that card to the
+ *  second tempo too, for the same reason. A question (not a permission) can also
+ *  be declined, which the protocol models and the agent knows how to carry on
+ *  from. */
 function acpAskEl(ask: AcpAskWire): HTMLElement {
   const card = h('div', 'ez-acp-ask')
   card.append(h('div', 'ez-acp-ask-title', ask.title))
-  const picked = new Map<string, string>()
-  const submit = (): void => {
-    if (picked.size < ask.questions.length) return
-    for (const b of card.querySelectorAll('button')) b.disabled = true
-    void api('/acp/answer', {
-      method: 'POST',
-      body: JSON.stringify({ id: ask.id, answers: Object.fromEntries(picked) }),
-    })
-  }
-  for (const question of ask.questions) {
-    if (question.text) card.append(h('div', 'ez-acp-ask-q', question.text))
-    const row = h('div', 'ez-acp-ask-options')
-    for (const option of question.options) {
-      const btn = h('button', `ez-acp-opt${option.hint ? ` ez-acp-opt-${option.hint}` : ''}`)
-      btn.append(h('span', undefined, option.name))
-      if (option.description) btn.append(h('span', 'ez-acp-opt-desc', option.description))
-      btn.title = option.description ?? ''
-      btn.onclick = () => {
-        picked.set(question.key, option.id)
-        for (const b of row.querySelectorAll('button')) b.classList.remove('ez-on')
-        btn.classList.add('ez-on')
-        submit()
-      }
-      row.appendChild(btn)
+  const values = new Map<string, AcpAskAnswer>()
+  const choicesOnly = ask.fields.every((f) => f.kind === 'select')
+  const customKeys = new Set(
+    ask.fields.flatMap((f) => ((f.kind === 'select' || f.kind === 'multiselect') && f.custom ? [f.custom.key] : [])),
+  )
+  const typedCustom = (): boolean => [...values.keys()].some((k) => customKeys.has(k))
+  let settled = false
+  const send = (body: Record<string, unknown>): void => {
+    if (settled) return
+    settled = true
+    for (const c of card.querySelectorAll<HTMLButtonElement | HTMLInputElement | HTMLTextAreaElement>(
+      'button, input, textarea',
+    )) {
+      c.disabled = true
     }
-    card.appendChild(row)
+    void api('/acp/answer', { method: 'POST', body: JSON.stringify({ id: ask.id, ...body }) })
   }
+  // A choice answered by its Other box counts as answered; a card with nothing
+  // in it is not sent - that is what 略過 is for.
+  const complete = (): boolean =>
+    values.size > 0 &&
+    ask.fields.every(
+      (f) =>
+        f.optional ||
+        values.has(f.key) ||
+        ((f.kind === 'select' || f.kind === 'multiselect') && !!f.custom && values.has(f.custom.key)),
+    )
+  const submit = (): void => {
+    if (complete()) send({ answers: Object.fromEntries(values) })
+  }
+  const submitBtn = h('button', 'ez-acp-opt ez-acp-opt-primary', '送出')
+  submitBtn.onclick = submit
+  const refresh = (): void => {
+    const instant = choicesOnly && !typedCustom()
+    submitBtn.hidden = instant
+    submitBtn.disabled = !complete()
+  }
+  const changed = (how: 'pick' | 'edit'): void => {
+    if (how === 'pick' && choicesOnly && !typedCustom()) submit()
+    else refresh()
+  }
+  // Every field says 選填 only when the card also has ones that are not: a
+  // form where nothing is required (Claude's AskUserQuestion) would otherwise
+  // say it on every line and mean nothing by it.
+  const mixed = ask.fields.some((f) => f.optional) && ask.fields.some((f) => !f.optional)
+  ask.fields.forEach((field, i) => {
+    let labelId: string | undefined
+    if (field.text || (mixed && field.optional)) {
+      const label = h('div', 'ez-acp-ask-q', `${field.text ?? ''}${mixed && field.optional ? '（選填）' : ''}`)
+      labelId = `${ask.id}-q${i}`
+      label.id = labelId
+      card.append(label)
+    }
+    card.append(acpFieldEl(field, values, changed, submit, labelId))
+  })
+  if (ask.kind === 'question' || !choicesOnly) {
+    const actions = h('div', 'ez-acp-ask-actions')
+    if (ask.kind === 'question') {
+      const skip = h('button', 'ez-acp-opt', '略過')
+      skip.onclick = () => send({ decline: true })
+      actions.append(skip)
+    }
+    actions.append(submitBtn)
+    card.append(actions)
+  }
+  refresh()
   return card
+}
+
+/** One field of an ask, drawn for its kind. `values` is the card's answer so far;
+ *  `changed` is told after every edit whether it was a pick or typing, `submit`
+ *  is ⌘/Ctrl+Enter in a typed field - the composer's own chord for "this is
+ *  done". A default is shown as the current value, never sent on its own: the
+ *  user still confirms. */
+function acpFieldEl(
+  field: AcpAskField,
+  values: Map<string, AcpAskAnswer>,
+  changed: (how: 'pick' | 'edit') => void,
+  submit: () => void,
+  labelId?: string,
+): HTMLElement {
+  const labelled = <T extends HTMLElement>(el: T, role?: string): T => {
+    if (role) el.setAttribute('role', role)
+    if (labelId) el.setAttribute('aria-labelledby', labelId)
+    return el
+  }
+  const optionButton = (option: AcpAskOption): HTMLButtonElement => {
+    const btn = h('button', `ez-acp-opt${option.hint ? ` ez-acp-opt-${option.hint}` : ''}`)
+    btn.append(h('span', undefined, option.name))
+    if (option.description) btn.append(h('span', 'ez-acp-opt-desc', option.description))
+    btn.title = option.description ?? ''
+    return btn
+  }
+  const chord = (e: KeyboardEvent): void => {
+    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+      e.preventDefault()
+      submit()
+    }
+  }
+  const textField = (
+    key: string,
+    opts: { max?: number; placeholder?: string; initial?: string; onInput?: () => void },
+  ): HTMLTextAreaElement => {
+    const area = h('textarea', 'ez-acp-field')
+    area.rows = 1
+    if (opts.max !== undefined) area.maxLength = opts.max
+    if (opts.placeholder) area.placeholder = opts.placeholder
+    const grow = (): void => {
+      area.style.height = 'auto'
+      area.style.height = `${area.scrollHeight}px`
+    }
+    if (opts.initial !== undefined) {
+      area.value = opts.initial
+      values.set(key, opts.initial)
+    }
+    area.oninput = () => {
+      if (area.value) values.set(key, area.value)
+      else values.delete(key)
+      grow()
+      opts.onInput?.()
+      changed('edit')
+    }
+    area.onkeydown = chord
+    queueMicrotask(grow)
+    return area
+  }
+  /** The choice's own "Other" box, when it has one. Typing into it un-picks a
+   *  single-select - the agent reads a typed answer as replacing the pick, so
+   *  the card should not show both - and leaves a multi-select alone, where the
+   *  two add up. Picking clears the box the same way. */
+  const withCustom = (row: HTMLElement, clearPick: () => void): HTMLElement => {
+    if (field.kind !== 'select' && field.kind !== 'multiselect') return row
+    const custom = field.custom
+    if (!custom) return row
+    const group = h('div', 'ez-acp-group')
+    const box = textField(custom.key, {
+      placeholder: custom.text ?? '其他',
+      onInput: () => {
+        if (field.kind === 'select' && box.value) clearPick()
+      },
+    })
+    group.append(row, box)
+    return group
+  }
+  switch (field.kind) {
+    case 'select': {
+      const row = labelled(h('div', 'ez-acp-ask-options'), 'radiogroup')
+      const clearPick = (): void => {
+        values.delete(field.key)
+        for (const b of row.querySelectorAll('button')) b.classList.remove('ez-on')
+      }
+      const group = withCustom(row, clearPick)
+      for (const option of field.options) {
+        const btn = optionButton(option)
+        if (option.id === field.default) {
+          values.set(field.key, option.id)
+          btn.classList.add('ez-on')
+        }
+        btn.onclick = () => {
+          clearPick()
+          values.set(field.key, option.id)
+          btn.classList.add('ez-on')
+          if (field.custom) {
+            const box = group.querySelector('textarea')
+            if (box) box.value = ''
+            values.delete(field.custom.key)
+          }
+          changed('pick')
+        }
+        row.append(btn)
+      }
+      return group
+    }
+    case 'multiselect': {
+      const row = labelled(h('div', 'ez-acp-ask-options'), 'group')
+      const picked = new Set<string>(field.default ?? [])
+      const sync = (): void => {
+        if (picked.size) values.set(field.key, [...picked])
+        else values.delete(field.key)
+        const full = field.max !== undefined && picked.size >= field.max
+        for (const b of row.querySelectorAll('button')) {
+          const on = picked.has(b.dataset.id ?? '')
+          b.classList.toggle('ez-on', on)
+          b.setAttribute('aria-pressed', String(on))
+          b.disabled = full && !on
+        }
+      }
+      for (const option of field.options) {
+        const btn = optionButton(option)
+        btn.dataset.id = option.id
+        btn.onclick = () => {
+          if (picked.has(option.id)) picked.delete(option.id)
+          else picked.add(option.id)
+          sync()
+          changed('pick')
+        }
+        row.append(btn)
+      }
+      sync()
+      return withCustom(row, () => {})
+    }
+    case 'boolean': {
+      const row = labelled(h('div', 'ez-acp-ask-options'), 'radiogroup')
+      for (const [value, name] of [
+        [true, '是'],
+        [false, '否'],
+      ] as const) {
+        const btn = optionButton({ id: String(value), name })
+        if (field.default === value) {
+          values.set(field.key, value)
+          btn.classList.add('ez-on')
+        }
+        btn.onclick = () => {
+          values.set(field.key, value)
+          for (const b of row.querySelectorAll('button')) b.classList.remove('ez-on')
+          btn.classList.add('ez-on')
+          changed('pick')
+        }
+        row.append(btn)
+      }
+      return row
+    }
+    case 'number': {
+      const input = labelled(h('input', 'ez-acp-field ez-acp-field-number'))
+      input.type = 'number'
+      if (field.min !== undefined) input.min = String(field.min)
+      if (field.max !== undefined) input.max = String(field.max)
+      input.step = field.integer ? '1' : 'any'
+      if (field.default !== undefined) {
+        input.value = String(field.default)
+        values.set(field.key, field.default)
+      }
+      input.oninput = () => {
+        const n = input.value === '' ? NaN : Number(input.value)
+        if (Number.isFinite(n)) values.set(field.key, n)
+        else values.delete(field.key)
+        changed('edit')
+      }
+      input.onkeydown = chord
+      return input
+    }
+    case 'text':
+      return labelled(
+        textField(field.key, {
+          ...(field.max !== undefined ? { max: field.max } : {}),
+          ...(field.format ? { placeholder: field.format } : {}),
+          ...(field.default !== undefined ? { initial: field.default } : {}),
+        }),
+      )
+  }
 }
 
 window.addEventListener('message', (e: MessageEvent) => {

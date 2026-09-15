@@ -708,3 +708,73 @@ test('a reset time is not carried across to another window', async () => {
   })
   h.acp.stop()
 })
+
+/** An elicitation form from the fake agent; the turn's reply is the response
+ *  the agent was handed, so the assertion is on exactly what it got. */
+const FORM = JSON.stringify({
+  message: 'Tell me about it',
+  requestedSchema: {
+    type: 'object',
+    properties: {
+      style: { type: 'string', oneOf: [{ const: 'a', title: 'A' }, { const: 'b', title: 'B' }] },
+      note: { type: 'string', title: 'Anything else' },
+      count: { type: 'integer', minimum: 1 },
+      confirm: { type: 'boolean' },
+      tags: { type: 'array', items: { type: 'string', enum: ['x', 'y'] } },
+    },
+    required: ['style', 'count', 'confirm', 'tags'],
+  },
+})
+
+test('an elicitation form reaches the shell with every field and is accepted with typed answers', async () => {
+  const h = harness()
+  after(() => h.acp.stop())
+  await h.idle()
+  h.acp.prompt(`ELICIT ${FORM}`)
+  const asked = await h.until('the ask', (s) => !!s.ask)
+  assert.equal(asked.ask!.kind, 'question')
+  assert.equal(asked.ask!.title, 'Tell me about it')
+  assert.deepEqual(
+    asked.ask!.fields.map((f) => [f.key, f.kind, f.optional ?? false]),
+    [
+      ['style', 'select', false],
+      ['note', 'text', true],
+      ['count', 'number', false],
+      ['confirm', 'boolean', false],
+      ['tags', 'multiselect', false],
+    ],
+  )
+  // A half-answer is refused and the ask stays up.
+  assert.equal(h.acp.answer(asked.ask!.id, { style: 'a' }), false)
+  assert.ok(h.acp.snapshot().ask)
+  assert.equal(h.acp.answer(asked.ask!.id, { style: 'a', count: 2, confirm: true, tags: ['y'] }), true)
+  assert.equal(h.acp.snapshot().ask, undefined)
+  await h.until('the turn', () => h.turns.length === 1)
+  assert.deepEqual(JSON.parse(h.turns[0]!.reply), {
+    action: 'accept',
+    content: { style: 'a', count: 2, confirm: true, tags: ['y'] },
+  })
+})
+
+test('a declined form tells the agent so', async () => {
+  const h = harness()
+  after(() => h.acp.stop())
+  await h.idle()
+  h.acp.prompt(`ELICIT ${FORM}`)
+  const asked = await h.until('the ask', (s) => !!s.ask)
+  assert.equal(h.acp.decline(asked.ask!.id), true)
+  assert.equal(h.acp.decline(asked.ask!.id), false)
+  await h.until('the turn', () => h.turns.length === 1)
+  assert.deepEqual(JSON.parse(h.turns[0]!.reply), { action: 'decline' })
+})
+
+test('a form with a required field the shell cannot draw is declined without asking', async () => {
+  const h = harness()
+  after(() => h.acp.stop())
+  const form = JSON.stringify({
+    message: 'x',
+    requestedSchema: { properties: { blob: { type: 'object' } }, required: ['blob'] },
+  })
+  const turn = await h.ask(`ELICIT ${form}`)
+  assert.deepEqual(JSON.parse(turn.reply), { action: 'decline' })
+})

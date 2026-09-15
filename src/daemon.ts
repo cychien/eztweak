@@ -547,8 +547,12 @@ class SessionRuntime {
       })
   }
 
-  answerAcp(id: string, answers: Record<string, string>): boolean {
+  answerAcp(id: string, answers: unknown): boolean {
     return this.acp?.answer(id, answers) ?? false
+  }
+
+  declineAcp(id: string): boolean {
+    return this.acp?.decline(id) ?? false
   }
 
   /** The user picked a model, an effort level, a mode - whatever this agent
@@ -870,15 +874,21 @@ class SessionRuntime {
     })
 
     // SPIKE: the user answered the agent's question card in the shell.
+    // Either the answers, or `decline: true` for a question the user would
+    // rather not answer. The shape of the answers is the agent's to check
+    // against the fields it asked for; a mismatch reads as the question having
+    // moved on, which for the shell it has.
     api.post('/acp/answer', (req, res) => {
       const id = String(req.body?.id ?? '')
-      const answers = req.body?.answers as Record<string, string> | undefined
-      if (!id || typeof answers !== 'object' || answers === null) {
-        return res.status(400).json({ error: 'id and answers are required' })
-      }
-      if (!this.answerAcp(id, answers)) {
-        return res.status(409).json({ error: 'that question is no longer waiting' })
-      }
+      if (!id) return res.status(400).json({ error: 'id is required' })
+      const settled =
+        req.body?.decline === true
+          ? this.declineAcp(id)
+          : typeof req.body?.answers === 'object' && req.body.answers !== null
+            ? this.answerAcp(id, req.body.answers)
+            : null
+      if (settled === null) return res.status(400).json({ error: 'answers or decline is required' })
+      if (!settled) return res.status(409).json({ error: 'that question is no longer waiting' })
       res.json({ ok: true })
     })
 

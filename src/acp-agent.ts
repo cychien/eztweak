@@ -27,6 +27,13 @@ import {
   methods,
   ndJsonStream,
 } from '@agentclientprotocol/sdk'
+import {
+  type AcpAskAnswers,
+  type AcpAskField,
+  type ElicitationSchemaIn,
+  fieldsFromSchema,
+  validateAnswers,
+} from './acp-ask.js'
 import { type AcpConfigValue, configValues } from './acp-config.js'
 import { limitFrom, mergeLimit } from './usage-limit.js'
 import { killGroup, killTrackedAgents, trackAgent, untrackAgent } from './agent-children.js'
@@ -44,29 +51,22 @@ export type AcpFeedItem =
   | { kind: 'tool'; toolCallId: string; title: string; status: string }
   | { kind: 'plan'; entries: { content: string; status: string }[] }
 
-export interface AcpAskOption {
-  id: string
-  name: string
-  description?: string
-  /** Permission-option kind (allow_once, reject_once, ...) - styling hint. */
-  hint?: string
-}
-
-export interface AcpAskQuestion {
-  key: string
-  text?: string
-  options: AcpAskOption[]
-}
+export type { AcpAskAnswers, AcpAskField, AcpAskOption } from './acp-ask.js'
 
 /** A decision routed out of the agent, waiting on the user in the shell. A
- *  permission prompt is one question; an AskUserQuestion form can be several.
- *  Either way the shell answers with one option id per question key. */
+ *  permission prompt is one select; an elicitation form can be several fields of
+ *  several kinds. Either way the shell answers with one value per field key, or
+ *  declines the whole thing. */
 export interface AcpAsk {
   id: string
   kind: 'permission' | 'question'
   title: string
-  questions: AcpAskQuestion[]
+  fields: AcpAskField[]
 }
+
+/** How an ask was settled. `null` is a shutdown: nobody answered, the request
+ *  must still be released. */
+type AskOutcome = { answers: AcpAskAnswers } | { declined: true } | null
 
 /** One subscription window, as last reported.
  *
@@ -206,7 +206,7 @@ export class AcpAgent {
   private modeValue: string | null = null
   private limit: AcpLimit | null
   private ask: AcpAsk | null = null
-  private askResolve: ((answers: Record<string, string> | null) => void) | null = null
+  private askResolve: ((outcome: AskOutcome) => void) | null = null
   private askSeq = 0
   private cancelling = false
   /** Bumped whenever the live session is replaced. A turn, or an update, that
@@ -391,15 +391,28 @@ export class AcpAgent {
   }
 
   /** The user answered in the shell: one option id per question key. */
-  answer(id: string, answers: Record<string, string>): boolean {
+  /** The user's answers to the ask `id`, as the shell sent them. Refused - and
+   *  the ask left waiting - unless they are complete and well-typed for its
+   *  fields, so the agent is never handed a half-answer. */
+  answer(id: string, raw: unknown): boolean {
+    if (!this.ask || this.ask.id !== id) return false
+    const answers = validateAnswers(this.ask.fields, raw)
+    if (!answers) return false
+    return this.settle(id, { answers })
+  }
+
+  /** The user would rather not answer. The agent hears `decline`, which is its
+   *  cue to carry on without, instead of a turn that can only be cancelled. */
+  decline(id: string): boolean {
+    return this.settle(id, { declined: true })
+  }
+
+  private settle(id: string, outcome: AskOutcome): boolean {
     if (!this.ask || this.ask.id !== id || !this.askResolve) return false
-    if (!this.ask.questions.every((q) => q.options.some((o) => o.id === answers[q.key]))) {
-      return false
-    }
     const resolve = this.askResolve
     this.ask = null
     this.askResolve = null
-    resolve(answers)
+    resolve(outcome)
     this.opts.onChange()
     return true
   }
@@ -611,7 +624,7 @@ export class AcpAgent {
   /** Parks an ask and resolves with the user's answers - or null when the ask
    *  was settled by a shutdown. One at a time by protocol shape: the agent
    *  blocks on the request, so a second cannot arrive while one is pending. */
-  private pendAsk(ask: Omit<AcpAsk, 'id'>): Promise<Record<string, string> | null> {
+  private pendAsk(ask: Omit<AcpAsk, 'id'>): Promise<AskOutcome> {
     return new Promise((resolve) => {
       this.ask = { id: `ask-${++this.askSeq}`, ...ask }
       this.askResolve = resolve
@@ -622,61 +635,36 @@ export class AcpAgent {
   private async requestPermission(
     params: RequestPermissionRequest,
   ): Promise<RequestPermissionResponse> {
-    const answers = await this.pendAsk({
+    const field: AcpAskField = {
+      key: 'option',
+      kind: 'select',
+      options: params.options.map((o) => ({ id: o.optionId, name: o.name, hint: o.kind })),
+    }
+    const outcome = await this.pendAsk({
       kind: 'permission',
       title: params.toolCall.title ?? 'The agent needs a decision',
-      questions: [
-        {
-          key: 'option',
-          options: params.options.map((o) => ({ id: o.optionId, name: o.name, hint: o.kind })),
-        },
-      ],
+      fields: [field],
     })
-    const optionId = answers?.option
-    if (!optionId) return { outcome: { outcome: 'cancelled' } }
+    const optionId = outcome && 'answers' in outcome ? outcome.answers.option : undefined
+    if (typeof optionId !== 'string') return { outcome: { outcome: 'cancelled' } }
     return { outcome: { outcome: 'selected', optionId } }
   }
 
-  /** Form elicitation, the shape `claude-agent-acp` renders AskUserQuestion in:
-   *  an object schema of single-select string fields, each a titled `oneOf` of
-   *  option labels, with optional free-text companions. The spike answers the
-   *  selects and skips the rest; anything without options at all is declined
-   *  rather than parked on a card the user could never complete. */
+  /** Form elicitation: an object schema of primitive fields, which is also the
+   *  shape `claude-agent-acp` renders AskUserQuestion in. Every field kind the
+   *  protocol allows is drawn; a form with a required field the shell cannot
+   *  draw is declined rather than parked on a card the user could never
+   *  complete. URL-mode elicitation has no place in a review and is declined. */
   private async requestElicitation(
     params: CreateElicitationRequest,
   ): Promise<CreateElicitationResponse> {
     if (params.mode !== 'form') return { action: 'decline' }
-    const schema = params.requestedSchema as {
-      properties?: Record<
-        string,
-        {
-          title?: string
-          description?: string
-          oneOf?: { const?: unknown; title?: string; description?: string }[]
-        }
-      >
-    }
-    const questions: AcpAskQuestion[] = Object.entries(schema.properties ?? {}).flatMap(
-      ([key, field]) => {
-        const options = (field.oneOf ?? []).flatMap((o) =>
-          typeof o.const === 'string'
-            ? [{ id: o.const, name: o.title ?? o.const, ...(o.description ? { description: o.description } : {}) }]
-            : [],
-        )
-        if (!options.length) return []
-        return [
-          {
-            key,
-            ...(field.description ?? field.title ? { text: field.description ?? field.title } : {}),
-            options,
-          },
-        ]
-      },
-    )
-    if (!questions.length) return { action: 'decline' }
-    const answers = await this.pendAsk({ kind: 'question', title: params.message, questions })
-    if (!answers) return { action: 'cancel' }
-    return { action: 'accept', content: answers }
+    const fields = fieldsFromSchema(params.requestedSchema as ElicitationSchemaIn)
+    if (!fields) return { action: 'decline' }
+    const outcome = await this.pendAsk({ kind: 'question', title: params.message, fields })
+    if (!outcome) return { action: 'cancel' }
+    if ('declined' in outcome) return { action: 'decline' }
+    return { action: 'accept', content: outcome.answers }
   }
 
   /** Only ever called from `pump`, which has already established that the update

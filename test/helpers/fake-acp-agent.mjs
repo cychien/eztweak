@@ -242,6 +242,27 @@ const app = agent({ name: 'fake-acp-agent' })
       })
       return { stopReason: 'end_turn' }
     }
+    // Ask the user a form, the way AskUserQuestion reaches a client: the payload
+    // is `{ message, requestedSchema }` from the prompt, and the turn's reply is
+    // the client's answer verbatim - accept with its content, decline, or cancel -
+    // so a test sees exactly what the agent would have been handed.
+    const elicit = /ELICIT (\{.*\})/.exec(text)
+    if (elicit) {
+      prompts.push({ sessionId, text })
+      // Through the daemon the note arrives inside the batch's own JSON, quotes
+      // escaped; straight from a test it arrives bare. Either reads.
+      const { message, requestedSchema } = JSON.parse(
+        elicit[1].startsWith('{\\') ? elicit[1].replace(/\\"/g, '"') : elicit[1],
+      )
+      const response = await ctx.client.request(methods.client.elicitation.create, {
+        sessionId,
+        mode: 'form',
+        message,
+        requestedSchema,
+      })
+      await say(JSON.stringify(response))
+      return { stopReason: 'end_turn' }
+    }
     // A turn that ends properly having said nothing - an agent that only ran
     // tools, or whose skill did its work silently. The thread used to record
     // nothing at all for one of these.

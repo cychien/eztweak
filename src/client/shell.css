@@ -2535,6 +2535,68 @@ body.ez-arranging .ez-frame {
   border-color: var(--ink);
 }
 
+/* A typed field in an ask: the same box the option buttons sit in, drawn as an
+   input. The textarea grows with its content the way the note box does. */
+.ez-acp-field {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--foreground);
+  font-family: inherit;
+  font-size: 12.5px;
+  line-height: 1.45;
+  padding: 6px 8px;
+  resize: none;
+  outline: none;
+}
+
+.ez-acp-field:focus {
+  border-color: var(--ring);
+  outline: 3px solid var(--ring-halo);
+  outline-offset: 0;
+}
+
+.ez-acp-field:disabled {
+  opacity: 0.45;
+}
+
+.ez-acp-field-number {
+  width: 140px;
+}
+
+/* A choice and its own "Other" box, stacked as one control. */
+.ez-acp-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* `.ez-acp-opt` sets its own display, which would beat the UA's rule for the
+   attribute; the card hides its 送出 with `hidden` while picks send themselves. */
+.ez-acp-ask [hidden] {
+  display: none;
+}
+
+.ez-acp-ask-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+  margin-top: 10px;
+}
+
+.ez-acp-opt-primary {
+  background: var(--primary);
+  color: var(--primary-foreground);
+  border-color: var(--primary);
+}
+
+.ez-acp-opt-primary:disabled {
+  opacity: 0.35;
+}
+
 .ez-acp-turn {
   display: flex;
   flex-direction: column;
