@@ -91,6 +91,9 @@ const live = new Set(persisted?.live ?? [])
  *  transcript. A client that forks and then prompts is wrong, and this is what
  *  says so. */
 const unresumedForks = new Set()
+/** Sessions that have finished at least one turn, and so have something a fork
+ *  could copy. */
+const turned = new Set()
 /** Which session each fork was taken from, so a test can prove the copy was
  *  made from the conversation the review was actually on. */
 const forkedFrom = new Map()
@@ -234,6 +237,9 @@ const app = agent({ name: 'fake-acp-agent' })
     const { sessionId } = ctx.params
     log.push(`fork:${sessionId}`)
     if (refuseFork || !live.has(sessionId)) throw new Error(`cannot fork: ${sessionId}`)
+    // What the real agent does, and the reason /explore failed on fresh reviews:
+    // there is no transcript to copy until the session has been asked something.
+    if (!turned.has(sessionId)) throw new Error(`no transcript to fork: ${sessionId}`)
     const forked = `s${++everOpened}`
     live.add(forked)
     unresumedForks.add(forked)
@@ -249,6 +255,8 @@ const app = agent({ name: 'fake-acp-agent' })
     log.push(`resume:${sessionId}`)
     if (refuseResume || !live.has(sessionId)) throw new Error(`no such session: ${sessionId}`)
     unresumedForks.delete(sessionId)
+    // A resumed session came back with its transcript.
+    turned.add(sessionId)
     mcpBySession.set(sessionId, {
       names: (ctx.params.mcpServers ?? []).map((m) => m.name),
       servers: ctx.params.mcpServers ?? [],
@@ -273,6 +281,7 @@ const app = agent({ name: 'fake-acp-agent' })
     const { sessionId, prompt } = ctx.params
     // A forked session is not live until it has been resumed.
     if (unresumedForks.has(sessionId)) throw new Error(`Session not found: ${sessionId}`)
+    turned.add(sessionId)
     const text = prompt.map((b) => (b.type === 'text' ? b.text : '')).join('')
     const say = (t) =>
       ctx.client.notify(methods.client.session.update, {
@@ -399,6 +408,7 @@ const app = agent({ name: 'fake-acp-agent' })
       return { stopReason: 'end_turn' }
     }
     prompts.push({ sessionId, text })
+    turned.add(sessionId)
     log.push(`prompt:${sessionId}`)
     await say(`${sessionId}:${text}`)
     if (!text.includes('SLOW')) return { stopReason: 'end_turn' }

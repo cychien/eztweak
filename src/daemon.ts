@@ -706,6 +706,15 @@ class SessionRuntime {
    *  resumed session needs, since it comes back on the agent's own defaults. */
   async branchAcpChat(): Promise<boolean> {
     if (!this.acp?.canBranch) return false
+    // Nothing said yet means nothing to carry, and an agent refuses to fork a
+    // session with no transcript - which made `/explore` fail on every review
+    // that had not had a turn yet, which is most of them at the moment someone
+    // first reaches for it. A plain new chat is then not a degradation but the
+    // identical outcome: same empty context, same isolation from the review. The
+    // *parent* is still recorded, so 回主線 still goes back.
+    if (!this.acp.hasTranscript) {
+      return this.moveToChat(() => this.store.startBranch(undefined, undefined).id)
+    }
     const agent = this.acp.snapshot().agent
     const forked = await this.acp.forkSession()
     if (!forked) return false

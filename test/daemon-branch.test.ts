@@ -60,7 +60,7 @@ async function visible(port: number): Promise<string[]> {
   return (s.conversation ?? []).map((e) => `${e.role}:${e.text}`)
 }
 
-const chats = async (port: number): Promise<ChatWire[]> =>
+const chatsOf = async (port: number): Promise<ChatWire[]> =>
   ((await world.state(port)) as State).chats ?? []
 
 test('a branch is its own conversation, and the review comes back to the one it left', async () => {
@@ -81,7 +81,7 @@ test('a branch is its own conversation, and the review comes back to the one it 
   // on the main line is not in it - the *agent* has the history, the shell does
   // not pretend the user does.
   assert.deepEqual(await visible(port), [])
-  const onBranch = await chats(port)
+  const onBranch = await chatsOf(port)
   assert.equal(onBranch.find((c) => c.current)?.id, chatId)
   assert.equal(onBranch.find((c) => c.id === chatId)?.parentChatId, parentChatId)
 
@@ -102,20 +102,20 @@ test('a branch is its own conversation, and the review comes back to the one it 
 test('an agent that cannot branch is refused, and the review does not move', async () => {
   const port = await ready({ EZ_FAKE_NO_FORK: '1' })
   await send(port, 'on the main line')
-  const was = (await chats(port)).find((c) => c.current)?.id
+  const was = (await chatsOf(port)).find((c) => c.current)?.id
 
   const refused = await api(port, '/acp/branch')
   assert.equal(refused.status, 409)
   assert.match(((await refused.json()) as { error: string }).error, /cannot branch/)
 
-  assert.equal((await chats(port)).find((c) => c.current)?.id, was)
+  assert.equal((await chatsOf(port)).find((c) => c.current)?.id, was)
   assert.ok((await visible(port)).some((e) => e.includes('on the main line')))
 })
 
 test('a fork the agent takes and then fails leaves no half-made branch behind', async () => {
   const port = await ready({ EZ_FAKE_REFUSE_FORK: '1' })
   await send(port, 'on the main line')
-  const before = await chats(port)
+  const before = await chatsOf(port)
 
   assert.equal((await api(port, '/acp/branch')).status, 409)
 
@@ -123,8 +123,30 @@ test('a fork the agent takes and then fails leaves no half-made branch behind', 
   // the review on an empty conversation that looks like a branch and has none of
   // the history a branch is for.
   assert.deepEqual(
-    (await chats(port)).map((c) => c.id),
+    (await chatsOf(port)).map((c) => c.id),
     before.map((c) => c.id),
   )
   assert.ok((await visible(port)).some((e) => e.includes('on the main line')))
+})
+
+test('a review that has said nothing branches anyway, because there is nothing to carry', async () => {
+  const port = await ready()
+  // No turn first, which is where /explore actually failed: an agent refuses to
+  // fork a session with no transcript, and that is most reviews at the moment
+  // someone first reaches for it.
+  const branched = await api(port, '/acp/branch')
+  assert.equal(branched.status, 200)
+  const { chatId, parentChatId } = (await branched.json()) as {
+    chatId: string
+    parentChatId: string
+  }
+  assert.notEqual(chatId, parentChatId)
+
+  // A branch in every way that matters: its own thread, and a way back.
+  const chats = await chatsOf(port)
+  assert.equal(chats.find((c) => c.current)?.id, chatId)
+  assert.equal(chats.find((c) => c.id === chatId)?.parentChatId, parentChatId)
+  await send(port, 'only on the branch')
+  await api(port, '/acp/chat', { id: parentChatId })
+  assert.ok(!(await visible(port)).some((e) => e.includes('only on the branch')))
 })

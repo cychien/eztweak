@@ -178,7 +178,6 @@ export type AcpSessionStart = 'new' | 'resumed'
 
 const FEED_CAP = 100
 
-
 /** Tool titles quote absolute paths, and the sidebar is 340px wide: the project
  *  prefix is the part every one of them shares and says nothing. */
 function trimTitle(title: string, cwd: string): string {
@@ -233,6 +232,11 @@ export class AcpAgent {
   /** Set when the agent advertises `session/fork`, which is what lets an explore
    *  run on a copy of the conversation instead of in it. */
   private canFork = false
+  /** Turns the *live* session has finished. Reset with the session, because what
+   *  it answers is whether this session has a transcript - which is what both
+   *  resume and fork need, and neither can be given by a session that has never
+   *  been asked anything. */
+  private sessionTurns = 0
   /** Resolved when the agent is done, and nothing else: it is what holds the
    *  connection open, so a session swap must not disturb it. */
   private finish: (() => void) | null = null
@@ -447,6 +451,18 @@ export class AcpAgent {
     return this.canFork && this.canResume
   }
 
+  /** Whether the live session has anything for a fork to copy.
+   *
+   *  Measured, and the reason `/explore` failed on every fresh review: an agent
+   *  refuses `session/fork` on a session that has had no turn, because there is
+   *  no transcript to make a copy of - the same property `session/resume` has,
+   *  which this codebase already relies on elsewhere. A caller that wants a
+   *  branch has to know the difference between "nothing to carry" and "the agent
+   *  would not", because they call for different answers. */
+  get hasTranscript(): boolean {
+    return this.sessionTurns > 0
+  }
+
   /** Whether this agent will reach an MCP server eztweak serves over HTTP,
    *  which is the only way it can be given a tool of eztweak's. */
   get servesMcpHttp(): boolean {
@@ -583,6 +599,9 @@ export class AcpAgent {
     }
     const session = this.router.attach(ctx, sessionId)
     this.session = session
+    // A resumed session carries its transcript; a fresh one has none until it is
+    // asked something.
+    this.sessionTurns = how === 'resumed' ? 1 : 0
     // Baseline, not a change: this is a different conversation's options.
     this.modeValue = null
     this.setConfigOptions(configOptions)
@@ -665,6 +684,7 @@ export class AcpAgent {
   private turnEnded(stopReason: string, epoch: number): void {
     if (epoch !== this.epoch || this.state !== 'working') return
     this.state = 'idle'
+    this.sessionTurns += 1
     this.cancelling = false
     // The reply is the said segments of the feed, in order. Everything between
     // them - the tool runs - is what the paragraphs are narrating, so joining
@@ -763,8 +783,7 @@ export class AcpAgent {
       case 'plan': {
         const entries = update.entries.map((e) => ({ content: e.content, status: e.status }))
         const existing = this.feed.find((f) => f.kind === 'plan') as
-          | Extract<AcpFeedItem, { kind: 'plan' }>
-          | undefined
+          Extract<AcpFeedItem, { kind: 'plan' }> | undefined
         if (existing) existing.entries = entries
         else this.feed.push({ kind: 'plan', entries })
         break

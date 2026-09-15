@@ -646,13 +646,12 @@ export class SessionStore {
    *  what makes the reopen that follows a *resume of the copy* rather than a
    *  fresh start. The order matters - the store moves first, because what the
    *  agent opens is read back off it. */
-  startBranch(acpSessionId: string, agent: string): Chat {
+  startBranch(acpSessionId: string | undefined, agent: string | undefined): Chat {
     const chat: Chat = {
       id: newId(),
       startedAt: Date.now(),
       parentChatId: this.currentChat.id,
-      acpSessionId,
-      agent,
+      ...(acpSessionId && agent ? { acpSessionId, agent } : {}),
     }
     this.patchSession({ chats: [...this.chats, chat], currentChatId: chat.id })
     return chat
