@@ -19,7 +19,7 @@ import { spawn } from 'node:child_process'
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { AcpLimit } from './acp-agent.js'
+import type { AcpLimit, AcpUsageWindow } from './acp-agent.js'
 import { agentProfileFor } from './agents.js'
 import { askCodex } from './codex-app-server.js'
 import { DATA_DIR } from './constants.js'
@@ -37,17 +37,25 @@ function read(): Remembered {
   }
 }
 
-/** The last figure for this agent, if it still describes the window it names.
- *
- *  Both fields are checked, not just read: this file outlives the version that
- *  wrote it, and a figure from a shape that has since changed would otherwise
- *  reach the shell as a window with no length - "剩 58% / undefined". */
+/** Whether a window is still worth showing: readable, and not already rolled
+ *  over. Every field is checked rather than read, because this shape arrives from
+ *  a file that outlives the version that wrote it - and half a window reaches the
+ *  shell as a row with no length on it. */
+function live(window: AcpUsageWindow | undefined, now: number): boolean {
+  if (!window || typeof window.remaining !== 'number') return false
+  if (typeof window.windowMinutes !== 'number' || window.windowMinutes <= 0) return false
+  if (window.model !== undefined && typeof window.model !== 'string') return false
+  return window.resetsAt === undefined || window.resetsAt * 1000 > now
+}
+
+/** The last figures for this agent, minus any window that has since rolled over -
+ *  a spent percentage from a window that has reset is not stale, it is wrong.
+ *  Nothing readable left is nothing to show. */
 export function rememberedLimit(command: string, now = Date.now()): AcpLimit | undefined {
   const limit = read()[command]
-  if (!limit || typeof limit.remaining !== 'number') return undefined
-  if (typeof limit.windowMinutes !== 'number' || limit.windowMinutes <= 0) return undefined
-  if (limit.resetsAt !== undefined && limit.resetsAt * 1000 <= now) return undefined
-  return limit
+  const windows = (Array.isArray(limit?.windows) ? limit.windows : []).filter((w) => live(w, now))
+  if (!windows.length) return undefined
+  return { ...limit, windows }
 }
 
 export function rememberLimit(command: string, limit: AcpLimit): void {
@@ -67,15 +75,65 @@ const ONE_WEEK = 7 * 24 * 60
  *  Clamped, because a used share runs past 1 on an account into its overage and a
  *  negative remainder is not a thing to show anyone. Rounded because `1 - 0.42` is
  *  `0.5800000000000001` in binary, and that lands in a file a person can open. */
-function window(windowMinutes: number, used: number, resetsAt: unknown): AcpLimit {
+function window(
+  windowMinutes: number,
+  used: number,
+  resetsAt: unknown,
+  model?: string,
+): AcpUsageWindow {
   return {
     windowMinutes,
     remaining: Math.round(Math.min(1, Math.max(0, 1 - used)) * 1e4) / 1e4,
     ...(typeof resetsAt === 'number' && Number.isFinite(resetsAt) ? { resetsAt } : {}),
+    ...(model ? { model } : {}),
   }
 }
 
-/** Claude's rate-limit report, as the window that empties first.
+/** The windows in the order they are read in: the account's own first, shortest
+ *  first within each group. The account's allowance is what "am I about to run
+ *  out" means; one model's weekly share is a footnote to it. */
+function ordered(windows: AcpUsageWindow[], plan?: string): AcpLimit {
+  return {
+    windows: [...windows].sort(
+      (a, b) => Number(!!a.model) - Number(!!b.model) || a.windowMinutes - b.windowMinutes,
+    ),
+    ...(plan ? { plan } : {}),
+  }
+}
+
+function report(windows: AcpUsageWindow[], plan?: string): AcpLimit | null {
+  return windows.length ? ordered(windows, plan) : null
+}
+
+/** A fresh report laid over the one being held.
+ *
+ *  Window by window rather than wholesale, because the two channels see different
+ *  things. The pushed bag types the reset times properly but knows only the
+ *  account's two windows; the text read sees every window - the per-model one
+ *  included - and can fail to date any of them. Swapping one report for the other
+ *  outright would drop a row out of the card every time the other channel spoke,
+ *  and lose the reset time with it.
+ *
+ *  So: a window the fresh report names wins, keeping the reset time it did not
+ *  bring, and one only the held report knows about stays until it rolls over. */
+export function mergeLimit(
+  held: AcpLimit | undefined | null,
+  fresh: AcpLimit,
+  now = Date.now(),
+): AcpLimit {
+  const key = (w: AcpUsageWindow): string => `${w.windowMinutes}|${w.model ?? ''}`
+  const kept = new Map((held?.windows ?? []).filter((w) => live(w, now)).map((w) => [key(w), w]))
+  const windows = fresh.windows.map((w) => {
+    const before = kept.get(key(w))
+    kept.delete(key(w))
+    return w.resetsAt === undefined && before?.resetsAt !== undefined
+      ? { ...w, resetsAt: before.resetsAt }
+      : w
+  })
+  return ordered([...windows, ...kept.values()], fresh.plan ?? held?.plan)
+}
+
+/** Claude's pushed rate-limit report: the account's two windows, properly typed.
  *
  *  Read defensively. Both callers hand this a vendor payload - one off a
  *  `usage_update._meta` bag, one off a line of the CLI's own JSON stream - so
@@ -84,36 +142,38 @@ function window(windowMinutes: number, used: number, resetsAt: unknown): AcpLimi
 export function limitFrom(info: unknown): AcpLimit | null {
   const windows = (info as { unifiedWindows?: Record<string, unknown> })?.unifiedWindows
   if (!windows || typeof windows !== 'object') return null
+  const found: AcpUsageWindow[] = []
   for (const [name, minutes] of [
     ['five_hour', FIVE_HOURS],
     ['seven_day', ONE_WEEK],
   ] as const) {
-    const found = windows[name] as { utilization?: unknown; resetsAt?: unknown } | undefined
-    if (!found || typeof found.utilization !== 'number' || !Number.isFinite(found.utilization)) {
-      continue
-    }
-    return window(minutes, found.utilization, found.resetsAt)
+    const slot = windows[name] as { utilization?: unknown; resetsAt?: unknown } | undefined
+    if (!slot || typeof slot.utilization !== 'number' || !Number.isFinite(slot.utilization)) continue
+    found.push(window(minutes, slot.utilization, slot.resetsAt))
   }
-  return null
+  return report(found)
 }
 
 /** Codex's rate-limit report, from `account/rateLimits/read` on its app-server.
  *
  *  Two unnamed windows rather than Claude's named pair, each carrying its own
- *  length, so the shortest one is picked rather than a fixed order assumed. */
+ *  length, so neither is assumed to be the short one. The payload carries a good
+ *  deal more - credits, spend controls, reset vouchers - and the plan is the one
+ *  part of it that says anything about the figures beside it. */
 export function codexLimitFrom(result: unknown): AcpLimit | null {
   const limits = (result as { rateLimits?: Record<string, unknown> })?.rateLimits
   if (!limits || typeof limits !== 'object') return null
-  const found: AcpLimit[] = []
+  const found: AcpUsageWindow[] = []
   for (const key of ['primary', 'secondary'] as const) {
     const slot = limits[key] as
-      { usedPercent?: unknown; windowDurationMins?: unknown; resetsAt?: unknown } | undefined
-    if (!slot || typeof slot.usedPercent !== 'number' || !Number.isFinite(slot.usedPercent))
-      continue
+      | { usedPercent?: unknown; windowDurationMins?: unknown; resetsAt?: unknown }
+      | undefined
+    if (!slot || typeof slot.usedPercent !== 'number' || !Number.isFinite(slot.usedPercent)) continue
     if (typeof slot.windowDurationMins !== 'number' || slot.windowDurationMins <= 0) continue
     found.push(window(slot.windowDurationMins, slot.usedPercent / 100, slot.resetsAt))
   }
-  return found.sort((a, b) => a.windowMinutes - b.windowMinutes)[0] ?? null
+  const plan = (limits as { planType?: unknown }).planType
+  return report(found, typeof plan === 'string' ? plan : undefined)
 }
 
 /** Codex's own figure, asked for directly.
@@ -126,6 +186,8 @@ export function codexLimitFrom(result: unknown): AcpLimit | null {
 async function readCodexLimit(binary: string): Promise<AcpLimit | undefined> {
   return codexLimitFrom(await askCodex(binary, 'account/rateLimits/read', null)) ?? undefined
 }
+
+const ALL_MODELS = 'all models'
 
 const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec']
 
@@ -174,24 +236,31 @@ function resetEpoch(rendered: string | undefined, now: number): number | undefin
  *  would mean a review that has not taken a turn yet shows a bare percentage,
  *  which is the half of the answer nobody asked for.
  *
+ *  This is also the only place the per-model weekly lines exist: the pushed bag
+ *  names the account's two windows and stops there. They are read as what they
+ *  are - one model's share, labelled with the model - rather than folded into the
+ *  account's figure, which would be a wrong number shown confidently.
+ *
  *  Wording drift costs a figure, not a crash: nothing matches, nothing is
  *  reported, and the push channel still fills the line in on the next turn. The
- *  percentage and the time drift apart, too - an unreadable date still leaves a
- *  readable percentage. */
+ *  parts drift apart independently, too - an unreadable date still leaves a
+ *  readable percentage, and an unreadable line leaves the others. */
 export function claudeLimitFromUsageText(text: string, now = Date.now()): AcpLimit | null {
-  const found: AcpLimit[] = []
-  for (const [pattern, minutes] of [
-    [/^Current session:\s*([\d.]+)% used(?:[^\n]*?resets\s+([^\n]+))?/m, FIVE_HOURS],
-    // Anchored on "all models" so the per-model weekly lines below it - which
-    // limit one model rather than the account - are not read as the account's.
-    [/^Current week \(all models\):\s*([\d.]+)% used(?:[^\n]*?resets\s+([^\n]+))?/m, ONE_WEEK],
-  ] as const) {
-    const line = pattern.exec(text)
-    const used = Number(line?.[1])
-    if (!Number.isFinite(used)) continue
-    found.push(window(minutes, used / 100, resetEpoch(line?.[2], now)))
+  const found: AcpUsageWindow[] = []
+  const session = /^Current session:\s*([\d.]+)% used(?:[^\n]*?resets\s+([^\n]+))?/m.exec(text)
+  if (session && Number.isFinite(Number(session[1]))) {
+    found.push(window(FIVE_HOURS, Number(session[1]) / 100, resetEpoch(session[2], now)))
   }
-  return found.sort((a, b) => a.windowMinutes - b.windowMinutes)[0] ?? null
+  const weekly = /^Current week \(([^)]+)\):\s*([\d.]+)% used(?:[^\n]*?resets\s+([^\n]+))?/gm
+  for (const line of text.matchAll(weekly)) {
+    const used = Number(line[2])
+    if (!Number.isFinite(used)) continue
+    // "all models" is the account's week. Every other name is one model's own
+    // share of it, which is a different allowance and is labelled as one.
+    const model = line[1] === ALL_MODELS ? undefined : line[1]
+    found.push(window(ONE_WEEK, used / 100, resetEpoch(line[3], now), model))
+  }
+  return report(found)
 }
 
 async function readClaudeLimit(binary: string): Promise<AcpLimit | undefined> {

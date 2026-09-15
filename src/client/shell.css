@@ -738,7 +738,9 @@ body.ez-arranging .ez-frame {
   box-shadow:
     0 12px 32px oklch(0% 0 0 / 0.12),
     0 2px 8px oklch(0% 0 0 / 0.06);
-}/* Open. Every control that hangs a menu marks itself `data-open`, and this is the
+}
+
+/* Open. Every control that hangs a menu marks itself `data-open`, and this is the
    one rule that shows one - so a selector lost from this list is that control
    silently ceasing to open at all. */
 .ez-seg-device[data-open] .ez-menu,
@@ -1852,22 +1854,179 @@ body.ez-arranging .ez-frame {
   color: var(--ink-muted);
 }
 
-/* Pushed to the end of the row, and deliberately the quietest thing on it: this
-   is a figure to glance at, not a control. Tabular digits so a number ticking
-   down does not shift the words beside it. */
-.ez-limit {
+/* Pushed to the end of the row, and the containing block its card hangs from. */
+.ez-usage {
+  position: relative;
   margin-left: auto;
   flex-shrink: 0;
+  display: flex;
+}
+
+.ez-usage[hidden] {
+  display: none;
+}
+
+/* Deliberately the quietest thing on the row: a figure to glance at. It is a
+   button because it can be reached and read by keyboard, not because it does
+   anything - so it is styled as the text it was, and only the cursor and the ink
+   lifting under the pointer say there is more behind it. Tabular digits so a
+   number ticking down does not shift the words beside it. */
+.ez-limit {
+  appearance: none;
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
   color: var(--ink-faint);
+  font: inherit;
   font-size: 11px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
   transform: translateY(1px);
+  transition: color 0.12s ease;
 }
 
-.ez-limit[hidden] {
-  display: none;
+.ez-usage:hover .ez-limit,
+.ez-limit:focus-visible {
+  color: var(--ink-muted);
+}
+
+/* Everything the agent said, the way `/usage` and `/status` print it: one row per
+   window, each with what is left of it and when it comes back.
+
+   Hung off the right, above the line. Right, because the pill sits in the corner
+   and a card dropped from its left edge would hang off the sidebar; above,
+   because below is the composer.
+
+   Held open by the pointer being anywhere over the pill *or* the card - both are
+   inside `.ez-usage`, so one `:hover` covers the gap between them - and by focus,
+   which is what makes it reachable without a pointer at all. */
+.ez-usage-card {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  right: 0;
+  z-index: 5;
+  width: max-content;
+  min-width: 208px;
+  padding: 10px 12px 11px;
+  border-radius: 10px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  box-shadow:
+    0 12px 32px oklch(0% 0 0 / 0.12),
+    0 2px 8px oklch(0% 0 0 / 0.06);
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(3px);
+  transition:
+    opacity 0.12s ease,
+    transform 0.12s ease,
+    visibility 0s linear 0.12s;
+}
+
+/* The delay on the way in is the whole reason this is bearable: the pill sits on
+   the path from the thread to the composer, and a card that opened the instant a
+   pointer crossed it would be in the way of every third thing the user does. On
+   the way out there is no delay at all - a card nobody is pointing at has nothing
+   to wait for. */
+.ez-usage:hover .ez-usage-card,
+.ez-usage:focus-within .ez-usage-card {
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(0);
+  transition:
+    opacity 0.12s ease 0.22s,
+    transform 0.12s ease 0.22s,
+    visibility 0s linear 0.22s;
+}
+
+.ez-usage-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 9px;
+}
+
+.ez-usage-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+/* The subscription the figures are of. Only codex says which, so this is often
+   simply not there. */
+.ez-usage-plan {
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--ink-faint);
+}
+
+.ez-usage-row + .ez-usage-row {
+  margin-top: 9px;
+}
+
+.ez-usage-line {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+
+.ez-usage-label {
+  color: var(--ink-muted);
+}
+
+.ez-usage-left {
+  color: var(--ink);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The bar fills with what is *left*, not what is spent, so it says the same thing
+   as the number beside it. A bar that filled up as the allowance drained would
+   contradict the words it sits under. */
+.ez-usage-bar {
+  margin-top: 5px;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+/* Muted, not ink: at four pixels tall and nearly the width of the card, a bar in
+   full ink stops reading as a measure and starts reading as a rule drawn across
+   the row. */
+.ez-usage-bar i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--ink-muted);
+}
+
+/* Little enough left that the row should say so without being read. */
+.ez-usage-row[data-low] .ez-usage-bar i {
+  background: var(--mark);
+}
+
+.ez-usage-row[data-low] .ez-usage-left {
+  color: var(--mark);
+}
+
+.ez-usage-when {
+  margin-top: 3px;
+  font-size: 10.5px;
+  color: var(--ink-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ez-usage-card {
+    transform: none;
+  }
 }
 
 .ez-agent-name {

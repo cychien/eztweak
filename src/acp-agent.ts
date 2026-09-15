@@ -28,7 +28,7 @@ import {
   ndJsonStream,
 } from '@agentclientprotocol/sdk'
 import { type AcpConfigValue, configValues } from './acp-config.js'
-import { limitFrom } from './usage-limit.js'
+import { limitFrom, mergeLimit } from './usage-limit.js'
 import { killGroup, killTrackedAgents, trackAgent, untrackAgent } from './agent-children.js'
 import { type AttachedSession, SessionRouter } from './acp-session.js'
 
@@ -68,20 +68,36 @@ export interface AcpAsk {
   questions: AcpAskQuestion[]
 }
 
-/** The subscription window the review will run out of first, as last reported.
+/** One subscription window, as last reported.
  *
  *  The window is its length rather than a name, because the two vendors describe
  *  theirs differently - Claude names them (`five_hour`, `seven_day`), codex gives
- *  a duration in minutes - and a length is what both mean. It is also what the
- *  choice between them is made on: the shortest window is the one a reviewer runs
- *  into this afternoon. */
-export interface AcpLimit {
+ *  a duration in minutes - and a length is what both mean. */
+export interface AcpUsageWindow {
   /** How long the window is, in minutes. */
   windowMinutes: number
   /** Share of the window still unused, 0-1. */
   remaining: number
   /** When the window rolls over, in unix seconds. */
   resetsAt?: number
+  /** Whose allowance this is, when it is not the whole account's: Claude reports
+   *  a weekly window per model beside the account's own, and a model's figure
+   *  presented as the account's would be a wrong number shown confidently. */
+  model?: string
+}
+
+/** Everything an agent will say about the account's allowance.
+ *
+ *  Every window, not the tightest one: the row above the composer has space for
+ *  one figure, but the question behind it - "what exactly is running out" - is
+ *  answered by the whole set, so the whole set is carried and the shell decides
+ *  what to put on the line and what to keep for the card. */
+export interface AcpLimit {
+  /** Account-wide windows first, each set shortest-first. Never empty. */
+  windows: AcpUsageWindow[]
+  /** The subscription behind the figures, in the vendor's own word - "plus",
+   *  "pro" - when it says. Only codex does. */
+  plan?: string
 }
 
 export interface AcpSnapshot {
@@ -99,9 +115,9 @@ export interface AcpSnapshot {
    *  the options it knows would have to be taught each new one; this one only
    *  has to be taught how to *draw* a select and a boolean. */
   configOptions?: SessionConfigOption[]
-  /** The usage window this review will hit first, when the agent has said.
-   *  Absent until it does, which can be the whole of a short session - see
-   *  `onUpdate`. */
+  /** What the agent has said about the account's allowance, when it has said
+   *  anything. Absent until it does, which can be the whole of a short session -
+   *  see `onUpdate`. */
   limit?: AcpLimit
   /** A cancel is out and the agent has not yet said the turn is over. The button
    *  that sent it has to stop offering to send it again. */
@@ -258,19 +274,10 @@ export class AcpAgent {
   }
 
   /** A figure read outside the protocol - see `readLimit`. Always the newer of
-   *  the two, since it was asked for just now and a pushed one may be a turn old.
-   *
-   *  It carries no reset time, which only the push channel types properly, so the
-   *  one already held is kept when it still describes the same window - a reset
-   *  time in the future is proof the window it belongs to has not rolled over. */
+   *  the two, since it was asked for just now and a pushed one may be a turn old,
+   *  but never the whole picture on its own: see `mergeLimit`. */
   seedLimit(limit: AcpLimit): void {
-    const held = this.limit
-    const keepsResetTime =
-      limit.resetsAt === undefined &&
-      held?.resetsAt !== undefined &&
-      held.windowMinutes === limit.windowMinutes &&
-      held.resetsAt * 1000 > Date.now()
-    this.limit = keepsResetTime ? { ...limit, resetsAt: held.resetsAt } : limit
+    this.limit = mergeLimit(this.limit, limit)
     this.opts.onChange()
   }
 
@@ -724,8 +731,9 @@ export class AcpAgent {
       // shows nothing until something arrives - there is no way to ask.
       case 'usage_update': {
         const bag = update._meta as { '_claude/rateLimit'?: unknown } | undefined
-        const limit = limitFrom(bag?.['_claude/rateLimit'])
-        if (!limit) return
+        const pushed = limitFrom(bag?.['_claude/rateLimit'])
+        if (!pushed) return
+        const limit = mergeLimit(this.limit, pushed)
         this.limit = limit
         this.opts.onLimitChange?.(limit)
         this.opts.onChange()

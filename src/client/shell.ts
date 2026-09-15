@@ -27,7 +27,7 @@ import {
 } from '../acp-config.js'
 import { attachify } from './attach.js'
 import { confirmSkipped, rememberConfirm } from './confirm-skip.js'
-import { type UsageLimit, usageNote } from './usage-note.js'
+import { type Usage, planName, usageNote, usageRows } from './usage-note.js'
 import type { SlashCommand } from './slash.js'
 import type { Device, Size } from './devices.js'
 import {
@@ -168,7 +168,7 @@ interface AcpWire {
   configOptions?: SessionConfigOption[]
   /** The usage window this review will reach first, when the agent has said so.
    *  Absent until then, which can be for a whole session. */
-  limit?: UsageLimit
+  limit?: Usage
   /** A cancel is out and the turn has not ended yet. */
   cancelling?: true
   error?: string
@@ -1340,15 +1340,23 @@ configWrap.append(configPill, configMenu)
 /** How much of the subscription is left, at the end of the row the agent and the
  *  model are on.
  *
- *  One window, not both: the question a reviewer has is when the reviewing stops,
- *  and the answer to that is whichever window empties first. Five-hourly when
- *  there is one, weekly otherwise - see `readLimit`.
+ *  One window on the line, because there is room for one: whichever the review
+ *  runs into first - see `tightestWindow`. Everything the agent reported is a
+ *  hover away, the way `/usage` and `/status` print it, because "剩 88%" invites
+ *  exactly one follow-up question and the answer is already in hand.
  *
- *  Text, not a control: nothing here can be clicked, and nothing here can be
- *  asked for either. The agent reports this when it reports it, so the row simply
- *  has no figure on it until one arrives. */
-const limitNote = h('span', 'ez-limit')
-limitNote.hidden = true
+ *  A hover card, not a menu: there is nothing in it to choose, so it opens on the
+ *  pointer and on focus rather than on a click - which is also why the pill has no
+ *  `title`. A native tooltip would open on top of the card that replaced it. */
+const limitPill = h('button', 'ez-limit')
+limitPill.type = 'button'
+limitPill.setAttribute('aria-describedby', 'ez-usage-card')
+const limitCard = h('div', 'ez-usage-card')
+limitCard.id = 'ez-usage-card'
+limitCard.setAttribute('role', 'tooltip')
+const limitWrap = h('div', 'ez-usage')
+limitWrap.hidden = true
+limitWrap.append(limitPill, limitCard)
 
 /** An answer the review needs before it does something it cannot undo.
  *
@@ -1535,7 +1543,7 @@ function askConfirm(offer: ConfirmOffer): Promise<boolean> {
 /** The agent and its model, on one line above the composer. */
 const controlRow = h('div', 'ez-control-row')
 controlRow.hidden = true
-controlRow.append(agentWrap, configWrap, limitNote)
+controlRow.append(agentWrap, configWrap, limitWrap)
 
 queueSection.append(queueScroll, controlRow, noteAttach.wrap, sendBtn)
 
@@ -2546,13 +2554,38 @@ function pillOption(options: SessionConfigOption[]): SessionConfigOption | undef
   return options.find((o) => o.category === 'model') ?? options[0]
 }
 
+/** The line, and the card behind it. Rebuilt whole on every snapshot: it is four
+ *  rows of text with nothing to preserve between paints - no focus, no scroll, no
+ *  selection - and the figures on it move on their own. */
 function paintLimit(acp: AcpWire | undefined): void {
   const limit = acp?.limit
-  limitNote.hidden = !limit
-  if (!limit) return
-  const note = usageNote(limit)
-  limitNote.textContent = note.text
-  limitNote.title = note.title
+  const line = usageNote(limit)
+  limitWrap.hidden = !line
+  if (!line) return
+  limitPill.textContent = line
+
+  const plan = planName(limit?.plan)
+  const head = h('div', 'ez-usage-head')
+  head.append(h('span', 'ez-usage-title', '用量'))
+  if (plan) head.append(h('span', 'ez-usage-plan', plan))
+
+  limitCard.replaceChildren(head)
+  for (const row of usageRows(limit)) {
+    const top = h('div', 'ez-usage-line')
+    top.append(
+      h('span', 'ez-usage-label', row.label),
+      h('span', 'ez-usage-left', `剩 ${row.percent}%`),
+    )
+    const fill = h('i')
+    fill.style.width = `${row.percent}%`
+    const bar = h('div', 'ez-usage-bar')
+    bar.append(fill)
+    const item = h('div', 'ez-usage-row')
+    if (row.low) item.dataset.low = ''
+    item.append(top, bar)
+    if (row.when) item.append(h('div', 'ez-usage-when', row.when))
+    limitCard.append(item)
+  }
 }
 
 function paintConfig(acp: AcpWire | undefined): void {

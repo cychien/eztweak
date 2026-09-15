@@ -527,12 +527,20 @@ were each checked and ruled out:
 - `GET /api/oauth/usage`, the endpoint the TUI itself uses, would mean reading the user's Claude
   OAuth credentials and depending on a private endpoint, in a tool that is otherwise agent-agnostic.
 
-The cost is parsing rendered text. Only the two percentages are read - `Current session:` and
-`Current week (all models):` - and the reset times are deliberately left alone: a date rendered as
-"Sep 15 at 4:30pm (Asia/Taipei)" is far more fragile to read than "52% used", and it arrives
-properly typed on the push channel anyway. Wording drift therefore costs a figure, never a wrong
-one. The `(all models)` anchor matters: a per-model weekly line sits directly below and reads almost
-the same, and taking its 3% for the account's would be a wrong number shown confidently.
+The cost is parsing rendered text, and every line of it is read: `Current session:`, `Current week
+(all models):`, and each `Current week (<model>):` below them, with the reset time on the end of
+each. The reset time is read despite a rendered date being far more fragile than "52% used",
+because it is what the shell puts on screen - "剩 91% 直到 18:30" - and leaving it to the push
+channel would mean a review that has not taken a turn yet shows a bare percentage. It is read in
+local time and only when the zone the CLI printed is this machine's; a zone that says otherwise is
+read as no time rather than one off by hours, and the year, which is not printed at all, is the one
+that puts the reset in the future.
+
+Wording drift therefore costs a figure, never a wrong one, and the parts drift independently: an
+unreadable date still leaves a readable percentage, and an unreadable line leaves the others. The
+`(all models)` distinction matters: a per-model weekly line sits directly below the account's and
+reads almost the same, so it is carried as the model's own - labelled with it - rather than folded
+into the account's figure, which would be a wrong number shown confidently.
 
 **Codex: `account/rateLimits/read`.** See above - a local JSON-RPC, 770-830ms, no model turn.
 
@@ -542,20 +550,31 @@ burst of short turns cannot turn a free read into a loop against a backend - the
 CLI throttles its own rate-limit reporting on.
 
 Claude's push channel is kept on top of that. It costs nothing, it updates the figure mid-turn, and
-it is the only typed source of a reset time - which `seedLimit` carries forward across a read that
-lacks it, but only while that time is still in the future, since a reset time in the past describes
-a window nobody is in any more.
+it types the reset times properly - but it names only the account's two windows, where the text read
+sees every one. So the two are merged window by window rather than one replacing the other
+(`mergeLimit`): a window the newer report names wins and inherits the reset time it did not bring,
+and a window only the older one knew about is kept until it rolls over. Without that, a row would
+drop out of the card every time the other channel spoke. A reset time in the past describes a window
+nobody is in any more, so it is never carried forward and never shown.
 
 **Remembered** in `usage-limits.json`, per agent command, so the line is never blank while the first
 read of a session is in flight. Dropped once the window it names has rolled over, or when it was
 written by a shape this version no longer understands.
 
-Checked against the TUI's own `/usage` throughout: 42% used, resets 4:30pm - the shell read
-`剩 58% / 5 小時` with the same reset time, having taken no turn in the review. The codex path was
-checked end to end through a daemon of its own: `剩 95% / 5 小時`, no turn.
+Checked against the TUI's own `/usage` throughout: the shell read `剩 82% 直到 04:20` with the same
+reset time, having taken no turn in the review, and the card behind it carried all three windows the
+TUI prints. The codex path was checked end to end the same way: `剩 100% 直到 05:47`, both windows
+and the plan, no turn.
 
-### Why one figure and not one per model
+### One figure on the line, all of them behind it
 
-The limit is account-wide. Drawing it per model row would say the rows have separate budgets, which
-is the opposite of true. One line, showing whichever window empties first - five-hourly when the
-account has one, weekly otherwise.
+The row above the composer has space for one number, and the one worth having there is the account's
+shortest window - the one a reviewer runs into this afternoon, not the one they plan a week around.
+A single model's weekly share never speaks for the account: it describes an allowance the reviewer
+can walk away from by switching models.
+
+But "剩 82%" invites exactly one follow-up question, and the answer is already in hand, so hovering
+the figure opens a card with every window the agent reported - the same thing `/usage` and `/status`
+print, one row each, with what is left and when it comes back. What is *not* drawn is a figure per
+row of the model menu: the account's allowance is not a per-model budget, and putting it beside each
+model would say it is.

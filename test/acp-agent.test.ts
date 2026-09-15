@@ -579,30 +579,35 @@ function limitPrompt(meta: unknown): string {
 
 const RATE_LIMIT = (windows: unknown) => ({ '_claude/rateLimit': { unifiedWindows: windows } })
 
-test('the window that empties first is the one reported', async () => {
+const WEEKLY: AcpLimit = { windows: [{ windowMinutes: 10080, remaining: 0.33 }] }
+
+test('every window the bag names is reported, shortest first', async () => {
   const h = harness()
   await h.idle()
   await h.ask(
     limitPrompt(
       RATE_LIMIT({
-        five_hour: { utilization: 0.38, resetsAt: 1757900000 },
         seven_day: { utilization: 0.12, resetsAt: 1758400000 },
+        five_hour: { utilization: 0.38, resetsAt: 1757900000 },
       }),
     ),
   )
   assert.deepEqual(h.acp.snapshot().limit, {
-    windowMinutes: 300,
-    remaining: 0.62,
-    resetsAt: 1757900000,
+    windows: [
+      { windowMinutes: 300, remaining: 0.62, resetsAt: 1757900000 },
+      { windowMinutes: 10080, remaining: 0.88, resetsAt: 1758400000 },
+    ],
   })
   h.acp.stop()
 })
 
-test('an account with no five-hour window falls back to the weekly one', async () => {
+test('an account with no five-hour window reports the weekly one alone', async () => {
   const h = harness()
   await h.idle()
   await h.ask(limitPrompt(RATE_LIMIT({ seven_day: { utilization: 0.25 } })))
-  assert.deepEqual(h.acp.snapshot().limit, { windowMinutes: 10080, remaining: 0.75 })
+  assert.deepEqual(h.acp.snapshot().limit, {
+    windows: [{ windowMinutes: 10080, remaining: 0.75 }],
+  })
   h.acp.stop()
 })
 
@@ -612,7 +617,7 @@ test('a window past its limit reports nothing left rather than less than nothing
   const h = harness()
   await h.idle()
   await h.ask(limitPrompt(RATE_LIMIT({ five_hour: { utilization: 1.04 } })))
-  assert.equal(h.acp.snapshot().limit?.remaining, 0)
+  assert.equal(h.acp.snapshot().limit?.windows[0]?.remaining, 0)
   h.acp.stop()
 })
 
@@ -624,7 +629,7 @@ test('a usage update with no limit on it leaves the last one standing', async ()
   await h.idle()
   await h.ask(limitPrompt(RATE_LIMIT({ five_hour: { utilization: 0.5 } })))
   await h.ask(limitPrompt({ somethingElse: true }))
-  assert.equal(h.acp.snapshot().limit?.remaining, 0.5)
+  assert.equal(h.acp.snapshot().limit?.windows[0]?.remaining, 0.5)
   h.acp.stop()
 })
 
@@ -639,18 +644,25 @@ test('a bag shaped like nothing the client knows is not a limit', async () => {
 // The line is permanent once it has a number. Nothing here can ask for one, so a
 // restart that started blank would show nothing until the review's next turn.
 test('a figure from before the restart is on screen before the first turn', async () => {
-  const h = harness({ rememberedLimit: { windowMinutes: 10080, remaining: 0.33 } })
+  const h = harness({ rememberedLimit: WEEKLY })
   await h.idle()
-  assert.deepEqual(h.acp.snapshot().limit, { windowMinutes: 10080, remaining: 0.33 })
+  assert.deepEqual(h.acp.snapshot().limit, WEEKLY)
   h.acp.stop()
 })
 
-test('what the agent reports replaces what was remembered, and is handed back', async () => {
-  const h = harness({ rememberedLimit: { windowMinutes: 10080, remaining: 0.33 } })
+// Replaces the window it names; the one it says nothing about is still true.
+test('what the agent reports replaces the window it names, and is handed back', async () => {
+  const h = harness({ rememberedLimit: WEEKLY })
   await h.idle()
   await h.ask(limitPrompt(RATE_LIMIT({ five_hour: { utilization: 0.2 } })))
-  assert.deepEqual(h.acp.snapshot().limit, { windowMinutes: 300, remaining: 0.8 })
-  assert.deepEqual(h.limitsReported, [{ windowMinutes: 300, remaining: 0.8 }])
+  const reported = {
+    windows: [
+      { windowMinutes: 300, remaining: 0.8 },
+      { windowMinutes: 10080, remaining: 0.33 },
+    ],
+  }
+  assert.deepEqual(h.acp.snapshot().limit, reported)
+  assert.deepEqual(h.limitsReported, [reported])
   h.acp.stop()
 })
 
@@ -661,8 +673,10 @@ test('a read keeps the reset time the push channel gave the same window', async 
   await h.idle()
   const resetsAt = Math.floor(Date.now() / 1000) + 3600
   await h.ask(limitPrompt(RATE_LIMIT({ five_hour: { utilization: 0.2, resetsAt } })))
-  h.acp.seedLimit({ windowMinutes: 300, remaining: 0.7 })
-  assert.deepEqual(h.acp.snapshot().limit, { windowMinutes: 300, remaining: 0.7, resetsAt })
+  h.acp.seedLimit({ windows: [{ windowMinutes: 300, remaining: 0.7 }] })
+  assert.deepEqual(h.acp.snapshot().limit, {
+    windows: [{ windowMinutes: 300, remaining: 0.7, resetsAt }],
+  })
   h.acp.stop()
 })
 
@@ -673,18 +687,24 @@ test('a reset time that has already passed is not carried forward', async () => 
   await h.idle()
   const resetsAt = Math.floor(Date.now() / 1000) - 1
   await h.ask(limitPrompt(RATE_LIMIT({ five_hour: { utilization: 0.2, resetsAt } })))
-  h.acp.seedLimit({ windowMinutes: 300, remaining: 1 })
-  assert.deepEqual(h.acp.snapshot().limit, { windowMinutes: 300, remaining: 1 })
+  h.acp.seedLimit({ windows: [{ windowMinutes: 300, remaining: 1 }] })
+  assert.deepEqual(h.acp.snapshot().limit, { windows: [{ windowMinutes: 300, remaining: 1 }] })
   h.acp.stop()
 })
 
-// A different window is a different allowance, and its reset time is its own.
+// A different window is a different allowance, and its reset time is its own. The
+// five-hour window it says nothing about is kept as it was, dated as it was.
 test('a reset time is not carried across to another window', async () => {
   const h = harness()
   await h.idle()
   const resetsAt = Math.floor(Date.now() / 1000) + 3600
   await h.ask(limitPrompt(RATE_LIMIT({ five_hour: { utilization: 0.2, resetsAt } })))
-  h.acp.seedLimit({ windowMinutes: 10080, remaining: 0.9 })
-  assert.deepEqual(h.acp.snapshot().limit, { windowMinutes: 10080, remaining: 0.9 })
+  h.acp.seedLimit({ windows: [{ windowMinutes: 10080, remaining: 0.9 }] })
+  assert.deepEqual(h.acp.snapshot().limit, {
+    windows: [
+      { windowMinutes: 300, remaining: 0.8, resetsAt },
+      { windowMinutes: 10080, remaining: 0.9 },
+    ],
+  })
   h.acp.stop()
 })
