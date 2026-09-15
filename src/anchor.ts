@@ -13,6 +13,24 @@ const MAX_REFERENCES = 16
  *  whole section's worth of DOM buys nothing the prompt can use. Truncation is
  *  flagged rather than hidden, so the agent knows it is not seeing all of it. */
 const MAX_CAPTURE_HTML = 16 * 1024
+/** The matched rules are the richest capture field and the one most able to
+ *  bloat - a utility-class element matches dozens. Capped in count, per rule
+ *  and in total, to the same figures the page uses. */
+const MAX_CAPTURE_RULES = 40
+const MAX_CAPTURE_RULE_CHARS = 1000
+const MAX_CAPTURE_RULES_BYTES = 4 * 1024
+const MAX_CAPTURE_TOKENS = 40
+const MAX_CAPTURE_SIBLINGS = 12
+
+/** What a shadow tree inherits from the page: these, and nothing else. */
+const CAPTURE_INHERITED = [
+  'font-family',
+  'font-size',
+  'font-weight',
+  'line-height',
+  'letter-spacing',
+  'color',
+]
 
 const str = (v: unknown, max: number): string | undefined =>
   typeof v === 'string' && v ? v.slice(0, max) : undefined
@@ -164,6 +182,88 @@ export function sanitizeCapture(raw: unknown): ExploreCapture | null {
   const width = v.parentWidth
   if (typeof width === 'number' && Number.isFinite(width) && width > 0) {
     out.parentWidth = Math.round(width)
+  }
+  const rules = cappedStrings(
+    v.rules,
+    MAX_CAPTURE_RULES,
+    MAX_CAPTURE_RULE_CHARS,
+    MAX_CAPTURE_RULES_BYTES,
+  )
+  if (rules.length) out.rules = rules
+  if (typeof v.slot === 'object' && v.slot !== null) {
+    const given = v.slot as Record<string, unknown>
+    const slot: NonNullable<ExploreCapture['slot']> = {}
+    for (const key of ['display', 'direction', 'align', 'justify', 'gap'] as const) {
+      const value = str(given[key], 120)
+      if (value) slot[key] = value
+    }
+    if (typeof given.inherits === 'object' && given.inherits !== null) {
+      const inherits: Record<string, string> = {}
+      for (const property of CAPTURE_INHERITED) {
+        const value = str((given.inherits as Record<string, unknown>)[property], 120)
+        if (value) inherits[property] = value
+      }
+      if (Object.keys(inherits).length) slot.inherits = inherits
+    }
+    if (Object.keys(slot).length) out.slot = slot
+  }
+  if (typeof v.tokens === 'object' && v.tokens !== null) {
+    const tokens: Record<string, string> = {}
+    for (const [name, value] of Object.entries(v.tokens as Record<string, unknown>)) {
+      if (Object.keys(tokens).length >= MAX_CAPTURE_TOKENS) break
+      if (!/^--[\w-]{1,60}$/.test(name)) continue
+      const clean = str(value, 120)
+      if (clean) tokens[name] = clean
+    }
+    if (Object.keys(tokens).length) out.tokens = tokens
+  }
+  if (Array.isArray(v.siblings)) {
+    const siblings: NonNullable<ExploreCapture['siblings']> = []
+    for (const raw of v.siblings.slice(0, MAX_CAPTURE_SIBLINGS)) {
+      if (typeof raw !== 'object' || raw === null) continue
+      const sib = raw as Record<string, unknown>
+      const tag = str(sib.tag, 30)
+      if (!tag || typeof sib.width !== 'number' || typeof sib.height !== 'number') continue
+      const cls = str(sib.class, 80)
+      const text = str(sib.text, 60)
+      siblings.push({
+        tag,
+        ...(cls ? { class: cls } : {}),
+        ...(text ? { text } : {}),
+        width: Math.round(sib.width),
+        height: Math.round(sib.height),
+      })
+    }
+    if (siblings.length) out.siblings = siblings
+  }
+  if (typeof v.theme === 'object' && v.theme !== null) {
+    const given = v.theme as Record<string, unknown>
+    const theme: NonNullable<ExploreCapture['theme']> = {}
+    const scheme = str(given.scheme, 40)
+    if (scheme) theme.scheme = scheme
+    const classes = str(given.classes, 120)
+    if (classes) theme.classes = classes
+    const dataTheme = str(given.dataTheme, 40)
+    if (dataTheme) theme.dataTheme = dataTheme
+    if (Object.keys(theme).length) out.theme = theme
+  }
+  return out
+}
+
+/** A list of strings, each and all bounded. Anything that is not a string is
+ *  dropped rather than failing the whole capture: one bad entry from the page
+ *  should not cost the agent the rest. */
+function cappedStrings(raw: unknown, max: number, each: number, total: number): string[] {
+  if (!Array.isArray(raw)) return []
+  const out: string[] = []
+  let bytes = 0
+  for (const item of raw) {
+    if (out.length >= max) break
+    const value = str(item, each)
+    if (!value) continue
+    if (bytes + value.length > total) break
+    out.push(value)
+    bytes += value.length
   }
   return out
 }

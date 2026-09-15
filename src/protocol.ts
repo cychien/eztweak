@@ -104,6 +104,32 @@ export interface ExploreCapture {
   /** The content width of the element's parent, in CSS pixels. What says how
    *  much room a variant has to work in. */
   parentWidth?: number
+  /** The page's own CSS rules that currently apply to the element or anything
+   *  inside it, as authored (`cssText`), pseudo-class and pseudo-element rules
+   *  included. What computed values cannot give: `:hover`, `::after`, and the
+   *  `var(--brand)` behind an `rgb(...)`. Inside a shadow root none of these
+   *  rules reach the variant, so this is how the agent gets to *copy* them. */
+  rules?: string[]
+  /** The slot the variant will stand in: how the parent lays its children out,
+   *  and what the variant will inherit from it. The inherited values are the
+   *  parent's, not the element's - a white `color` on the original comes from
+   *  the original's own class, and the variant will not get it for free. */
+  slot?: {
+    display?: string
+    direction?: string
+    align?: string
+    justify?: string
+    gap?: string
+    inherits?: Record<string, string>
+  }
+  /** The page's CSS custom properties on `:root`, resolved. They cross the
+   *  shadow boundary, so a variant that uses them stays in step with the theme. */
+  tokens?: Record<string, string>
+  /** The element's siblings in the same parent, in order, so a variant knows
+   *  what it is standing next to and what a wider one would push. */
+  siblings?: { tag: string; class?: string; text?: string; width: number; height: number }[]
+  /** Whether the page is in a dark scheme, and the theme hooks it hangs that on. */
+  theme?: { scheme?: string; classes?: string; dataTheme?: string }
 }
 
 /** One variant the agent produced, as it is stored and drawn. */

@@ -174,10 +174,13 @@ const DESCRIPTION = [
   'Call it once per variant, as soon as that variant is ready, rather than saving them all for the end: each call puts a new option in front of the user immediately.',
   'The variant is a visual exploration, not an implementation. It is never written to a file and never wired to data.',
   '',
+  "The variant renders inside a shadow root, so none of the page's CSS reaches it - class names from the page do nothing. It does inherit the container's font and colour, and the page's CSS custom properties are available to it.",
+  '',
   'html must be:',
   '- exactly one root element, which may contain anything;',
-  `- markup and CSS only - no <script>, <iframe>, <link>, inline on* handlers or javascript: urls, and at most ${MAX_VARIANT_HTML} bytes;`,
-  '- self-contained in its styling: either inline styles, one <style> block inside the root, or class names that already appear in the markup you were given. A class the project has never rendered has no CSS behind it, so it will do nothing.',
+  `- markup and CSS only - no <script>, inline on* handlers or javascript: urls, no <iframe>/<link>/<object>/<embed>, and at most ${MAX_VARIANT_HTML} bytes;`,
+  '- fully self-styled: one <style> block inside the root and/or inline styles. @media and @keyframes work. Write :host where you would write :root.',
+  '- interactive only through the platform: :hover, <details>, checkbox + :checked, the popover attribute, <dialog open>, CSS transitions. A state that needs a click is better sent as a second variant.',
 ].join('\n')
 
 function register(server: McpServer, sink: VariantSink): void {

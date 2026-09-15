@@ -238,13 +238,23 @@ function acpPrompt(
  *  costs nothing. */
 function explorePrompt(round: ExploreState, capture: ExploreCapture): string {
   const styles = Object.entries(capture.styles ?? {})
+  const slot = capture.slot
+  const layout = slot
+    ? (['display', 'direction', 'align', 'justify', 'gap'] as const)
+        .filter((key) => slot[key])
+        .map((key) => `${key}: ${slot[key]}`)
+    : []
+  const inherits = Object.entries(slot?.inherits ?? {})
+  const tokens = Object.entries(capture.tokens ?? {})
+  const siblings = capture.siblings ?? []
+  const theme = capture.theme
   return [
     `The user is exploring UI variants of one element on the page they are reviewing: ${round.label}.`,
     round.direction
       ? `They asked for: ${round.direction}`
       : 'They gave no direction, so range across genuinely different treatments rather than varying one thing.',
     '',
-    'This is the element, as it currently renders:',
+    '## The element, as it currently renders',
     '',
     '```html',
     capture.html,
@@ -253,22 +263,88 @@ function explorePrompt(round: ExploreState, capture: ExploreCapture): string {
       ? ['', 'That markup was cut short - the element has more in it than you are being shown.']
       : []),
     ...(styles.length
-      ? ['', 'Its computed styling:', ...styles.map(([k, v]) => `- ${k}: ${v}`)]
+      ? ['', 'Its computed styling, resolved:', ...styles.map(([k, v]) => `- ${k}: ${v}`)]
       : []),
-    ...(capture.parentWidth ? [`- the container it sits in is ${capture.parentWidth}px wide`] : []),
+    ...(capture.rules?.length
+      ? [
+          '',
+          "The page's CSS that currently styles it (and what is inside it), as authored. Hover, focus",
+          'and pseudo-element states are here; copy from these rather than re-deriving them:',
+          '',
+          '```css',
+          ...capture.rules,
+          '```',
+        ]
+      : []),
+    '',
+    '## Where it stands',
+    '',
+    ...(capture.parentWidth ? [`- The container is ${capture.parentWidth}px wide.`] : []),
+    ...(layout.length ? [`- The container lays its children out with ${layout.join(', ')}.`] : []),
+    ...(siblings.length
+      ? [
+          `- Its siblings in that container, in order: ${siblings
+            .map(
+              (s) =>
+                `<${s.tag}${s.class ? ` class="${s.class}"` : ''}> ${s.width}×${s.height}${s.text ? ` "${s.text}"` : ''}`,
+            )
+            .join('; ')}.`,
+          '  A wider variant pushes them; a taller one changes the row.',
+        ]
+      : []),
+    ...(theme
+      ? [
+          `- Theme: ${[
+            theme.scheme ? `color-scheme ${theme.scheme}` : null,
+            theme.dataTheme ? `data-theme="${theme.dataTheme}"` : null,
+            theme.classes ? `classes "${theme.classes}"` : null,
+          ]
+            .filter(Boolean)
+            .join(', ')}.`,
+        ]
+      : []),
+    '',
+    '## How your variant is rendered - read this before writing any CSS',
+    '',
+    "The variant is placed in a **shadow root** standing in the element's slot. Consequences:",
+    '',
+    "- **None of the page's CSS reaches it.** Not `.btn`, not resets, nothing. Class names from the",
+    '  page do nothing inside; write every rule the variant needs yourself, in one `<style>` inside the',
+    '  root or as inline styles. The rules above are there to be copied from.',
+    ...(inherits.length
+      ? [
+          '- **What it does inherit** from its position, so you need not restate these unless changing them:',
+          ...inherits.map(([k, v]) => `  - ${k}: ${v}`),
+          "  Note these are the *container's* values. A white `color` on the original comes from its own",
+          '  class and will not carry over.',
+        ]
+      : []),
+    ...(tokens.length
+      ? [
+          "- **The page's CSS custom properties are available** inside the variant and keep it in step with the",
+          '  theme. Prefer them where they fit:',
+          ...tokens.map(([k, v]) => `  - ${k}: ${v}`),
+        ]
+      : []),
+    '- `@media`, `@keyframes`, `@supports` all work. Write `:host` where you would write `:root`;',
+    '  `:root` matches nothing in a shadow tree.',
+    '',
+    '## Rules',
+    '',
+    '- Do not edit, create or delete any file. Nothing here is being implemented.',
+    "- You may read the file in the element's anchor for context; nothing else needs reading.",
+    '- Each variant is exactly one root element, at most one `<style>` inside it.',
+    '- **No JavaScript** - no `<script>`, no inline handlers, no `javascript:` urls. Interaction is done',
+    '  with the platform: `:hover`/`:focus-visible`/`:active`; `<details>`; `<input type=checkbox>` +',
+    '  `:checked` + `:has()`; the `popover` attribute with `popovertarget`; `<dialog open>`; CSS',
+    '  transitions and `@keyframes`; `scroll-snap`. A state that needs a click to see is better as a',
+    '  second variant ("menu open") than as behaviour.',
+    '- No `<iframe>`, `<link>`, `<object>`, `<embed>`.',
+    '- The variants stand in for the real element on the page, so keep them the same kind of thing:',
+    '  the same text, the same purpose, a different treatment.',
     '',
     'Produce 4 variants. Send each one with the `explore_variant` tool the moment it is ready,',
     'rather than writing them all out first: each call puts another option in front of the user.',
-    '',
-    'Rules:',
-    '- Do not edit, create or delete any file. Nothing here is being implemented.',
-    "- You may read the file in the element's anchor for context, and nothing else needs reading.",
-    '- Each variant is exactly one root element. A `<style>` block inside it is fine.',
-    '- No scripts, iframes, external stylesheets, inline `on*` handlers or `javascript:` urls.',
-    '- Reuse only class names that already appear in the markup above, or use inline styles.',
-    '  A class the project has never rendered has no CSS behind it and will do nothing.',
-    '- The variants stand in for the real element on the page, so keep them the same kind of thing:',
-    '  the same text, the same purpose, a different treatment.',
     '',
     'This conversation is a branch. The user may keep talking to you here about the variants, and',
     'nothing said here reaches the review they branched from unless they adopt one.',

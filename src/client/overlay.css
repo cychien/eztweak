@@ -655,6 +655,14 @@
   display: none !important;
 }
 
+/* The host a variant lives in. Boxless, so the slot the original held is handed
+   straight to the agent's markup inside the shadow root rather than to a
+   wrapper around it. Set inline as well, for a page whose own reset would beat
+   this; declared here so the intent has a home. */
+ez-variant {
+  display: contents;
+}
+
 /* Says which of the two things this composer is about to do. The pill is the
    whole of that signal, so it reads as a sentence rather than a tag. */
 .ez-explore-pill {
