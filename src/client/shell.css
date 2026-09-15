@@ -1009,10 +1009,11 @@ body.ez-arranging .ez-frame {
   animation: ez-rise 0.16s ease-out;
 }
 
-/* Except this one. The others arrive on their own and a movement is what says
-   so; this one arrives because the user just asked for it, and a list that
-   slides in under a pointer already heading for a row is in the way. */
-.ez-resume {
+/* Except these two. The others arrive on their own and a movement is what says
+   so; these arrive because the user just asked for them, and a card that slides
+   in under a pointer already heading for a row or a button is in the way. */
+.ez-resume,
+.ez-confirm {
   animation: none;
 }
 
@@ -2424,7 +2425,7 @@ body.ez-arranging .ez-frame {
   font-size: 11px;
   font-weight: 500;
   line-height: 1.4;
-  color: var(--ink-faint);
+  color: var(--ink);
 }
 
 /* In the corner, like the update card's. A bare glyph: hover deepens the ink and
