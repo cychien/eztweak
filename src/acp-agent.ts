@@ -18,6 +18,7 @@ import {
   type ClientContext,
   type CreateElicitationRequest,
   type CreateElicitationResponse,
+  type McpServer,
   type RequestPermissionRequest,
   type RequestPermissionResponse,
   type SessionConfigOption,
@@ -155,6 +156,10 @@ export interface AcpAgentOptions {
    *  taken once: every session this agent opens asks again, and the answer
    *  changes as the review moves between its own conversations. */
   resumeSessionId?: () => string | undefined
+  /** The MCP servers this session should be opened with - eztweak's own, one
+   *  per live explore round. Read at open time for the same reason as the rest,
+   *  and ignored entirely by an agent that cannot reach an HTTP one. */
+  mcpServers?: () => McpServer[]
   /** The last figure this agent reported, from before the daemon restarted. The
    *  line is permanent once it has a number, and nothing here can ask for one -
    *  see `usage-limit.ts`. */
@@ -219,6 +224,12 @@ export class AcpAgent {
   /** Set when the agent advertises `session/resume`, which is what lets a review
    *  pick its own conversation back up after the daemon that held it went away. */
   private canResume = false
+  /** Set when the agent can reach an MCP server over HTTP, which is how eztweak
+   *  gives it a tool of its own: a client cannot serve one down the ACP
+   *  connection until `mcp-over-acp` lands on both ends. Gated rather than
+   *  assumed - a session opened with a server the agent cannot reach may fail
+   *  outright, and the feature that needs it is better absent than broken. */
+  private canMcpHttp = false
   /** Resolved when the agent is done, and nothing else: it is what holds the
    *  connection open, so a session swap must not disturb it. */
   private finish: (() => void) | null = null
@@ -492,6 +503,9 @@ export class AcpAgent {
     if (!ctx) return
     const epoch = this.epoch
     const wanted = this.opts.resumeSessionId?.()
+    // Asked for at open time, like every other option here: a session opened
+    // later in the review is opened for whatever is live *then*.
+    const mcpServers = this.canMcpHttp ? (this.opts.mcpServers?.() ?? []) : []
     let sessionId: string | null = null
     let configOptions: SessionConfigOption[] = []
     let how: AcpSessionStart = 'new'
@@ -500,7 +514,7 @@ export class AcpAgent {
         const resumed = await ctx.request(methods.agent.session.resume, {
           sessionId: wanted,
           cwd: this.opts.cwd,
-          mcpServers: [],
+          mcpServers,
         })
         sessionId = wanted
         configOptions = resumed?.configOptions ?? []
@@ -513,7 +527,7 @@ export class AcpAgent {
     if (!sessionId) {
       const created = await ctx.request(methods.agent.session.new, {
         cwd: this.opts.cwd,
-        mcpServers: [],
+        mcpServers,
       })
       sessionId = created.sessionId
       configOptions = created.configOptions ?? []
@@ -798,6 +812,7 @@ export class AcpAgent {
         })
         this.canClose = !!init.agentCapabilities?.sessionCapabilities?.close
         this.canResume = !!init.agentCapabilities?.sessionCapabilities?.resume
+        this.canMcpHttp = !!init.agentCapabilities?.mcpCapabilities?.http
         this.ctx = ctx
         await this.openSession()
         // `connectWith` closes the stream when this returns, so this is the

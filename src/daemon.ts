@@ -27,6 +27,7 @@ import { clearAgentRecord, reapOrphanedAgents } from './agent-children.js'
 import { attachmentIds, parseReferences } from './anchor.js'
 import { injectOverlay, wantsHtml } from './inject.js'
 import { toAgentAttachments, toAgentItem, toConversationItem } from './label.js'
+import { ExploreMcp } from './mcp-explore.js'
 import type { Annotation, PollResult, SessionEndedBy } from './protocol.js'
 import { listSkills, skillPrefix, spendSkillMarkers } from './skills.js'
 import { SessionStore, listRestorableSessions, newId } from './store.js'
@@ -256,6 +257,9 @@ function configChangeNote(option: SessionConfigOption, value: AcpConfigValue): s
 class SessionRuntime {
   readonly store: SessionStore
   readonly bus = new EventEmitter()
+  /** The explore rounds this session is taking variants for, and the tool the
+   *  agent sends them through. */
+  readonly exploreMcp = new ExploreMcp()
   port = 0
   private server!: Server
   private sseClients = new Set<Response>()
@@ -430,6 +434,10 @@ class SessionRuntime {
       // next turn.
       rememberedLimit: () => rememberedLimit(command),
       onLimitChange: (limit) => rememberLimit(command, limit),
+      // Whatever rounds are taking variants when this session opens. The port is
+      // read now rather than captured, because a restored session can come back
+      // on a different one.
+      mcpServers: () => this.exploreMcp.serverEntries(this.port),
       // Delivery rides on every state change: the moment the agent first goes
       // idle - or comes back idle - whatever is queued goes out.
       onChange: () => {
@@ -725,6 +733,11 @@ class SessionRuntime {
     )
 
     api.use(express.json({ limit: '2mb' }))
+
+    // The agent's own end of the review: one url per live explore round, each
+    // behind its own token. Mounted on this session's app because a round
+    // belongs to a session, so a url cannot reach across to another one's.
+    api.post('/mcp/:exploreId', this.exploreMcp.handler())
 
     api.get('/state', (_req, res) => res.json(this.snapshot()))
 
