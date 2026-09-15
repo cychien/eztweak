@@ -27,6 +27,7 @@ import {
 } from '../acp-config.js'
 import { attachify } from './attach.js'
 import { confirmSkipped, rememberConfirm } from './confirm-skip.js'
+import { type UsageLimit, usageNote } from './usage-note.js'
 import type { SlashCommand } from './slash.js'
 import type { Device, Size } from './devices.js'
 import {
@@ -167,7 +168,7 @@ interface AcpWire {
   configOptions?: SessionConfigOption[]
   /** The usage window this review will reach first, when the agent has said so.
    *  Absent until then, which can be for a whole session. */
-  limit?: { windowMinutes: number; remaining: number; resetsAt?: number }
+  limit?: UsageLimit
   /** A cancel is out and the turn has not ended yet. */
   cancelling?: true
   error?: string
@@ -2545,24 +2546,13 @@ function pillOption(options: SessionConfigOption[]): SessionConfigOption | undef
   return options.find((o) => o.category === 'model') ?? options[0]
 }
 
-/** A window's length, as a person would say it. The agents report a duration -
- *  300 minutes, 10080 - and the common ones have names worth using. */
-function windowName(minutes: number): string {
-  if (minutes === 7 * 24 * 60) return '一週'
-  if (minutes % (24 * 60) === 0) return `${minutes / (24 * 60)} 天`
-  if (minutes % 60 === 0) return `${minutes / 60} 小時`
-  return `${minutes} 分鐘`
-}
-
 function paintLimit(acp: AcpWire | undefined): void {
   const limit = acp?.limit
   limitNote.hidden = !limit
   if (!limit) return
-  const name = windowName(limit.windowMinutes)
-  limitNote.textContent = `剩 ${Math.round(limit.remaining * 100)}% / ${name}`
-  limitNote.title = limit.resetsAt
-    ? `${name}用量，${new Date(limit.resetsAt * 1000).toLocaleString()} 重置`
-    : `${name}用量`
+  const note = usageNote(limit)
+  limitNote.textContent = note.text
+  limitNote.title = note.title
 }
 
 function paintConfig(acp: AcpWire | undefined): void {

@@ -107,9 +107,9 @@ export function codexLimitFrom(result: unknown): AcpLimit | null {
   const found: AcpLimit[] = []
   for (const key of ['primary', 'secondary'] as const) {
     const slot = limits[key] as
-      | { usedPercent?: unknown; windowDurationMins?: unknown; resetsAt?: unknown }
-      | undefined
-    if (!slot || typeof slot.usedPercent !== 'number' || !Number.isFinite(slot.usedPercent)) continue
+      { usedPercent?: unknown; windowDurationMins?: unknown; resetsAt?: unknown } | undefined
+    if (!slot || typeof slot.usedPercent !== 'number' || !Number.isFinite(slot.usedPercent))
+      continue
     if (typeof slot.windowDurationMins !== 'number' || slot.windowDurationMins <= 0) continue
     found.push(window(slot.windowDurationMins, slot.usedPercent / 100, slot.resetsAt))
   }
@@ -127,6 +127,37 @@ async function readCodexLimit(binary: string): Promise<AcpLimit | undefined> {
   return codexLimitFrom(await askCodex(binary, 'account/rateLimits/read', null)) ?? undefined
 }
 
+const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec']
+
+/** The moment behind "Sep 16 at 4:20am (Asia/Taipei)", as an epoch second.
+ *
+ *  Read in local time, and only when the rendered zone *is* this machine's: the
+ *  CLI writes the clock of wherever it runs, which is this machine, so local is
+ *  the right reading - and a zone that says otherwise means the assumption no
+ *  longer holds, which is a reason to report no time rather than one off by
+ *  hours.
+ *
+ *  The year is not rendered, so it is the one that puts the reset ahead of now -
+ *  a reset is by definition still to come, and that is what carries a December
+ *  window over into January. */
+function resetEpoch(rendered: string | undefined, now: number): number | undefined {
+  const parsed = /^(\w{3}) (\d{1,2}) at (\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*\(([^)]+)\)/i.exec(
+    rendered?.trim() ?? '',
+  )
+  if (!parsed) return undefined
+  const month = MONTHS.indexOf((parsed[1] ?? '').toLowerCase())
+  if (month < 0) return undefined
+  if (parsed[6] !== Intl.DateTimeFormat().resolvedOptions().timeZone) return undefined
+  const hour = (Number(parsed[3]) % 12) + (/pm/i.test(parsed[5] ?? '') ? 12 : 0)
+  const day = Number(parsed[2])
+  const minute = Number(parsed[4] ?? '0')
+  const thisYear = new Date(now).getFullYear()
+  for (const year of [thisYear, thisYear + 1]) {
+    const at = new Date(year, month, day, hour, minute).getTime()
+    if (at > now) return Math.floor(at / 1000)
+  }
+  return undefined
+}
 
 /** Claude's figure, from the one local command that reports it.
  *
@@ -138,26 +169,27 @@ async function readCodexLimit(binary: string): Promise<AcpLimit | undefined> {
  *  rest - nothing about usage), `system init` does not carry it, no file on disk
  *  holds it, and `/status` is refused in print mode.
  *
- *  The cost of that is parsing rendered text, which is why this reads only the
- *  two percentages and leaves the reset times alone: a date rendered as "Sep 15
- *  at 4:30pm (Asia/Taipei)" is far more fragile to read than "52% used", and the
- *  reset time is a tooltip. It arrives properly typed on the push channel
- *  instead - see `limitFrom` - and is carried forward across a read that lacks
- *  it.
+ *  The reset time is read too, fragile as a rendered date is, because it is the
+ *  line the shell shows - "剩 91% 直到 18:30". Leaving it to the push channel
+ *  would mean a review that has not taken a turn yet shows a bare percentage,
+ *  which is the half of the answer nobody asked for.
  *
  *  Wording drift costs a figure, not a crash: nothing matches, nothing is
- *  reported, and the push channel still fills the line in on the next turn. */
-export function claudeLimitFromUsageText(text: string): AcpLimit | null {
+ *  reported, and the push channel still fills the line in on the next turn. The
+ *  percentage and the time drift apart, too - an unreadable date still leaves a
+ *  readable percentage. */
+export function claudeLimitFromUsageText(text: string, now = Date.now()): AcpLimit | null {
   const found: AcpLimit[] = []
   for (const [pattern, minutes] of [
-    [/^Current session:\s*([\d.]+)% used/m, FIVE_HOURS],
+    [/^Current session:\s*([\d.]+)% used(?:[^\n]*?resets\s+([^\n]+))?/m, FIVE_HOURS],
     // Anchored on "all models" so the per-model weekly lines below it - which
     // limit one model rather than the account - are not read as the account's.
-    [/^Current week \(all models\):\s*([\d.]+)% used/m, ONE_WEEK],
+    [/^Current week \(all models\):\s*([\d.]+)% used(?:[^\n]*?resets\s+([^\n]+))?/m, ONE_WEEK],
   ] as const) {
-    const used = Number(pattern.exec(text)?.[1])
+    const line = pattern.exec(text)
+    const used = Number(line?.[1])
     if (!Number.isFinite(used)) continue
-    found.push(window(minutes, used / 100, undefined))
+    found.push(window(minutes, used / 100, resetEpoch(line?.[2], now)))
   }
   return found.sort((a, b) => a.windowMinutes - b.windowMinutes)[0] ?? null
 }
@@ -179,7 +211,11 @@ async function readClaudeLimit(binary: string): Promise<AcpLimit | undefined> {
       child.on('close', () => {
         try {
           const answer = (JSON.parse(out) as { result?: unknown }).result
-          resolve(typeof answer === 'string' ? (claudeLimitFromUsageText(answer) ?? undefined) : undefined)
+          resolve(
+            typeof answer === 'string'
+              ? (claudeLimitFromUsageText(answer) ?? undefined)
+              : undefined,
+          )
         } catch {
           resolve(undefined)
         }

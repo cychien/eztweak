@@ -5,6 +5,9 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 
 process.env.EZTWEAK_DATA_DIR = mkdtempSync(join(tmpdir(), 'eztweak-limits-'))
+// The reset times below are rendered in this zone, and the reader only trusts a
+// zone that is the machine's own - so the machine is made to be in it.
+process.env.TZ = 'Asia/Taipei'
 
 const { rememberLimit, rememberedLimit } = await import('../src/usage-limit.js')
 
@@ -90,10 +93,13 @@ test("codex's shorter window is the one read out", async () => {
 
 test("codex's weekly window is used when it is the only one", async () => {
   const { codexLimitFrom } = await import('../src/usage-limit.js')
-  assert.deepEqual(codexLimitFrom({ rateLimits: { secondary: { usedPercent: 35, windowDurationMins: 10080 } } }), {
-    windowMinutes: 10080,
-    remaining: 0.65,
-  })
+  assert.deepEqual(
+    codexLimitFrom({ rateLimits: { secondary: { usedPercent: 35, windowDurationMins: 10080 } } }),
+    {
+      windowMinutes: 10080,
+      remaining: 0.65,
+    },
+  )
   assert.equal(codexLimitFrom({ rateLimits: {} }), null)
   assert.equal(codexLimitFrom(undefined), null)
   // A window with no length cannot be compared against the other one, and its
@@ -141,9 +147,60 @@ Current week (Fable): 3% used · resets Sep 20 at 9pm (Asia/Taipei)
 What's contributing to your limits usage?
 Last 24h · 1696 requests · 23 sessions`
 
+const READ_AT = new Date('2026-09-15T09:00:00+08:00').getTime()
+
 test("claude's session window is read out of /usage", async () => {
   const { claudeLimitFromUsageText } = await import('../src/usage-limit.js')
-  assert.deepEqual(claudeLimitFromUsageText(USAGE_TEXT), { windowMinutes: 300, remaining: 0.48 })
+  assert.deepEqual(claudeLimitFromUsageText(USAGE_TEXT, READ_AT), {
+    windowMinutes: 300,
+    remaining: 0.48,
+    resetsAt: new Date('2026-09-15T16:30:00+08:00').getTime() / 1000,
+  })
+})
+
+// The line the shell actually shows is the reset time, so an unread date is not
+// a cosmetic loss - it is the half of the answer the reviewer came for.
+test('the reset time comes back with it', async () => {
+  const { claudeLimitFromUsageText } = await import('../src/usage-limit.js')
+  const weekly = USAGE_TEXT.split('\n')
+    .filter((l) => !l.startsWith('Current session:'))
+    .join('\n')
+  assert.equal(
+    claudeLimitFromUsageText(weekly, READ_AT)?.resetsAt,
+    new Date('2026-09-20T21:00:00+08:00').getTime() / 1000,
+  )
+})
+
+// The CLI renders the clock of wherever it runs, so local is the right reading -
+// and a zone saying otherwise means that no longer holds.
+test('a reset rendered in another zone is left unread', async () => {
+  const { claudeLimitFromUsageText } = await import('../src/usage-limit.js')
+  const elsewhere = USAGE_TEXT.replaceAll('(Asia/Taipei)', '(America/New_York)')
+  assert.deepEqual(claudeLimitFromUsageText(elsewhere, READ_AT), {
+    windowMinutes: 300,
+    remaining: 0.48,
+  })
+})
+
+// December rolls into January, and the rendered date carries no year.
+test('a reset past new year takes the coming one', async () => {
+  const { claudeLimitFromUsageText } = await import('../src/usage-limit.js')
+  const newYear = 'Current session: 10% used · resets Jan 2 at 12:15am (Asia/Taipei)'
+  assert.equal(
+    claudeLimitFromUsageText(newYear, new Date('2026-12-31T23:00:00+08:00').getTime())?.resetsAt,
+    new Date('2027-01-02T00:15:00+08:00').getTime() / 1000,
+  )
+})
+
+// The percentage and the date drift apart between CLI versions, and only one of
+// them is the number.
+test('an unreadable date still leaves a readable percentage', async () => {
+  const { claudeLimitFromUsageText } = await import('../src/usage-limit.js')
+  const odd = 'Current session: 48% used · resets in about 3 hours'
+  assert.deepEqual(claudeLimitFromUsageText(odd, READ_AT), {
+    windowMinutes: 300,
+    remaining: 0.52,
+  })
 })
 
 // The per-model weekly line sits directly below the account's and reads almost
@@ -154,7 +211,7 @@ test("a per-model weekly line is not mistaken for the account's", async () => {
   const weeklyOnly = USAGE_TEXT.split('\n')
     .filter((l) => !l.startsWith('Current session:'))
     .join('\n')
-  assert.deepEqual(claudeLimitFromUsageText(weeklyOnly), { windowMinutes: 10080, remaining: 0.84 })
+  assert.equal(claudeLimitFromUsageText(weeklyOnly, READ_AT)?.remaining, 0.84)
 })
 
 // Wording drifts between CLI versions. That costs a figure, never a wrong one -
