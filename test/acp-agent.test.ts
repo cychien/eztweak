@@ -5,7 +5,7 @@ import { after, test } from 'node:test'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { AcpAgent } from '../src/acp-agent.js'
-import type { AcpSessionStart, AcpSnapshot } from '../src/acp-agent.js'
+import type { AcpLimit, AcpSessionStart, AcpSnapshot } from '../src/acp-agent.js'
 
 const FAKE = join(dirname(fileURLToPath(import.meta.url)), 'helpers', 'fake-acp-agent.mjs')
 /** Mirrors CHUNK_COUNT in the fake agent. */
@@ -32,6 +32,9 @@ interface HarnessOptions {
   /** The picks to re-assert on every session, as `PersistedSession.agentConfig`
    *  would supply them. */
   pinned?: Record<string, string | boolean>
+  /** A figure from before this daemon started, as `usage-limit.ts` would supply
+   *  it. */
+  rememberedLimit?: AcpLimit
   /** Prompts to hand over the way `deliverToAcp` does - on the agent going idle,
    *  from the same `onChange` the daemon acts on. Ordering claims about a pick
    *  landing before a session's first turn only mean anything against this. */
@@ -46,6 +49,8 @@ function harness(options: HarnessOptions = {}) {
   const pending = [...(options.deliver ?? [])]
   /** What `onConfigChange` was told, i.e. what the daemon would have persisted. */
   const configChanges: { configId: string; value: string | boolean }[] = []
+  /** What `onLimitChange` was told, i.e. what the daemon would have written down. */
+  const limitsReported: AcpLimit[] = []
   /** The option values in effect each time a queued prompt was handed over. */
   const deliveredWith: Record<string, unknown>[] = []
   const wake = () => {
@@ -89,6 +94,11 @@ function harness(options: HarnessOptions = {}) {
     },
     onExit: wake,
     ...(options.pinned ? { pinnedConfig: () => options.pinned! } : {}),
+    ...(options.rememberedLimit ? { rememberedLimit: () => options.rememberedLimit } : {}),
+    onLimitChange: (limit) => {
+      limitsReported.push(limit)
+      wake()
+    },
     ...(options.resume ? { resumeSessionId: options.resume } : {}),
     onSessionOpen: (sessionId, how) => {
       opens.push({ sessionId, how })
@@ -142,7 +152,19 @@ function harness(options: HarnessOptions = {}) {
     deliver(acp.snapshot())
   }
 
-  return { acp, turns, strays, configChanges, deliveredWith, opens, until, idle, ask, queue }
+  return {
+    acp,
+    turns,
+    strays,
+    configChanges,
+    limitsReported,
+    deliveredWith,
+    opens,
+    until,
+    idle,
+    ask,
+    queue,
+  }
 }
 
 /** The agent's bookkeeping, read back through the protocol. */
@@ -548,4 +570,121 @@ test('a session reports its open and its turns as separate events', async () => 
   await h.ask('something')
   assert.equal(h.opens.length, 1, 'a turn does not reopen the session')
   assert.equal(h.turns.length, 1)
+})
+
+/** A `usage_update` carrying the vendor rate-limit bag, as the prompt describes it. */
+function limitPrompt(meta: unknown): string {
+  return `LIMIT ${JSON.stringify({ _meta: meta })}`
+}
+
+const RATE_LIMIT = (windows: unknown) => ({ '_claude/rateLimit': { unifiedWindows: windows } })
+
+test('the window that empties first is the one reported', async () => {
+  const h = harness()
+  await h.idle()
+  await h.ask(
+    limitPrompt(
+      RATE_LIMIT({
+        five_hour: { utilization: 0.38, resetsAt: 1757900000 },
+        seven_day: { utilization: 0.12, resetsAt: 1758400000 },
+      }),
+    ),
+  )
+  assert.deepEqual(h.acp.snapshot().limit, {
+    windowMinutes: 300,
+    remaining: 0.62,
+    resetsAt: 1757900000,
+  })
+  h.acp.stop()
+})
+
+test('an account with no five-hour window falls back to the weekly one', async () => {
+  const h = harness()
+  await h.idle()
+  await h.ask(limitPrompt(RATE_LIMIT({ seven_day: { utilization: 0.25 } })))
+  assert.deepEqual(h.acp.snapshot().limit, { windowMinutes: 10080, remaining: 0.75 })
+  h.acp.stop()
+})
+
+// Utilization runs past 1 into an account's overage, and "剩 -4%" is not a figure
+// to put in front of anyone.
+test('a window past its limit reports nothing left rather than less than nothing', async () => {
+  const h = harness()
+  await h.idle()
+  await h.ask(limitPrompt(RATE_LIMIT({ five_hour: { utilization: 1.04 } })))
+  assert.equal(h.acp.snapshot().limit?.remaining, 0)
+  h.acp.stop()
+})
+
+// The figure is only ever pushed, never asked for, so the last one stands until a
+// better one arrives. A plain usage update - which is most of them - must not
+// blank a figure the user is reading.
+test('a usage update with no limit on it leaves the last one standing', async () => {
+  const h = harness()
+  await h.idle()
+  await h.ask(limitPrompt(RATE_LIMIT({ five_hour: { utilization: 0.5 } })))
+  await h.ask(limitPrompt({ somethingElse: true }))
+  assert.equal(h.acp.snapshot().limit?.remaining, 0.5)
+  h.acp.stop()
+})
+
+test('a bag shaped like nothing the client knows is not a limit', async () => {
+  const h = harness()
+  await h.idle()
+  await h.ask(limitPrompt(RATE_LIMIT({ five_hour: { utilization: 'lots' } })))
+  assert.equal(h.acp.snapshot().limit, undefined)
+  h.acp.stop()
+})
+
+// The line is permanent once it has a number. Nothing here can ask for one, so a
+// restart that started blank would show nothing until the review's next turn.
+test('a figure from before the restart is on screen before the first turn', async () => {
+  const h = harness({ rememberedLimit: { windowMinutes: 10080, remaining: 0.33 } })
+  await h.idle()
+  assert.deepEqual(h.acp.snapshot().limit, { windowMinutes: 10080, remaining: 0.33 })
+  h.acp.stop()
+})
+
+test('what the agent reports replaces what was remembered, and is handed back', async () => {
+  const h = harness({ rememberedLimit: { windowMinutes: 10080, remaining: 0.33 } })
+  await h.idle()
+  await h.ask(limitPrompt(RATE_LIMIT({ five_hour: { utilization: 0.2 } })))
+  assert.deepEqual(h.acp.snapshot().limit, { windowMinutes: 300, remaining: 0.8 })
+  assert.deepEqual(h.limitsReported, [{ windowMinutes: 300, remaining: 0.8 }])
+  h.acp.stop()
+})
+
+// A read carries no reset time - only the push channel types one - so a read
+// landing on top of a push must not cost the tooltip the time it already had.
+test('a read keeps the reset time the push channel gave the same window', async () => {
+  const h = harness()
+  await h.idle()
+  const resetsAt = Math.floor(Date.now() / 1000) + 3600
+  await h.ask(limitPrompt(RATE_LIMIT({ five_hour: { utilization: 0.2, resetsAt } })))
+  h.acp.seedLimit({ windowMinutes: 300, remaining: 0.7 })
+  assert.deepEqual(h.acp.snapshot().limit, { windowMinutes: 300, remaining: 0.7, resetsAt })
+  h.acp.stop()
+})
+
+// Once that window has rolled over the time describes a window nobody is in any
+// more, and carrying it forward would date the new figure to the old one.
+test('a reset time that has already passed is not carried forward', async () => {
+  const h = harness()
+  await h.idle()
+  const resetsAt = Math.floor(Date.now() / 1000) - 1
+  await h.ask(limitPrompt(RATE_LIMIT({ five_hour: { utilization: 0.2, resetsAt } })))
+  h.acp.seedLimit({ windowMinutes: 300, remaining: 1 })
+  assert.deepEqual(h.acp.snapshot().limit, { windowMinutes: 300, remaining: 1 })
+  h.acp.stop()
+})
+
+// A different window is a different allowance, and its reset time is its own.
+test('a reset time is not carried across to another window', async () => {
+  const h = harness()
+  await h.idle()
+  const resetsAt = Math.floor(Date.now() / 1000) + 3600
+  await h.ask(limitPrompt(RATE_LIMIT({ five_hour: { utilization: 0.2, resetsAt } })))
+  h.acp.seedLimit({ windowMinutes: 10080, remaining: 0.9 })
+  assert.deepEqual(h.acp.snapshot().limit, { windowMinutes: 10080, remaining: 0.9 })
+  h.acp.stop()
 })

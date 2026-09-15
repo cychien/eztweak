@@ -3,17 +3,21 @@
 import Cancel01Icon from '@hugeicons/core-free-icons/Cancel01Icon'
 import AlignSelectionIcon from '@hugeicons/core-free-icons/AlignSelectionIcon'
 import ArrowDown01Icon from '@hugeicons/core-free-icons/ArrowDown01Icon'
+import ArrowRight02Icon from '@hugeicons/core-free-icons/ArrowRight02Icon'
 import Grid02Icon from '@hugeicons/core-free-icons/Grid02Icon'
-import Tick02Icon from '@hugeicons/core-free-icons/Tick02Icon'
+import ChatGptIcon from '@hugeicons/core-free-icons/ChatGptIcon'
+import CheckIcon from '@hugeicons/core-free-icons/CheckIcon'
+import ClaudeIcon from '@hugeicons/core-free-icons/ClaudeIcon'
 import CursorMagicSelection02Icon from '@hugeicons/core-free-icons/CursorMagicSelection02Icon'
 import File02Icon from '@hugeicons/core-free-icons/File02Icon'
 import KeyboardIcon from '@hugeicons/core-free-icons/KeyboardIcon'
 import Select01Icon from '@hugeicons/core-free-icons/Select01Icon'
 import Navigation03Icon from '@hugeicons/core-free-icons/Navigation03Icon'
 import BubbleChatAddIcon from '@hugeicons/core-free-icons/BubbleChatAddIcon'
-import FlashIcon from '@hugeicons/core-free-icons/FlashIcon'
+import BubbleChatOutcomeIcon from '@hugeicons/core-free-icons/BubbleChatOutcomeIcon'
 import Edit02Icon from '@hugeicons/core-free-icons/Edit02Icon'
 import type { SessionConfigOption } from '@agentclientprotocol/sdk'
+import { AGENT_PROFILES, type AgentBrand, agentBrandFor, agentProfileFor } from '../agents.js'
 import {
   type AcpConfigValue,
   configLabel,
@@ -22,6 +26,7 @@ import {
   shortConfigValueName,
 } from '../acp-config.js'
 import { attachify } from './attach.js'
+import { confirmSkipped, rememberConfirm } from './confirm-skip.js'
 import type { SlashCommand } from './slash.js'
 import type { Device, Size } from './devices.js'
 import {
@@ -47,7 +52,14 @@ import {
 } from './canvas-layout.js'
 import type { CanvasMetrics, Layout } from './canvas-layout.js'
 import type { DraftWire, NumberedRef, RefWire } from './draft.js'
-import { bodyFromComment, fileMarker, refChipText, refMarker, splitComment } from './draft.js'
+import {
+  bodyFromComment,
+  fileMarker,
+  refChipText,
+  refMarker,
+  skillMarker,
+  splitComment,
+} from './draft.js'
 import { markdownEl } from './markdown.js'
 import { reduceNav } from './nav.js'
 import { threadOrder } from './thread.js'
@@ -91,10 +103,9 @@ interface ConversationWire {
   text: string
   ts: number
   batchId?: string
-  /** The skill this batch asked for. The only trace there is: an explicitly
-   *  invoked skill is expanded into the prompt by the agent, so it produces no
-   *  tool call for the activity feed to show. */
-  skill?: string
+  /** The skills this batch named, in the order they were written. `[skill n]`
+   *  in the text is `skills[n-1]`. */
+  skills?: string[]
   items?: {
     comment: string
     where: string
@@ -154,6 +165,9 @@ interface AcpWire {
    *  without naming the options, so a hand-written copy would only be a second
    *  place for the shape to drift. */
   configOptions?: SessionConfigOption[]
+  /** The usage window this review will reach first, when the agent has said so.
+   *  Absent until then, which can be for a whole session. */
+  limit?: { windowMinutes: number; remaining: number; resetsAt?: number }
   /** A cancel is out and the turn has not ended yet. */
   cancelling?: true
   error?: string
@@ -166,7 +180,12 @@ interface AcpAskWire {
   questions: {
     key: string
     text?: string
-    options: { id: string; name: string; description?: string; hint?: string }[]
+    options: {
+      id: string
+      name: string
+      description?: string
+      hint?: string
+    }[]
   }[]
 }
 
@@ -185,7 +204,6 @@ const MOD_LABEL = modLabel(navigator.userAgent)
 /** The path the shell was opened on. Only ever the starting point: where the
  *  previews actually are is `nav.url`, which moves with the app. */
 const PAGE_PATH = new URLSearchParams(location.search).get('path') || '/'
-
 
 const ANNOTATE_MODES: {
   id: Exclude<Mode, 'off'>
@@ -245,8 +263,7 @@ function shownDevices(): Device[] {
 
 /** Unlike `deviceById`, drawn from everything the canvas can show - the
  *  portrait tablet is not in the single-view table. */
-const canvasDevice = (id: string): Device =>
-  CANVAS_DEVICES.find((d) => d.id === id) ?? DESKTOP
+const canvasDevice = (id: string): Device => CANVAS_DEVICES.find((d) => d.id === id) ?? DESKTOP
 
 const canvasLayout = (): Device[][] => layout.map((row) => row.map(canvasDevice))
 
@@ -280,10 +297,7 @@ function loadView(): void {
 
 function saveView(): void {
   try {
-    localStorage.setItem(
-      VIEW_KEY,
-      JSON.stringify({ device: deviceId, multi, layout }),
-    )
+    localStorage.setItem(VIEW_KEY, JSON.stringify({ device: deviceId, multi, layout }))
   } catch {}
 }
 
@@ -692,7 +706,10 @@ const sideHead = h('div', 'ez-side-head')
 sideHead.append(headRow, target, deviceRow, annotateGroup)
 
 const banner = h('div', 'ez-banner')
-banner.style.display = 'none'
+// `hidden`, not `style.display`: the notice stack tells an empty stack from a
+// full one with `:has(> *:not([hidden]))`, so a card that hides itself another
+// way is still counted and the stack casts a shadow over nothing.
+banner.hidden = true
 
 // ---------------------------------------------------------------- update card
 
@@ -867,7 +884,7 @@ const shownItems = CANVAS_DEVICES.map((d) => {
   item.dataset.device = d.id
   item.title = deviceLabel(d)
   const tick = h('span', 'ez-menu-tick')
-  tick.append(icon(Tick02Icon as IconNode, 14))
+  tick.append(icon(CheckIcon as IconNode, 14))
   item.append(tick, h('span', 'ez-menu-name', d.name))
   item.onclick = () => toggleShown(d.id)
   shownMenu.appendChild(item)
@@ -1130,7 +1147,12 @@ function paintFrame(
   if (frame.device.id !== device.id || frame.zoom !== applied) {
     frame.device = device
     frame.zoom = applied
-    toFrame(frame.id, { type: 'ez:viewport', preset: device.id, zoom: applied, scoped: multi })
+    toFrame(frame.id, {
+      type: 'ez:viewport',
+      preset: device.id,
+      zoom: applied,
+      scoped: multi,
+    })
   }
 }
 
@@ -1274,22 +1296,20 @@ const noteAttach = attachify({
       // and the draft is what the fresh session is about to be asked.
       run: () => void newChat(),
     },
+    {
+      id: 'resume',
+      label: 'Resume',
+      hint: '回到之前的對話',
+      keywords: ['resume', 'chat', 'history', 'past', '對話', '紀錄', '之前', '回到'],
+      icon: BubbleChatOutcomeIcon as IconNode,
+      // Nothing to resume onto without an agent, and nothing to resume *to*
+      // while this review has only ever had the one conversation.
+      enabled: () => !!snapshot?.acp && (snapshot.chats?.length ?? 0) > 1,
+      run: () => void openResume(),
+    },
   ],
   skills: () => fetchSkills(),
 })
-/** The skill this batch will run, above the box it was chosen in. A row of its
- *  own rather than a chip in the text: it applies to the batch, and the cross is
- *  the whole of its interface. */
-const skillName = h('span', 'ez-skill-name')
-const skillClear = h('button', 'ez-skill-clear')
-skillClear.title = '不要用這個 skill'
-skillClear.setAttribute('aria-label', '不要用這個 skill')
-skillClear.append(icon(Cancel01Icon as IconNode, 11))
-skillClear.onclick = () => setBatchSkill(null)
-const skillPill = h('div', 'ez-skill-pill')
-skillPill.hidden = true
-skillPill.append(icon(FlashIcon as IconNode, 12), skillName, skillClear)
-
 const note = noteAttach.editable
 note.title = '寫補充說明（N）'
 
@@ -1316,12 +1336,207 @@ const configWrap = h('div', 'ez-config')
 configWrap.hidden = true
 configWrap.append(configPill, configMenu)
 
+/** How much of the subscription is left, at the end of the row the agent and the
+ *  model are on.
+ *
+ *  One window, not both: the question a reviewer has is when the reviewing stops,
+ *  and the answer to that is whichever window empties first. Five-hourly when
+ *  there is one, weekly otherwise - see `readLimit`.
+ *
+ *  Text, not a control: nothing here can be clicked, and nothing here can be
+ *  asked for either. The agent reports this when it reports it, so the row simply
+ *  has no figure on it until one arrives. */
+const limitNote = h('span', 'ez-limit')
+limitNote.hidden = true
+
+/** An answer the review needs before it does something it cannot undo.
+ *
+ *  In the sidebar rather than in a `confirm()`. A native dialog is the browser's,
+ *  not this tool's: it cannot say which review it belongs to, it steals focus
+ *  from the page being reviewed, and it cannot carry the one control that makes a
+ *  recurring question bearable - a way to stop asking.
+ *
+ *  Built once and reused, like the composer: a card rebuilt under the pointer
+ *  would move the button being clicked.
+ *
+ *  The checkbox only ever remembers a yes - see `confirm-skip.ts`. */
+const confirmTitle = h('div', 'ez-notice-title')
+const confirmBody = h('div', 'ez-notice-body')
+const confirmSkip = h('input') as HTMLInputElement
+confirmSkip.type = 'checkbox'
+confirmSkip.id = 'ez-confirm-skip'
+const confirmSkipLabel = h('label', 'ez-notice-skip')
+confirmSkipLabel.htmlFor = confirmSkip.id
+confirmSkipLabel.append(confirmSkip, h('span', '', '以後不再提醒'))
+const confirmGo = h('button', 'ez-notice-go')
+const confirmNo = h('button', 'ez-notice-no', '取消')
+const confirmActions = h('div', 'ez-notice-actions')
+confirmActions.append(confirmGo, confirmNo)
+const confirmCard = h('section', 'ez-notice ez-confirm')
+confirmCard.hidden = true
+// The checkbox on its own line under the buttons, not beside them: it is a
+// footnote to the whole question rather than a third answer to it, and at this
+// width a row of three wraps anyway - into a checkbox floating off to the right,
+// attached to nothing.
+confirmCard.append(confirmTitle, confirmBody, confirmActions, confirmSkipLabel)
+
+/** The conversations this review has had, to pick one to carry on from.
+ *
+ *  The same card as the one that asks before switching agent, in the same place
+ *  and the same shape: both are the review stopping to put something in front of
+ *  the user, and a second look for the second one would be a second thing to
+ *  learn. Only the contents differ - a question there, a list here.
+ *
+ *  Opened by `/resume` rather than by a control kept on screen. A review normally
+ *  has one conversation and stays on it; a permanent picker would be chrome that
+ *  answers a question almost nobody is asking, in a sidebar where the room is
+ *  wanted for the conversation itself. */
+const resumeTitle = h('div', 'ez-notice-title', '回到之前的對話')
+const resumeList = h('div', 'ez-notice-list')
+resumeList.setAttribute('role', 'menu')
+const resumeClose = h('button', 'ez-notice-x')
+resumeClose.title = '關閉'
+resumeClose.setAttribute('aria-label', '關閉')
+resumeClose.append(icon(Cancel01Icon as IconNode, 13))
+const resumeCard = h('section', 'ez-notice ez-resume')
+resumeCard.hidden = true
+resumeCard.append(resumeClose, resumeTitle, resumeList)
+
+interface ChatListWire {
+  id: string
+  startedAt: number
+  entries: number
+  current: boolean
+  title?: string
+}
+
+let resumeRows: HTMLElement[] = []
+
+/** Which row the arrow is on. Exactly one, always: the arrow is not decoration
+ *  on every line, it is the pointer that says which line the keyboard is about
+ *  to open. */
+function pointAtResumeRow(row: HTMLElement): void {
+  for (const other of resumeRows) other.toggleAttribute('data-active', other === row)
+}
+
+function closeResume(): void {
+  resumeCard.hidden = true
+}
+
+async function openResume(): Promise<void> {
+  // Drawn from what is known before the request lands, so the card appears with
+  // the keypress rather than after a round trip to the filesystem and back.
+  resumeList.textContent = ''
+  resumeCard.hidden = false
+  const res = await api('/acp/chats')
+  if (!res.ok) {
+    closeResume()
+    return
+  }
+  const { chats } = (await res.json()) as { chats: ChatListWire[] }
+  resumeList.textContent = ''
+  resumeRows = chats.map((chat) => {
+    const row = h('button', 'ez-notice-row')
+    row.setAttribute('role', 'menuitemradio')
+    row.setAttribute('aria-checked', String(chat.current))
+    if (chat.current) row.dataset.current = ''
+    // The title leads and the time follows it, because the title is what is
+    // being read and the time is what tells two alike ones apart. A conversation
+    // with neither a name nor anything said in it has only its time, which is
+    // then the whole row rather than a caption under a blank.
+    row.append(
+      icon(ArrowRight02Icon as IconNode, 12),
+      h('span', 'ez-notice-row-name', chat.title || chatTime(chat.startedAt)),
+      h('span', 'ez-notice-row-when', chat.title ? chatTime(chat.startedAt) : ''),
+    )
+    // Pointer and keyboard write the same state, which is what keeps the arrow
+    // single: hover alone would leave a second one behind wherever focus sits.
+    row.addEventListener('pointerenter', () => pointAtResumeRow(row))
+    row.addEventListener('focus', () => pointAtResumeRow(row))
+    row.title = chat.entries ? `${chat.entries} 則` : '尚無內容'
+    row.onclick = () => {
+      closeResume()
+      if (!chat.current) void switchChat(chat.id)
+    }
+    resumeList.append(row)
+    return row
+  })
+  resumeCard.hidden = chats.length === 0
+  // Arrow keys walk the list from wherever focus is, so it has to start in it -
+  // which is also what puts the arrow on the first row.
+  resumeRows[0]?.focus()
+}
+
+resumeCard.onkeydown = (e) => {
+  if (walkMenu(e, resumeRows)) return
+  if (e.key === 'Escape') {
+    e.stopPropagation()
+    closeResume()
+  }
+}
+resumeClose.onclick = () => closeResume()
+
+/** Every notice the review raises, in one place: floating at the foot of the
+ *  thread, hard against the rule above the composer.
+ *
+ *  It overlaps the thread rather than pushing it, which is the point - a notice
+ *  is momentary and the conversation under it is not, so nothing below it moves
+ *  when one arrives or goes, and the composer never jumps out from under the
+ *  cursor. Covering the last message or two is the price, and it is the right
+ *  way round: the notice is what wants reading now. */
+const notices = h('div', 'ez-notices')
+notices.append(banner, updateCard, resumeCard, confirmCard)
+
+interface ConfirmOffer {
+  /** What is being asked, not what it says: the answer is remembered under this,
+   *  so a reworded question keeps the answer the user already gave. */
+  key: string
+  title: string
+  body: string
+  go: string
+}
+
+let answerConfirm: ((ok: boolean) => void) | null = null
+
+function closeConfirm(ok: boolean, offer?: ConfirmOffer): void {
+  const answer = answerConfirm
+  answerConfirm = null
+  confirmCard.hidden = true
+  if (offer) rememberConfirm(localStorage, offer.key, { ok, skip: confirmSkip.checked })
+  answer?.(ok)
+}
+
+function askConfirm(offer: ConfirmOffer): Promise<boolean> {
+  if (confirmSkipped(localStorage, offer.key)) return Promise.resolve(true)
+  // A second question replaces the first, which is answered no: the card is one
+  // card, and leaving a caller waiting on a card nobody can see would hang it.
+  answerConfirm?.(false)
+  answerConfirm = null
+  confirmTitle.textContent = offer.title
+  confirmBody.textContent = offer.body
+  confirmGo.textContent = offer.go
+  confirmSkip.checked = false
+  confirmCard.hidden = false
+  confirmGo.onclick = () => closeConfirm(true, offer)
+  confirmNo.onclick = () => closeConfirm(false, offer)
+  confirmCard.onkeydown = (e) => {
+    if (e.key === 'Escape') {
+      e.stopPropagation()
+      closeConfirm(false, offer)
+    }
+  }
+  confirmGo.focus()
+  return new Promise<boolean>((resolve) => {
+    answerConfirm = resolve
+  })
+}
+
 /** The agent and its model, on one line above the composer. */
 const controlRow = h('div', 'ez-control-row')
 controlRow.hidden = true
-controlRow.append(agentWrap, configWrap)
+controlRow.append(agentWrap, configWrap, limitNote)
 
-queueSection.append(queueScroll, controlRow, skillPill, noteAttach.wrap, sendBtn)
+queueSection.append(queueScroll, controlRow, noteAttach.wrap, sendBtn)
 
 /** The editor for a queued annotation: the row's own comment, in place. One
  *  composer, built once and moved into whichever row is open - nothing else on
@@ -1376,23 +1591,7 @@ const convList = h('div', 'ez-conv')
 const convScroll = h('div', 'ez-fade ez-conv-scroll')
 convScroll.appendChild(convList)
 
-/** Which conversation the thread is showing, and the way back to the others.
- *
- *  Quiet while it has nothing to say - absent on a review that has only ever had
- *  one conversation, and unremarkable while the newest one is showing, which is
- *  the normal state. It speaks up in the one case that matters: an *earlier*
- *  conversation is on screen, feedback sent now goes to that one, and nothing
- *  else on screen would say so. */
-const chatPill = h('button', 'ez-chat-pill')
-chatPill.setAttribute('aria-haspopup', 'menu')
-chatPill.setAttribute('aria-expanded', 'false')
-const chatMenu = h('div', 'ez-menu')
-chatMenu.setAttribute('role', 'menu')
-chatMenu.setAttribute('aria-label', '對話紀錄')
-const chatWrap = h('div', 'ez-chat')
-chatWrap.hidden = true
-chatWrap.append(chatPill, chatMenu)
-convSection.append(chatWrap, convScroll)
+convSection.append(convScroll, notices)
 
 const resizer = h('div', 'ez-resizer')
 resizer.tabIndex = 0
@@ -1402,7 +1601,7 @@ resizer.setAttribute('aria-valuemin', String(SIDEBAR_MIN))
 resizer.setAttribute('aria-label', '調整側邊欄寬度')
 resizer.title = '拖曳調整寬度，雙擊還原'
 
-sidebar.append(resizer, sideHead, banner, updateCard, convSection, queueSection)
+sidebar.append(resizer, sideHead, convSection, queueSection)
 root.append(stageWrap, sidebar)
 
 // ---------------------------------------------------------------- panning
@@ -1564,7 +1763,8 @@ function beginCardDrag(e: PointerEvent, frame: Frame): void {
     if (clientX < stageEdge.left + PAN_EDGE) dx = -creep(stageEdge.left + PAN_EDGE - clientX)
     else if (clientX > stageEdge.right - PAN_EDGE) dx = creep(clientX - stageEdge.right + PAN_EDGE)
     if (clientY < stageEdge.top + PAN_EDGE) dy = -creep(stageEdge.top + PAN_EDGE - clientY)
-    else if (clientY > stageEdge.bottom - PAN_EDGE) dy = creep(clientY - stageEdge.bottom + PAN_EDGE)
+    else if (clientY > stageEdge.bottom - PAN_EDGE)
+      dy = creep(clientY - stageEdge.bottom + PAN_EDGE)
     if (dx) stage.scrollLeft += dx
     if (dy) stage.scrollTop += dy
     // Every frame, not just after a move: edge-scrolling and the wheel both
@@ -1691,7 +1891,6 @@ addEventListener('resize', () => {
   capQueue()
 })
 
-
 resizer.addEventListener('pointerdown', (e) => {
   if (e.button !== 0) return
   const startX = e.clientX
@@ -1816,7 +2015,12 @@ function applyPickEffect(effect: PickEffect): void {
 }
 
 function startPick(host: 'note'): void {
-  dispatchPick({ t: 'arm', id: `s${++pickSeq}-${Date.now().toString(36)}`, host, now: Date.now() })
+  dispatchPick({
+    t: 'arm',
+    id: `s${++pickSeq}-${Date.now().toString(36)}`,
+    host,
+    now: Date.now(),
+  })
 }
 
 function abortPick(reason: 'escape' | 'mode' | 'sent' | 'ended'): boolean {
@@ -1855,7 +2059,10 @@ function setMulti(next: boolean): void {
 }
 
 async function api(path: string, init?: RequestInit): Promise<Response> {
-  return fetch(`${API}${path}`, { headers: { 'content-type': 'application/json' }, ...init })
+  return fetch(`${API}${path}`, {
+    headers: { 'content-type': 'application/json' },
+    ...init,
+  })
 }
 
 /** Not the button's disabled state: ⌘+Enter reaches `sendBatch` without it, and
@@ -1869,15 +2076,42 @@ function paintSendState(): void {
   sendBtn.disabled = sending || snapshot?.state === 'ended' || noteAttach.pending() > 0
 }
 
+/** Keep the usage figure honest.
+ *
+ *  It goes stale for a reason the review cannot see: the allowance is the
+ *  account's, and a terminal session in another window spends it just as fast as
+ *  a turn here does. So the moments to ask are the moments the number is about
+ *  to be read - the window coming back to the front, and the tab becoming
+ *  visible again - plus a slow beat for a window left open and watched.
+ *
+ *  Only while visible: a sidebar behind another window is not being read, and
+ *  waking a process every minute to update a figure nobody is looking at is the
+ *  kind of thing that costs a laptop its afternoon. The daemon throttles anyway,
+ *  so asking twice in a second is free.
+ *
+ *  Nothing here waits on the answer: it arrives as a new snapshot, the same way
+ *  every other change does. */
+const LIMIT_BEAT_MS = 120_000
+
+function refreshLimit(): void {
+  if (document.visibilityState !== 'visible' || !snapshot?.acp) return
+  void api('/acp/limit', { method: 'POST' }).catch(() => {})
+}
+
+window.addEventListener('focus', refreshLimit)
+document.addEventListener('visibilitychange', refreshLimit)
+setInterval(refreshLimit, LIMIT_BEAT_MS)
+
 async function sendBatch(): Promise<void> {
   if (sending || noteAttach.pending() > 0) return
   const count = snapshot?.annotations.length ?? 0
   const attachments = noteAttach.ids()
   const references = noteAttach.refs()
   const text = noteAttach.text()
+  const skills = noteAttach.skills()
   // A skill on its own is a request: "run this over what you can see" needs no
   // annotation and no note.
-  if (count === 0 && !text && attachments.length === 0 && references.length === 0 && !batchSkill) {
+  if (count === 0 && !text && attachments.length === 0 && references.length === 0 && !skills.length) {
     return
   }
   // Called off before the box is emptied: an answer arriving after the reset
@@ -1892,15 +2126,13 @@ async function sendBatch(): Promise<void> {
         note: text,
         attachments,
         references,
-        ...(batchSkill ? { skill: batchSkill.name } : {}),
+        ...(skills.length ? { skills } : {}),
       }),
     })
-    // Reset, not discard: the batch owns these files now. The skill goes with
-    // it: it was this batch's, and a later one that wants it can say so.
-    if (res.ok) {
-      noteAttach.reset()
-      setBatchSkill(null)
-    }
+    // Reset, not discard: the batch owns these files now. The skill chip goes
+    // with the rest of the box - it was this batch's, and a later one that wants
+    // it can say so.
+    if (res.ok) noteAttach.reset()
   } finally {
     // Restored even when the request threw: the note and its chips are still
     // there, so the send has to stay retryable.
@@ -1934,7 +2166,10 @@ function paintEditState(): void {
 function openEdit(a: AnnotationWire): void {
   if (editing?.id === a.id) return
   closeEdit('switched')
-  editing = { id: a.id, owned: new Set((a.attachments ?? []).map((f) => f.id)) }
+  editing = {
+    id: a.id,
+    owned: new Set((a.attachments ?? []).map((f) => f.id)),
+  }
   // Draws the row around the composer, which is what puts it in the document.
   render()
   // Focused before the seeding, and both only once it is on screen: `restore`
@@ -2012,6 +2247,62 @@ async function newChat(): Promise<void> {
   await api('/acp/new', { method: 'POST' })
 }
 
+// ---------------------------------------------------------------- menu keys
+
+/** Whose agent this is, as a mark before its name.
+ *
+ *  Nothing at all for one this does not recognise: a custom ACP command is a
+ *  real thing to be running, and a wrong badge would be worse than none. */
+function brandMark(brand: AgentBrand | undefined, size: number): HTMLElement[] {
+  if (!brand) return []
+  const mark = h('span', 'ez-brand-mark')
+  mark.append(icon((brand === 'claude' ? ClaudeIcon : ChatGptIcon) as IconNode, size))
+  return [mark]
+}
+
+/** The mark on the chosen row, at its right edge. Always built, never
+ *  conditionally: the space it takes is what stops the names stepping sideways
+ *  as the choice moves, and CSS shows it only on the row that is on. */
+function menuCheck(): HTMLElement {
+  const check = h('span', 'ez-menu-check')
+  check.append(icon(CheckIcon as IconNode, 14))
+  return check
+}
+
+/** Line a menu up under the control that opened it, without letting it leave the
+ *  sidebar.
+ *
+ *  CSS alone can do one or the other. Anchored to its own control a menu sits
+ *  where it belongs but `width: max-content` carries it off the right edge;
+ *  anchored to the row it is bounded but sits under whichever control happens to
+ *  be first. The row stays the containing block - that is what makes the bound
+ *  statable - and the offset is measured, which is the one number CSS cannot
+ *  know. */
+function placeMenu(pill: HTMLElement, menu: HTMLElement): void {
+  const row = pill.offsetParent as HTMLElement | null
+  if (!row) return
+  const rightmost = Math.max(0, row.clientWidth - menu.offsetWidth)
+  menu.style.left = `${Math.min(pill.offsetLeft, rightmost)}px`
+}
+
+/** Arrows walk the rows. True when the press was taken.
+ *
+ *  A menu opens with nothing focused: the chosen row is marked by its tick, and
+ *  focusing it on open would paint it with the focus fill - which is the very
+ *  background the chosen row is meant not to have. So the first press enters the
+ *  list from whichever end it came from. */
+function walkMenu(e: KeyboardEvent, rows: HTMLElement[]): boolean {
+  if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return false
+  if (!rows.length) return false
+  const down = e.key === 'ArrowDown'
+  const at = rows.indexOf(document.activeElement as HTMLElement)
+  const next =
+    at === -1 ? (down ? 0 : rows.length - 1) : (at + (down ? 1 : -1) + rows.length) % rows.length
+  rows[next]?.focus()
+  e.preventDefault()
+  return true
+}
+
 // -------------------------------------------------------------- agent picker
 
 interface AgentWire {
@@ -2024,6 +2315,7 @@ interface AgentWire {
 let agentMenuOpen = false
 let agentsDrawn: string | null = null
 let agents: AgentWire[] = []
+let agentRows: HTMLElement[] = []
 
 function paintAgentMenuState(): void {
   agentWrap.toggleAttribute('data-open', agentMenuOpen)
@@ -2039,7 +2331,10 @@ function closeAgentMenu(): void {
 agentPill.onclick = () => {
   agentMenuOpen = !agentMenuOpen
   paintAgentMenuState()
-  if (agentMenuOpen) void loadAgents()
+  if (!agentMenuOpen) return
+  placeMenu(agentPill, agentMenu)
+  // Again once the list is in: its width is what the placement is clamped to.
+  void loadAgents().then(() => placeMenu(agentPill, agentMenu))
 }
 
 document.addEventListener('click', (e) => {
@@ -2047,17 +2342,29 @@ document.addEventListener('click', (e) => {
 })
 
 agentMenu.addEventListener('keydown', (e) => {
+  if (walkMenu(e, agentRows)) return
   if (e.key !== 'Escape') return
   closeAgentMenu()
   agentPill.focus()
   e.preventDefault()
 })
 
+/** Which agent the review is on, read off the snapshot rather than off the list
+ *  fetched from `/acp/agents`.
+ *
+ *  The list says which agents exist and which are installed - facts that change
+ *  when the machine changes, not when the review does. Which one is *running* is
+ *  the snapshot's to say, and taking it from the list instead left the name stale
+ *  until something happened to refetch it: switching agent repainted from a
+ *  cached `current` that still named the old one. */
+function runningAgentId(): string | undefined {
+  return agentProfileFor(snapshot?.acp?.agent ?? '')?.id
+}
+
 async function loadAgents(): Promise<void> {
   const res = await api('/acp/agents')
   if (!res.ok) return
   agents = ((await res.json()) as { agents: AgentWire[] }).agents
-  agentsDrawn = null
   paintAgents()
 }
 
@@ -2068,61 +2375,64 @@ async function loadAgents(): Promise<void> {
  *  than reporting afterwards. */
 async function switchAgent(agent: AgentWire): Promise<void> {
   closeAgentMenu()
-  if (agent.current) return
-  const ok = confirm(
-    `改用 ${agent.name} 會開一段新對話。\n\n` +
-      '對話沒有辦法在不同 agent 之間延續，所以新的 agent 不會記得目前這段。\n' +
-      '目前的對話會留在「對話紀錄」裡，隨時可以切回來。',
-  )
+  if (agent.id === runningAgentId()) return
+  const ok = await askConfirm({
+    // Keyed on the act, not on which agent: the reason is the same whichever
+    // way the switch goes, so answering it once answers it for all of them.
+    key: 'switch-agent',
+    title: `確定要改用 ${agent.name}？`,
+    body: 'Session 綁定 Agent，切換 Agent 會開啟新對話。',
+    go: `改用 ${agent.name}`,
+  })
   if (!ok) return
-  await api('/acp/agent', { method: 'POST', body: JSON.stringify({ id: agent.id }) })
+  await api('/acp/agent', {
+    method: 'POST',
+    body: JSON.stringify({ id: agent.id }),
+  })
 }
 
 function paintAgents(): void {
-  const running = agents.find((a) => a.current)
-  agentPill.textContent = ''
-  agentPill.append(
-    h('span', 'ez-agent-name', running?.name ?? 'Agent'),
-    icon(ArrowDown01Icon as IconNode, 10),
-  )
-  const signature = JSON.stringify(agents)
+  const command = snapshot?.acp?.agent ?? ''
+  const runningId = runningAgentId()
+  // Only what is actually on this machine, plus whatever is running: an agent
+  // that is not installed is not a choice, but one the review is already on has
+  // to be in the list it is ticked in.
+  const shown = agents.filter((a) => a.installed || a.id === runningId)
+
+  const signature = JSON.stringify([shown, command])
   if (signature === agentsDrawn) return
   agentsDrawn = signature
 
+  agentPill.textContent = ''
+  agentPill.append(
+    ...brandMark(agentBrandFor(command), 14),
+    h('span', 'ez-agent-name', agentProfileFor(command)?.name ?? 'Agent'),
+    icon(ArrowDown01Icon as IconNode, 11),
+  )
+
   agentMenu.textContent = ''
-  for (const agent of agents) {
-    const row = h('button', `ez-menu-item${agent.current ? ' ez-on' : ''}`)
+  agentRows = shown.map((agent) => {
+    const on = agent.id === runningId
+    const row = h('button', 'ez-menu-item')
     row.setAttribute('role', 'menuitemradio')
-    row.setAttribute('aria-checked', String(agent.current))
-    const tick = h('span', 'ez-menu-tick')
-    tick.append(icon(Tick02Icon as IconNode, 14))
-    row.append(tick, h('span', 'ez-menu-name', agent.name))
-    // Not hidden when it is not found: an agent can be installed somewhere this
-    // cannot see, and the honest report of one that will not start is it failing
-    // with its own error in the thread.
-    if (!agent.installed) row.append(h('span', 'ez-agent-missing', '未偵測到'))
+    row.setAttribute('aria-checked', String(on))
+    if (on) row.dataset.current = ''
+    // This row's own brand, not the running one's: the whole point of the menu
+    // is the agents it is not on.
+    const brand = AGENT_PROFILES.find((p) => p.id === agent.id)?.brand
+    row.append(...brandMark(brand, 15), h('span', 'ez-menu-name', agent.name), menuCheck())
     row.onclick = () => void switchAgent(agent)
     agentMenu.append(row)
-  }
+    return row
+  })
 }
 
 // ------------------------------------------------------------------- skills
-
-/** The skill this batch will ask the agent to run, if any. Batch-level, not a
- *  chip in the note: it governs how the whole batch is handled, so a position
- *  inside the sentence would be a position that means nothing. */
-let batchSkill: SkillWire | null = null
 
 interface SkillWire {
   name: string
   description: string
   source: 'project' | 'user' | 'plugin'
-}
-
-const SOURCE_LABEL: Record<SkillWire['source'], string> = {
-  project: '專案',
-  user: '你安裝的',
-  plugin: 'plugin',
 }
 
 async function fetchSkills(): Promise<SlashCommand[]> {
@@ -2132,79 +2442,25 @@ async function fetchSkills(): Promise<SlashCommand[]> {
   const res = await api('/acp/skills')
   if (!res.ok) return []
   const { skills } = (await res.json()) as { skills: SkillWire[] }
+  // No glyph and no source label. The row is the name the user is about to type,
+  // and a column of identical lightning bolts beside a list of skills says only
+  // that they are all skills, which the `$` already said. Where a skill came from
+  // is not what anyone is choosing on - it stays searchable through `keywords`,
+  // which is where the description lives too.
+  //
+  // The one already chosen is marked, because this is a list of which skill the
+  // batch runs and not a list of skills to collect: a batch runs one, so picking
+  // a second is changing the answer. Saying so here is what makes the swap in the
+  // box read as a swap.
   return skills.map((skill) => ({
     id: skill.name,
     label: skill.name,
-    hint: SOURCE_LABEL[skill.source],
     keywords: [skill.description],
-    icon: FlashIcon as IconNode,
-    run: () => setBatchSkill(skill),
+    run: () => noteAttach.insertSkill(skill.name),
   }))
 }
 
-function setBatchSkill(skill: SkillWire | null): void {
-  batchSkill = skill
-  paintBatchSkill()
-  paintSendState()
-}
-
-function paintBatchSkill(): void {
-  skillPill.hidden = !batchSkill
-  if (!batchSkill) return
-  skillName.textContent = batchSkill.name
-  skillPill.title = batchSkill.description || batchSkill.name
-}
-
 // --------------------------------------------------------------- chat picker
-
-let chatMenuOpen = false
-let chatDrawn: string | null = null
-/** The rows as drawn, for the arrow keys. */
-let chatRows: HTMLElement[] = []
-
-function paintChatMenuState(): void {
-  chatWrap.toggleAttribute('data-open', chatMenuOpen)
-  chatPill.setAttribute('aria-expanded', String(chatMenuOpen))
-}
-
-function closeChatMenu(): void {
-  if (!chatMenuOpen) return
-  chatMenuOpen = false
-  paintChatMenuState()
-}
-
-chatPill.onclick = () => {
-  chatMenuOpen = !chatMenuOpen
-  paintChatMenuState()
-  // The one showing, so the arrows start from where the user is rather than from
-  // the top of a list they did not choose - and so the menu says which is on
-  // without spending a column on it.
-  if (chatMenuOpen) chatMenu.querySelector<HTMLElement>('[data-current]')?.focus()
-}
-
-document.addEventListener('click', (e) => {
-  if (e.target instanceof Node && !chatWrap.contains(e.target)) closeChatMenu()
-})
-
-chatWrap.addEventListener('focusout', (e) => {
-  const to = e.relatedTarget
-  if (to instanceof Node && chatWrap.contains(to)) return
-  closeChatMenu()
-})
-
-chatMenu.addEventListener('keydown', (e) => {
-  const at = chatRows.indexOf(document.activeElement as HTMLButtonElement)
-  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
-    const step = e.key === 'ArrowDown' ? 1 : -1
-    chatRows[(at + step + chatRows.length) % chatRows.length]?.focus()
-    e.preventDefault()
-    return
-  }
-  if (e.key !== 'Escape') return
-  closeChatMenu()
-  chatPill.focus()
-  e.preventDefault()
-})
 
 /** When a conversation happened, in as few characters as say which one it is.
  *  A date only once the day stops being today - the time alone is what tells two
@@ -2221,67 +2477,9 @@ function chatTime(at: number): string {
 }
 
 async function switchChat(id: string): Promise<void> {
-  closeChatMenu()
   await api('/acp/chat', { method: 'POST', body: JSON.stringify({ id }) })
 }
 
-function paintChats(s: SnapshotWire): void {
-  const chats = s.chats ?? []
-  // One conversation is not a choice, and a review that has never started a
-  // second one should not be carrying a control that says it might have.
-  chatWrap.hidden = chats.length < 2
-  if (chatWrap.hidden) {
-    closeChatMenu()
-    chatDrawn = null
-    return
-  }
-  // Between sessions there is nothing to switch onto.
-  const settable = s.acp?.state === 'idle' || s.acp?.state === 'working'
-  chatPill.disabled = !settable
-  if (!settable) closeChatMenu()
-
-  const signature = JSON.stringify([chats, settable])
-  if (signature === chatDrawn) return
-  chatDrawn = signature
-
-  // `chats` is newest first, so the newest is the head - the ordinary place to
-  // be, and the only one the pill stays quiet about.
-  const current = chats.find((c) => c.current)
-  const past = !!current && chats[0]?.id !== current.id
-  chatWrap.toggleAttribute('data-past', past)
-  chatPill.textContent = ''
-  chatPill.append(
-    h('span', 'ez-chat-name', past ? `${chatTime(current.startedAt)} 的對話` : '對話紀錄'),
-    icon(ArrowDown01Icon as IconNode, 11),
-  )
-  chatPill.title = past
-    ? '正在看之前的對話，送出的回饋會接在這一段後面'
-    : `這次 review 有 ${chats.length} 段對話`
-
-  chatMenu.textContent = ''
-  chatRows = chats.map((chat) => {
-    // No tick column, following the device menu: this is a short list with one
-    // of them on, and the menu opens with that one already under the cursor - a
-    // column of blanks to say so would only push the times off the edge.
-    const row = h('button', 'ez-menu-item')
-    row.setAttribute('role', 'menuitemradio')
-    row.setAttribute('aria-checked', String(chat.current))
-    if (chat.current) row.dataset.current = ''
-    row.append(
-      h('span', 'ez-menu-name', chatTime(chat.startedAt)),
-      h('span', 'ez-chat-count', chat.entries ? `${chat.entries} 則` : '尚無內容'),
-    )
-    row.onclick = () => {
-      if (chat.current) {
-        closeChatMenu()
-        return
-      }
-      void switchChat(chat.id)
-    }
-    chatMenu.append(row)
-    return row
-  })
-}
 
 // -------------------------------------------------------------- agent config
 
@@ -2305,6 +2503,7 @@ function closeConfigMenu(): void {
 configPill.onclick = () => {
   configMenuOpen = !configMenuOpen
   paintConfigMenuState()
+  if (configMenuOpen) placeMenu(configPill, configMenu)
 }
 
 document.addEventListener('click', (e) => {
@@ -2318,6 +2517,7 @@ configWrap.addEventListener('focusout', (e) => {
 })
 
 configMenu.addEventListener('keydown', (e) => {
+  if (walkMenu(e, [...configMenu.querySelectorAll<HTMLElement>('.ez-menu-item')])) return
   if (e.key !== 'Escape') return
   closeConfigMenu()
   configPill.focus()
@@ -2331,7 +2531,10 @@ configMenu.addEventListener('keydown', (e) => {
  *  refusal simply leaves the value where it was. */
 async function setConfig(configId: string, value: AcpConfigValue): Promise<void> {
   closeConfigMenu()
-  await api('/acp/config', { method: 'POST', body: JSON.stringify({ configId, value }) })
+  await api('/acp/config', {
+    method: 'POST',
+    body: JSON.stringify({ configId, value }),
+  })
 }
 
 /** The option the pill names. The model, when the agent offers one - it is the
@@ -2342,10 +2545,28 @@ function pillOption(options: SessionConfigOption[]): SessionConfigOption | undef
   return options.find((o) => o.category === 'model') ?? options[0]
 }
 
+/** A window's length, as a person would say it. The agents report a duration -
+ *  300 minutes, 10080 - and the common ones have names worth using. */
+function windowName(minutes: number): string {
+  if (minutes === 7 * 24 * 60) return '一週'
+  if (minutes % (24 * 60) === 0) return `${minutes / (24 * 60)} 天`
+  if (minutes % 60 === 0) return `${minutes / 60} 小時`
+  return `${minutes} 分鐘`
+}
+
+function paintLimit(acp: AcpWire | undefined): void {
+  const limit = acp?.limit
+  limitNote.hidden = !limit
+  if (!limit) return
+  const name = windowName(limit.windowMinutes)
+  limitNote.textContent = `剩 ${Math.round(limit.remaining * 100)}% / ${name}`
+  limitNote.title = limit.resetsAt
+    ? `${name}用量，${new Date(limit.resetsAt * 1000).toLocaleString()} 重置`
+    : `${name}用量`
+}
+
 function paintConfig(acp: AcpWire | undefined): void {
-  const options = (acp?.configOptions ?? []).filter(
-    (o) => !HIDDEN_CATEGORIES.has(o.category ?? ''),
-  )
+  const options = (acp?.configOptions ?? []).filter((o) => !HIDDEN_CATEGORIES.has(o.category ?? ''))
   // Nothing offered, or no ACP agent at all: no control. An empty panel above the
   // composer would be permanent chrome that answers no question.
   configWrap.hidden = options.length === 0
@@ -2408,6 +2629,7 @@ function paintConfig(acp: AcpWire | undefined): void {
     }
     configMenu.append(group)
   }
+  if (configMenuOpen) placeMenu(configPill, configMenu)
 }
 
 /** Categories this picker does not offer.
@@ -2432,6 +2654,31 @@ function byCategory(a: SessionConfigOption, b: SessionConfigOption): number {
   return rank(a) - rank(b)
 }
 
+/** A row named "Default" is the only one in a list whose own name does not say
+ *  what it is. Where the agent reports what it resolves to, that answer replaces
+ *  the qualifier the name came with - "Default (recommended)" becomes "Default
+ *  (Opus · 1M context)", which is what the reader wanted the brackets to hold.
+ *
+ *  The agent's own text is kept whole; only its brackets are flattened, because
+ *  nesting them inside ours reads worse than the separator this shell already
+ *  uses for exactly this kind of qualifier.
+ *
+ *  Matched on the name as well as the value, because `default` is elsewhere a
+ *  real and self-explaining choice - it is what the permission mode calls
+ *  "Manual", and that needs no expanding. */
+function resolvedName(
+  option: SessionConfigOption,
+  value: AcpConfigValue,
+  name: string,
+  describes: { description?: string | null },
+): string {
+  const resolved = describes.description
+  if (option.type !== 'select' || value !== 'default' || !/default/i.test(name) || !resolved) {
+    return name
+  }
+  return `${name.replace(/\s*\([^)]*\)\s*$/, '')} (${resolved.replace(/\s*\(([^)]*)\)/g, ' · $1')})`
+}
+
 /** One settable row, in the vocabulary the header's menus already use: a tick
  *  column that holds its width whether or not there is a tick in it, so the
  *  names do not step sideways as the choice moves.
@@ -2446,12 +2693,11 @@ function configRow(
   describes: { description?: string | null },
   on: boolean,
 ): HTMLElement {
-  const row = h('button', `ez-menu-item${on ? ' ez-on' : ''}`)
+  const row = h('button', 'ez-menu-item')
   row.setAttribute('role', option.type === 'boolean' ? 'menuitemcheckbox' : 'menuitemradio')
   row.setAttribute('aria-checked', String(on))
-  const tick = h('span', 'ez-menu-tick')
-  tick.append(icon(Tick02Icon as IconNode, 14))
-  row.append(tick, h('span', 'ez-menu-name', name))
+  if (on) row.dataset.current = ''
+  row.append(h('span', 'ez-menu-name', resolvedName(option, value, name, describes)), menuCheck())
   if (describes.description) row.title = describes.description
   row.onclick = () => void setConfig(option.id, value)
   return row
@@ -2494,9 +2740,7 @@ function paintQueue(annotations: AnnotationWire[]): void {
     const open = editing?.id === a.id
     const primary = h('button', `ez-qi-act ${open ? 'ez-qi-tick' : 'ez-qi-edit'}`)
     primary.append(
-      open
-        ? icon(Tick02Icon as IconNode, TICK_ICON)
-        : icon(Edit02Icon as IconNode, EDIT_ICON),
+      open ? icon(CheckIcon as IconNode, TICK_ICON) : icon(Edit02Icon as IconNode, EDIT_ICON),
     )
     primary.title = open ? `儲存（${MOD_LABEL}+Enter）` : '改這則標註（送出前都還能改）'
     primary.onclick = open ? () => void saveEdit() : () => openEdit(a)
@@ -2546,16 +2790,6 @@ function buildSaid(entry: ConversationWire, isUser: boolean): HTMLElement {
   const said = h('div', isUser ? 'ez-bubble' : 'ez-said')
   const items = entry.items ?? []
 
-  // First, because it is what the rest of the batch was handed to. Nothing else
-  // in the thread would say a skill ran: the agent expands an explicitly invoked
-  // one into its prompt rather than calling its Skill tool, so there is no tool
-  // line for the activity feed to show.
-  if (entry.skill) {
-    const ran = h('div', 'ez-bubble-skill')
-    ran.append(icon(FlashIcon as IconNode, 11), h('span', undefined, entry.skill))
-    said.appendChild(ran)
-  }
-
   if (items.length) {
     const key = entry.batchId ?? String(entry.ts)
     const expanded = expandedBatches.has(key)
@@ -2566,7 +2800,13 @@ function buildSaid(entry: ConversationWire, isUser: boolean): HTMLElement {
     shown.forEach((item, i) => {
       const li = h('li', 'ez-bubble-item')
       const body = h('div', 'ez-bi-body')
-      const rendered = commentEl(item.comment, item.references, item.attachments)
+      const rendered = commentEl(
+        item.comment,
+        item.references,
+        item.attachments,
+        undefined,
+        entry.skills,
+      )
       // The anchor stays off the screen: within a session the author remembers
       // what they pointed at, and the agent's reply echoes it anyway. The rare
       // lookup is a hover away.
@@ -2602,6 +2842,7 @@ function buildSaid(entry: ConversationWire, isUser: boolean): HTMLElement {
     entry.references,
     entry.attachments,
     items.length ? 'ez-bubble-note' : undefined,
+    entry.skills,
   )
   if (entry.text || entry.references?.length || entry.attachments?.length) {
     said.appendChild(note.box)
@@ -2614,15 +2855,25 @@ function buildSaid(entry: ConversationWire, isUser: boolean): HTMLElement {
 /** Read-only echo of a chip. Names only: the shell is where the user recognises
  *  their own file or the element they pointed at, and the agent is who needs the
  *  path and the anchor. */
-function chipEl(name: string, glyph: IconNode, kind?: 'ref', title?: string): HTMLElement {
-  const chip = h('span', kind === 'ref' ? 'ez-chip ez-chip-ref' : 'ez-chip')
-  chip.append(icon(glyph, 11), h('span', 'ez-chip-name', name))
+function chipEl(
+  name: string,
+  glyph: IconNode | null,
+  kind?: 'ref' | 'skill',
+  title?: string,
+): HTMLElement {
+  const chip = h('span', kind ? `ez-chip ez-chip-${kind}` : 'ez-chip')
+  if (glyph) chip.append(icon(glyph, 11))
+  chip.append(h('span', 'ez-chip-name', name))
   if (title) chip.title = title
   return chip
 }
 
 const refChipEl = (n: number, label: string) =>
   chipEl(refChipText(n), AlignSelectionIcon as IconNode, 'ref', label)
+
+/** The same token the composer writes into the box, read back. No glyph, because
+ *  it is the same thing it was when it was typed - and the `$` is what says so. */
+const skillChipEl = (name: string) => chipEl(`$${name}`, null, 'skill')
 
 /** Only for files the comment did not place - see `commentEl`. */
 function fileChips(names: string[]): HTMLElement | null {
@@ -2649,6 +2900,7 @@ function commentEl(
   refs: RefEcho[] | undefined,
   files: string[] | undefined,
   className?: string,
+  skills?: string[],
 ): { box: HTMLElement; unplacedFiles: string[] } {
   const box = h('div', className)
   const numbered = new Map(
@@ -2660,6 +2912,15 @@ function commentEl(
   for (const part of splitComment(text)) {
     if (part.t === 'text') {
       box.appendChild(document.createTextNode(part.v))
+      continue
+    }
+    if (part.t === 'skill') {
+      const named = skills?.[part.n - 1]
+      // Like every other marker here: one naming nothing stays as it was
+      // written rather than vanishing, because the user put it there.
+      box.appendChild(
+        named === undefined ? document.createTextNode(skillMarker(part.n)) : skillChipEl(named),
+      )
       continue
     }
     if (part.t === 'file') {
@@ -2691,7 +2952,10 @@ function commentEl(
       box.appendChild(refChipEl(r.n, r.label))
     }
   }
-  return { box, unplacedFiles: names.filter((_, i) => !placedFiles.has(i + 1)) }
+  return {
+    box,
+    unplacedFiles: names.filter((_, i) => !placedFiles.has(i + 1)),
+  }
 }
 
 const QUEUE_VISIBLE = 2
@@ -2747,12 +3011,17 @@ function bannerText(): string | null {
       ? 'Agent 已結束這次 review。要繼續的話，請 agent 重新開啟 session'
       : 'Review 已結束'
   }
+  // Nothing here about being on an earlier conversation. The thread on screen is
+  // that conversation - its messages, its times - which says it better than a
+  // line above the composer can, and the picker marks the one being viewed. A
+  // standing label for a state the user chose is not a notice; this strip is for
+  // what needs answering.
   return pickNotice
 }
 
 function paintBanner(): void {
   const text = bannerText()
-  banner.style.display = text ? 'block' : 'none'
+  banner.hidden = !text
   if (text) banner.textContent = text
 }
 
@@ -2771,12 +3040,13 @@ function render(): void {
   for (const { btn } of annotateBtns) btn.disabled = ended
   paintSendState()
   paintConfig(s.acp)
-  paintChats(s)
+  paintLimit(s.acp)
   agentWrap.hidden = !s.acp
   // The row carries the gap below it, so it has to go when both of its controls
   // do - otherwise a poll-mode review keeps six pixels of nothing.
   controlRow.hidden = agentWrap.hidden && configWrap.hidden
   if (s.acp && !agents.length) void loadAgents()
+  paintAgents()
 
   if (s.acp?.cancelling) {
     // The cancel is out and the agent has not answered yet. With no button to grey
@@ -3021,7 +3291,12 @@ window.addEventListener('message', (e: MessageEvent) => {
     // starts held; its own popup died with the page it was on.
     if (popupFrame && popupFrame !== from) toFrame(from, { type: 'ez:hold', held: true })
     else if (popupFrame === from) setPopupFrame(null)
-    dispatchPick({ t: 'ready', page: data.page ?? '/', now: Date.now(), frame: from })
+    dispatchPick({
+      t: 'ready',
+      page: data.page ?? '/',
+      now: Date.now(),
+      frame: from,
+    })
   }
   if (data?.type === 'ez:pick-armed' && data.pickId) {
     dispatchPick({
@@ -3033,7 +3308,12 @@ window.addEventListener('message', (e: MessageEvent) => {
     })
   }
   if (data?.type === 'ez:draft' && data.pickId && data.draft) {
-    dispatchPick({ t: 'draft', id: data.pickId, draft: data.draft, frame: from })
+    dispatchPick({
+      t: 'draft',
+      id: data.pickId,
+      draft: data.draft,
+      frame: from,
+    })
   }
   if (data?.type === 'ez:picked' && data.pickId && data.ref) {
     dispatchPick({

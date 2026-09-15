@@ -212,6 +212,24 @@ const app = agent({ name: 'fake-acp-agent' })
       })
       return { stopReason: 'end_turn' }
     }
+    // The one channel a subscription limit reaches a client on: a `usage_update`
+    // carrying a vendor bag. The payload comes from the prompt so a test can send
+    // a shape the client is not supposed to understand as easily as one it is.
+    const limit = /LIMIT (\{.*\})/.exec(text)
+    if (limit) {
+      prompts.push({ sessionId, text })
+      await ctx.client.notify(methods.client.session.update, {
+        sessionId,
+        update: {
+          sessionUpdate: 'usage_update',
+          used: 1000,
+          size: 200000,
+          ...JSON.parse(limit[1]),
+        },
+      })
+      await say('ok')
+      return { stopReason: 'end_turn' }
+    }
     // The mode's own notification, sent alone. An agent may report a mode change
     // this way and never touch the option list, which is why the client cannot
     // rely on `config_option_update` for it.
@@ -222,6 +240,13 @@ const app = agent({ name: 'fake-acp-agent' })
         sessionId,
         update: { sessionUpdate: 'current_mode_update', currentModeId: 'plan' },
       })
+      return { stopReason: 'end_turn' }
+    }
+    // A turn that ends properly having said nothing - an agent that only ran
+    // tools, or whose skill did its work silently. The thread used to record
+    // nothing at all for one of these.
+    if (text.includes('SILENT')) {
+      prompts.push({ sessionId, text })
       return { stopReason: 'end_turn' }
     }
     prompts.push({ sessionId, text })

@@ -4,8 +4,10 @@
  *  server. Shared by the CLI's `--agent` flag and the shell's picker so the two
  *  cannot drift into offering different things under the same name. */
 
-import { delimiter, join } from 'node:path'
-import { accessSync, constants } from 'node:fs'
+/** Whose models an agent runs, for the mark shown beside one. An agent is not a
+ *  brand - Claude Code is not Anthropic - but the model it is about to answer
+ *  with belongs to one, and a model named only "6 Astra" does not say whose. */
+export type AgentBrand = 'claude' | 'openai'
 
 export interface AgentProfile {
   id: string
@@ -17,6 +19,7 @@ export interface AgentProfile {
    *  Not the same as `command`: two of these start through `npx`, which fetches
    *  the adapter but cannot conjure the agent behind it. */
   binary: string
+  brand?: AgentBrand
 }
 
 export const AGENT_PROFILES: AgentProfile[] = [
@@ -25,12 +28,14 @@ export const AGENT_PROFILES: AgentProfile[] = [
     name: 'Claude Code',
     command: 'npx -y @agentclientprotocol/claude-agent-acp',
     binary: 'claude',
+    brand: 'claude',
   },
   {
     id: 'codex',
     name: 'Codex',
     command: 'npx -y @agentclientprotocol/codex-acp',
     binary: 'codex',
+    brand: 'openai',
   },
   { id: 'gemini', name: 'Gemini CLI', command: 'gemini --experimental-acp', binary: 'gemini' },
 ]
@@ -48,23 +53,7 @@ export function agentProfileFor(command: string): AgentProfile | undefined {
   return AGENT_PROFILES.find((p) => p.command === command)
 }
 
-/** Whether this profile's CLI is on the PATH.
- *
- *  Advisory only, and the picker says so rather than hiding what fails the
- *  check: an agent can be installed somewhere this cannot see, and the honest
- *  report of a launch that does not work is the launch failing with its own
- *  error in the thread. */
-export function agentInstalled(profile: AgentProfile, env = process.env): boolean {
-  const path = env.PATH ?? ''
-  return path
-    .split(delimiter)
-    .filter(Boolean)
-    .some((dir) => {
-      try {
-        accessSync(join(dir, profile.binary), constants.X_OK)
-        return true
-      } catch {
-        return false
-      }
-    })
+/** Whose models the running agent answers with, when it is one we know. */
+export function agentBrandFor(command: string): AgentBrand | undefined {
+  return agentProfileFor(command)?.brand
 }

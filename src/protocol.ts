@@ -93,10 +93,20 @@ export interface FeedbackBatch {
   attachments?: Attachment[]
   /** elements picked into the note box, i.e. pointed at by the batch, not an item */
   references?: Reference[]
-  /** A skill the user asked the agent to run for this batch. Batch-level by
-   *  nature: it governs how the whole batch is handled, which is why it is not a
-   *  marker inside the note the way a file or a reference is. */
-  skill?: string
+  /** Skills the user named in this batch, in the order they wrote them.
+   *
+   *  A list, not one. The composer keeps every `$name` the user writes, because
+   *  which of them an agent will actually act on is the agent's business to
+   *  report - and it differs: only a leading `/name` is expanded by Claude, and
+   *  a second is swallowed as the first one's argument. Deleting one on the
+   *  user's behalf to make the rule tidy would be this tool answering a question
+   *  it was not asked.
+   *
+   *  `[skill n]` in a comment is `skills[n-1]`, the same positional contract
+   *  `[file n]` has - and for a sharper reason: the prefix a skill is invoked
+   *  with belongs to the agent, so the stored text carries the marker and
+   *  `acpPrompt` spends it once the agent is known. */
+  skills?: string[]
   sentAt: number
   deliveredAt?: number
   ackedAt?: number
@@ -129,11 +139,10 @@ export interface ConversationEntry {
   items?: ConversationItem[]
   attachments?: string[]
   references?: ReferenceEcho[]
-  /** The skill this batch asked for. Worth recording because an explicitly
-   *  invoked skill leaves no other trace: the agent expands it into the prompt
-   *  rather than calling its Skill tool, so nothing in the turn's activity says
-   *  it ran. */
-  skill?: string
+  /** The skills this batch named. Worth recording because an explicitly invoked
+   *  skill leaves no other trace: the agent expands it into the prompt rather
+   *  than calling its Skill tool, so nothing in the turn's activity says it ran. */
+  skills?: string[]
 }
 
 export type SessionEndedBy = 'user' | 'agent'

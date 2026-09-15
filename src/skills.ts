@@ -13,6 +13,7 @@
  *  name, so anything listed here can actually be invoked. */
 
 import { readFileSync, readdirSync } from 'node:fs'
+import { agentBrandFor } from './agents.js'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
@@ -30,13 +31,15 @@ export interface Skill {
  *  the user level, which is what the agent does. */
 const SKILL_DIRS = ['.claude/skills', '.agents/skills']
 
-/** Frontmatter's `name` and `description`, and nothing else.
+/** Frontmatter's `name`, `description` and `user-invocable`, and nothing else.
  *
- *  Deliberately not a YAML parser: the two fields this needs are plain scalars
- *  on one line, and a dependency that can parse anchors and flow mappings would
- *  buy nothing except the chance to throw on a skill file it disliked. A file
- *  whose frontmatter this cannot read is skipped, not guessed at. */
-function readFrontmatter(path: string): { name?: string; description?: string } | null {
+ *  Deliberately not a YAML parser: the fields this needs are plain scalars on one
+ *  line, and a dependency that can parse anchors and flow mappings would buy
+ *  nothing except the chance to throw on a skill file it disliked. A file whose
+ *  frontmatter this cannot read is skipped, not guessed at. */
+function readFrontmatter(
+  path: string,
+): { name?: string; description?: string; 'user-invocable'?: string } | null {
   let text: string
   try {
     text = readFileSync(path, 'utf8')
@@ -46,12 +49,12 @@ function readFrontmatter(path: string): { name?: string; description?: string } 
   if (!text.startsWith('---')) return null
   const end = text.indexOf('\n---', 3)
   if (end === -1) return null
-  const fields: { name?: string; description?: string } = {}
+  const fields: { name?: string; description?: string; 'user-invocable'?: string } = {}
   for (const line of text.slice(3, end).split('\n')) {
-    const match = /^(name|description):\s*(.*)$/.exec(line)
+    const match = /^(name|description|user-invocable):\s*(.*)$/.exec(line)
     if (!match) continue
     const value = match[2]!.trim().replace(/^['"]|['"]$/g, '')
-    if (value) fields[match[1] as 'name' | 'description'] = value
+    if (value) fields[match[1] as keyof typeof fields] = value
   }
   return fields
 }
@@ -75,6 +78,15 @@ function entries(dir: string): string[] {
 function readSkill(dir: string, name: string, source: Skill['source']): Skill | null {
   const fields = readFrontmatter(join(dir, name, 'SKILL.md'))
   if (!fields) return null
+  // A skill can declare that only the agent may reach for it. Offering one of
+  // those is worse than leaving it out: the CLI refuses the command with "this
+  // skill can only be invoked by Claude, not directly by users", and refusing it
+  // *is* the turn - the prompt never reaches the model, so the batch comes back
+  // with no reply, no error and nothing to explain the silence.
+  //
+  // Absent means invocable. The field is the exception, and a skill that says
+  // nothing about it is the ordinary kind.
+  if (fields['user-invocable']?.toLowerCase() === 'false') return null
   return { name, description: fields.description ?? '', source }
 }
 
@@ -113,4 +125,34 @@ export function listSkills(project: string, home: string = homedir()): Skill[] {
     }
   }
   return [...found.values()].sort((a, b) => a.name.localeCompare(b.name))
+}
+
+/** How this agent expects a skill to be named in a prompt.
+ *
+ *  Claude reads `/name`. Codex builds its own command list as `` `$${name}` ``,
+ *  so it reads `$name` - which is also what eztweak's composer writes, so for
+ *  codex the user's own text already speaks the right language and only Claude's
+ *  has to be translated.
+ *
+ *  Anything else keeps `$`: it is what the user typed, and inventing a prefix for
+ *  an agent nobody here has a profile for would be a guess dressed up as a
+ *  translation. */
+export function skillPrefix(agent: string): string {
+  return agentBrandFor(agent) === 'claude' ? '/' : '$'
+}
+
+/** Spend the `[skill n]` markers a comment carries, now that the agent is known.
+ *
+ *  The stored text keeps markers rather than prefixed names because the prefix
+ *  belongs to whoever is listening: the same conversation resumed on the other
+ *  agent has to read correctly there too, and a record written in Claude's
+ *  language would be a record of who happened to be running that afternoon.
+ *
+ *  A marker naming nothing is left exactly as it was written - the same rule the
+ *  shell draws it by, and the same reason: it is something the user put there. */
+export function spendSkillMarkers(text: string, skills: string[], agent: string): string {
+  return text.replace(/\[skill (\d+)\]/g, (whole, n: string) => {
+    const name = skills[Number(n) - 1]
+    return name === undefined ? whole : `${skillPrefix(agent)}${name}`
+  })
 }

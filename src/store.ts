@@ -129,6 +129,13 @@ export interface ChatSummary {
   startedAt: number
   entries: number
   current: boolean
+  /** The ACP session this conversation ran on, when it ever ran one. What the
+   *  agents' own names for it are keyed by - see `chat-titles.ts`. */
+  acpSessionId?: string
+  /** The agent it ran on, since each names its conversations in its own way. */
+  agent?: string
+  /** The first thing the user said in it, for a conversation no agent will name. */
+  said?: string
 }
 
 export interface ConversationClear {
@@ -284,7 +291,7 @@ export class SessionStore {
     note: string | null,
     attachments: Attachment[] = [],
     references: Reference[] = [],
-    skill?: string,
+    skills: string[] = [],
   ): FeedbackBatch | null {
     const items = this.annotations
     // A skill on its own is a batch: "run this over what you can see" is a
@@ -294,7 +301,7 @@ export class SessionStore {
       !note?.trim() &&
       attachments.length === 0 &&
       references.length === 0 &&
-      !skill
+      skills.length === 0
     ) {
       return null
     }
@@ -304,7 +311,7 @@ export class SessionStore {
       note: note?.trim() || null,
       ...(attachments.length ? { attachments } : {}),
       ...(references.length ? { references } : {}),
-      ...(skill ? { skill } : {}),
+      ...(skills.length ? { skills } : {}),
       sentAt: Date.now(),
     }
     this.writeJson('outbox.json', [...this.outbox, batch])
@@ -589,12 +596,29 @@ export class SessionStore {
     const current = this.currentChat.id
     const firstId = chats[0]?.id
     const log = this.conversation
-    return chats.map((chat) => ({
-      id: chat.id,
-      startedAt: chat.startedAt,
-      entries: log.filter((entry) => this.belongsTo(entry, chat, chat.id === firstId)).length,
-      current: chat.id === current,
-    }))
+    return chats.map((chat) => {
+      const mine = log.filter((entry) => this.belongsTo(entry, chat, chat.id === firstId))
+      const said = mine.find(
+        (entry) =>
+          entry.role === 'user' &&
+          (entry.text?.trim() || entry.items?.some((item) => item.comment?.trim())),
+      )
+      return {
+        id: chat.id,
+        startedAt: chat.startedAt,
+        entries: mine.length,
+        current: chat.id === current,
+        ...(chat.acpSessionId ? { acpSessionId: chat.acpSessionId } : {}),
+        ...(chat.agent ? { agent: chat.agent } : {}),
+        ...(said
+          ? {
+              said:
+                said.text?.trim() ||
+                said.items?.find((item) => item.comment?.trim())?.comment?.trim(),
+            }
+          : {}),
+      }
+    })
   }
 
   /** Whether the newest chat is showing and has nothing in it - i.e. the review

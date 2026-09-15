@@ -14,6 +14,7 @@ import {
   draftFileIds,
   draftPendingNames,
   draftRefs,
+  draftSkills,
   draftText,
   hasPendingRef,
   nextRefNumber,
@@ -55,6 +56,11 @@ export interface AttachController {
   editable: HTMLElement
   /** What the user typed, chips excluded. */
   text(): string
+  /** Every skill named in the box, in the order they appear - the order the
+   *  `[skill n]` markers in `text()` count in. */
+  skills(): string[]
+  /** Put a skill chip at the caret. */
+  insertSkill(name: string): void
   /** Attachment ids, in the order the chips appear. */
   ids(): string[]
   /** Picked-element references, in the order the chips appear, each carrying the
@@ -92,6 +98,10 @@ const CHIP_ATTR = 'data-ez-chip'
  *  the one that matters - `discard()`'s delete loop all key off `CHIP_ATTR`, so
  *  a reference chip can never be mistaken for a file and handed to `del()`. */
 const REF_ATTR = 'data-ez-ref'
+/** The skill the batch runs. A third attribute for the same reason `REF_ATTR` is
+ *  a second: everything that walks the box keys off the attribute, and a skill is
+ *  neither a file to delete nor a reference to number. */
+const SKILL_ATTR = 'data-ez-skill'
 
 export function attachify({
   api,
@@ -189,15 +199,22 @@ export function attachify({
     fetch(`${api}/attachments/${id}`, { method: 'DELETE' }).catch(() => {})
   }
 
-  function makeChip(name: string, attr: string, value: string, glyph: IconNode): HTMLElement {
+  function makeChip(
+    name: string,
+    attr: string,
+    value: string,
+    glyph: IconNode | null,
+  ): HTMLElement {
     const chip = mk('span', 'ez-chip')
     // Atomic to the caret: one backspace takes the whole chip, which is why
     // there is no close button on it.
     chip.setAttribute('contenteditable', 'false')
     chip.setAttribute(attr, value)
-    chip.append(icon(glyph, 11), mk('span', 'ez-chip-name'))
+    if (glyph) chip.append(icon(glyph, 11))
+    chip.append(mk('span', 'ez-chip-name'))
     chip.querySelector('.ez-chip-name')!.textContent = name
     if (attr === REF_ATTR) chip.classList.add('ez-chip-ref')
+    if (attr === SKILL_ATTR) chip.classList.add('ez-chip-skill')
     if (!value) chip.classList.add('ez-chip-pending')
     return chip
   }
@@ -216,6 +233,10 @@ export function attachify({
     if (ref?.label) chip.title = ref.label
     return chip
   }
+
+  /** No glyph and a `$` in the name: this one reads as a token in the sentence,
+   *  the way inline code does, rather than as a labelled object like a file. */
+  const skillChip = (name: string) => makeChip(`$${name}`, SKILL_ATTR, name, null)
 
   const pendingRef = () => editable.querySelector<HTMLElement>(`[${REF_ATTR}=""]`)
 
@@ -348,6 +369,7 @@ export function attachify({
     for (const node of nodes) {
       if (node.t === 'text') editable.appendChild(document.createTextNode(node.v))
       else if (node.t === 'file') editable.appendChild(fileChip(node.name, node.id))
+      else if (node.t === 'skill') editable.appendChild(skillChip(node.name))
       else {
         const ref = node.anchor ? { n: node.n, anchor: node.anchor, label: node.label } : null
         editable.appendChild(refChip(ref, node.label))
@@ -378,7 +400,8 @@ export function attachify({
   })
 
   const isChipNode = (node: Node | null): boolean =>
-    node instanceof HTMLElement && (node.hasAttribute(CHIP_ATTR) || node.hasAttribute(REF_ATTR))
+    node instanceof HTMLElement &&
+    (node.hasAttribute(CHIP_ATTR) || node.hasAttribute(REF_ATTR) || node.hasAttribute(SKILL_ATTR))
 
   /** Backspacing away the spacer a chip brought with it is handled here rather
    *  than left to the browser. Deleting the only character between two
@@ -461,6 +484,16 @@ export function attachify({
     // files it carries and the elements it points at can never disagree about
     // order - and all three are testable without a browser.
     text: () => draftText(snapshot()),
+    skills: () => draftSkills(snapshot()),
+    insertSkill(name: string): void {
+      // Every one the user names is kept, where they put it. The agent is what
+      // decides which of them it acts on - only the first leading `/name` is ever
+      // expanded, and a second is swallowed as the first one's argument - but
+      // that is the agent's business to report, not this box's to pre-empt by
+      // deleting something the user typed.
+      insertAtCaret(skillChip(name))
+      changed()
+    },
     ids: () => draftFileIds(snapshot()),
     refs: () => draftRefs(snapshot()),
     pending: () => [...uploading].filter((c) => editable.contains(c)).length,
@@ -514,6 +547,12 @@ function collectNodes(node: Node, out: DraftNode[]): void {
     }
     if (child.hasAttribute(CHIP_ATTR)) {
       out.push({ t: 'file', id: child.getAttribute(CHIP_ATTR) ?? '', name })
+      continue
+    }
+    if (child.hasAttribute(SKILL_ATTR)) {
+      // The name comes off the attribute, not off the chip: what the chip reads
+      // carries a `$` the agent must never be handed.
+      out.push({ t: 'skill', name: child.getAttribute(SKILL_ATTR) ?? '' })
       continue
     }
     if (child.tagName === 'BR') {

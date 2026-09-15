@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events'
-import { readFileSync } from 'node:fs'
+import { accessSync, constants, readFileSync } from 'node:fs'
 import { type Server, createServer } from 'node:http'
-import { dirname, join } from 'node:path'
+import { delimiter, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { Socket } from 'node:net'
 import type { SessionConfigOption } from '@agentclientprotocol/sdk'
@@ -18,20 +18,42 @@ import {
   controlPortRange,
 } from './constants.js'
 import { AcpAgent } from './acp-agent.js'
+import { chatTitles, worthListing } from './chat-titles.js'
+import { readLimit, rememberedLimit, rememberLimit } from './usage-limit.js'
 import type { AcpSnapshot } from './acp-agent.js'
 import { type AcpConfigValue, configLabel, configValueName } from './acp-config.js'
-import { AGENT_PROFILES, agentInstalled, agentProfileFor } from './agents.js'
+import { AGENT_PROFILES, type AgentProfile, agentBrandFor, agentProfileFor } from './agents.js'
+import { clearAgentRecord, reapOrphanedAgents } from './agent-children.js'
 import { attachmentIds, parseReferences } from './anchor.js'
 import { injectOverlay, wantsHtml } from './inject.js'
 import { toAgentAttachments, toAgentItem, toConversationItem } from './label.js'
 import type { Annotation, PollResult, SessionEndedBy } from './protocol.js'
-import { listSkills } from './skills.js'
+import { listSkills, skillPrefix, spendSkillMarkers } from './skills.js'
 import { SessionStore, listRestorableSessions, newId } from './store.js'
 import { clearRegistry, launchDaemon, probeDaemon, readRegistry, writeRegistry } from './registry.js'
 import { installVersion, pruneInstalledVersions } from './installer.js'
 import { latestVersion, updateChecksDisabled } from './update-check.js'
 import { Updater, type UpdateWire } from './updater.js'
 import { versionGate } from './version.js'
+
+/** Whether a profile's CLI is on the PATH.
+ *
+ *  Advisory only, and lives here rather than beside the profiles because the
+ *  shell imports those too - and a `node:fs` call reached through that import
+ *  would end up in the browser bundle. */
+function agentInstalled(profile: AgentProfile, env = process.env): boolean {
+  return (env.PATH ?? '')
+    .split(delimiter)
+    .filter(Boolean)
+    .some((dir) => {
+      try {
+        accessSync(join(dir, profile.binary), constants.X_OK)
+        return true
+      } catch {
+        return false
+      }
+    })
+}
 
 const distDir = dirname(fileURLToPath(import.meta.url))
 const asset = (name: string) => readFileSync(join(distDir, name))
@@ -139,13 +161,31 @@ async function listenOn(app: express.Express, candidates: number[]): Promise<Ser
 /** The batch as one prompt turn. The JSON is exactly what `poll` prints, so an
  *  agent that knows the skill reads it unchanged; the preamble covers one that
  *  has never seen eztweak. */
-function acpPrompt(feedback: Extract<PollResult, { type: 'feedback' }>, skill?: string): string {
+function acpPrompt(
+  feedback: Extract<PollResult, { type: 'feedback' }>,
+  skills: string[],
+  agent: string,
+): string {
+  // The markers the composer left behind, spent now that the agent is known. The
+  // record keeps `[skill n]`, which belongs to nobody; what goes over the wire is
+  // the name in the language this agent reads.
+  const named = (text: string | null): string | null =>
+    text === null ? null : spendSkillMarkers(text, skills, agent)
+  const spoken: typeof feedback = {
+    ...feedback,
+    note: named(feedback.note),
+    items: feedback.items.map((item) => ({ ...item, comment: named(item.comment) ?? item.comment })),
+  }
   return [
-    // The agent expands a leading slash command itself, so this is an invocation
-    // rather than a request to consider one - and what follows is handed to the
-    // skill as its input. Its own line, because the expansion takes the rest of
-    // the first line as the command's argument.
-    ...(skill ? [`/${skill}`, ''] : []),
+    // The first one, hoisted. The agent expands a leading slash command itself,
+    // so this is an invocation rather than a request to consider one - and its
+    // own line, because the expansion takes the rest of the first line as the
+    // command's argument. Only the first: a second leading command is swallowed
+    // as that argument, measured against the real agent, which read two as
+    // "invoke alpha-probe with a `/beta-probe` argument" and ran neither. The
+    // rest still reach the agent, named in the user's own sentence below, where
+    // they read as what they are - something the user asked for.
+    ...(skills.length ? [`${skillPrefix(agent)}${skills[0]}`, ''] : []),
     'The user reviewed the running app in their browser and sent this feedback batch.',
     'Each item resolves to source: trust `anchor.source` (file:line) when present, else',
     'use `anchor.components` / `anchor.section` / `anchor.selector` / `anchor.text`.',
@@ -153,13 +193,18 @@ function acpPrompt(feedback: Extract<PollResult, { type: 'feedback' }>, skill?: 
     '`[ref n]` names the entry in `references` whose `n` matches.',
     'Apply every item, then reply with what you changed, item by item, one short line each.',
     '',
-    JSON.stringify(feedback, null, 2),
+    JSON.stringify(spoken, null, 2),
   ].join('\n')
 }
 
 /** Why the turn stopped, for the thread. Only ever shown for a stop the user did
  *  not get a reply out of - `end_turn` is the normal one and says nothing. The
  *  raw reason is kept in the fallback: an unmapped stop is still worth naming. */
+/** A turn that ran to its own end without a word. Not an error - an agent that
+ *  only ran tools, or whose skill did its work silently, has finished properly -
+ *  so this states what happened rather than reporting a fault. */
+const SAID_NOTHING_NOTE = '這一輪結束了，agent 沒有回覆內容'
+
 function turnEndNote(stopReason: string): string {
   switch (stopReason) {
     case 'cancelled':
@@ -229,7 +274,7 @@ class SessionRuntime {
    *  delivery time rather than carried on the poll payload: `PollResult` is the
    *  portable CLI contract, and a slash command is meaningless to an agent that
    *  is not the one expanding it. */
-  private activeSkill: string | null = null
+  private activeSkills: string[] = []
   /** The agent-side session this review is on right now, recorded against the
    *  chat only once it has taken a turn. */
   private liveSession: string | null = null
@@ -352,7 +397,7 @@ class SessionRuntime {
     this.acp = null
     this.agentBusy = false
     this.activeBatch = null
-    this.activeSkill = null
+    this.activeSkills = []
     this.agentProgress = null
     // Anything the old agent had not finished with. It is not coming back to
     // them, and the new agent was never asked.
@@ -380,6 +425,11 @@ class SessionRuntime {
     this.acp = new AcpAgent({
       command,
       cwd: this.project,
+      // The figure outlives the process that was told it: it only ever arrives
+      // pushed, so a daemon that forgot it would show nothing until the review's
+      // next turn.
+      rememberedLimit: () => rememberedLimit(command),
+      onLimitChange: (limit) => rememberLimit(command, limit),
       // Delivery rides on every state change: the moment the agent first goes
       // idle - or comes back idle - whatever is queued goes out.
       onChange: () => {
@@ -394,9 +444,12 @@ class SessionRuntime {
         // content. A dev daemon restarts on every file save, which is exactly
         // where that happened.
         if (this.liveSession) this.store.setChatSession(this.liveSession, command)
+        // A turn is the only thing that moves the account's usage, so it is the
+        // cue to ask again. Free on both agents, and throttled anyway.
+        this.refreshLimit(command)
         this.agentBusy = false
         this.agentProgress = null
-        this.activeSkill = null
+        this.activeSkills = []
         // The batch this turn answered, read before it is cleared. Stamping it is
         // what lets the thread draw the reply under its own question rather than
         // under whatever the user typed while the turn was running.
@@ -408,10 +461,16 @@ class SessionRuntime {
         if (text) {
           this.store.appendConversation({ role: 'agent', text, ts: Date.now(), ...answers })
         }
-        if (stopReason !== 'end_turn') {
+        // Every turn leaves something behind. A turn that ends well and says
+        // nothing used to leave nothing at all: the user's message sat there with
+        // no reply and no explanation, which reads as a turn still running long
+        // after it stopped - the one thing the thread must never do, because
+        // there is no other way to tell waiting from finished.
+        const note = stopReason === 'end_turn' ? (text ? null : SAID_NOTHING_NOTE) : turnEndNote(stopReason)
+        if (note) {
           this.store.appendConversation({
             role: 'system',
-            text: turnEndNote(stopReason),
+            text: note,
             ts: Date.now(),
             ...answers,
           })
@@ -426,7 +485,7 @@ class SessionRuntime {
       onExit: () => {
         this.agentBusy = false
         this.activeBatch = null
-        this.activeSkill = null
+        this.activeSkills = []
         this.broadcast()
       },
       resumeSessionId: () => this.store.resumableSessionId(command),
@@ -460,7 +519,32 @@ class SessionRuntime {
         })
       },
     })
+    this.refreshLimit(command)
     return true
+  }
+
+  /** The figure, asked for rather than waited on.
+   *
+   *  Both agents answer this for free - a local command on one, a local RPC on
+   *  the other - so it is simply asked whenever the answer could have changed:
+   *  when the agent starts, and at the end of every turn, a turn being the only
+   *  thing that moves an account's usage. `readLimit` throttles it.
+   *
+   *  Fired and forgotten: it is a line of text arriving late, and nothing waits
+   *  on it. */
+  private refreshLimit(command: string): void {
+    const agent = this.acp
+    void readLimit(command)
+      .then((limit) => {
+        // The agent may have been swapped out while this was in flight, and the
+        // figure would then describe an account nobody is looking at.
+        if (!limit || !agent || this.acp !== agent) return
+        rememberLimit(command, limit)
+        agent.seedLimit(limit)
+      })
+      .catch(() => {
+        /* best effort - the line keeps whatever it last had */
+      })
   }
 
   answerAcp(id: string, answers: Record<string, string>): boolean {
@@ -529,7 +613,7 @@ class SessionRuntime {
     }
     this.agentBusy = false
     this.activeBatch = null
-    this.activeSkill = null
+    this.activeSkills = []
     this.agentProgress = null
     // Everything the agent had not finished with, not just the turn it was on: the
     // one in flight went with the session it was asked of, and the ones queued
@@ -551,7 +635,7 @@ class SessionRuntime {
       this.acp = null
       return
     }
-    this.acp.prompt(acpPrompt(outcome, this.activeSkill ?? undefined))
+    this.acp.prompt(acpPrompt(outcome, this.activeSkills, this.acp.snapshot().agent))
   }
 
   private wakePollers(): void {
@@ -572,7 +656,7 @@ class SessionRuntime {
     this.store.markDelivered(batch.batchId)
     this.agentBusy = true
     this.activeBatch = batch.batchId
-    this.activeSkill = batch.skill ?? null
+    this.activeSkills = batch.skills ?? []
     const attachments = toAgentAttachments(batch.attachments, this.store)
     return {
       type: 'feedback',
@@ -753,14 +837,18 @@ class SessionRuntime {
       if (!files) return res.status(400).json({ error: 'unknown attachment id' })
       const refs = parseReferences(req.body?.references)
       if (!refs) return res.status(400).json({ error: 'references must be an array of anchors' })
-      const skill = typeof req.body?.skill === 'string' ? req.body.skill : undefined
-      // Checked against what is actually on disk: the name becomes a slash
+      const skills = Array.isArray(req.body?.skills)
+        ? (req.body.skills as unknown[]).filter((v): v is string => typeof v === 'string')
+        : []
+      // Every one checked against what is actually on disk: a name becomes a
       // command in a prompt, and a name nobody vetted is a line of the user's
-      // text being handed to the agent as an instruction.
-      if (skill && !listSkills(this.project).some((s) => s.name === skill)) {
+      // text being handed to the agent as an instruction. Checked as a set, so a
+      // batch naming the same skill twice costs one read rather than two.
+      const known = new Set(listSkills(this.project).map((s) => s.name))
+      if (skills.some((name) => !known.has(name))) {
         return res.status(400).json({ error: 'unknown skill' })
       }
-      const batch = this.store.sendBatch(req.body?.note ?? null, files, refs, skill)
+      const batch = this.store.sendBatch(req.body?.note ?? null, files, refs, skills)
       if (!batch) return res.status(400).json({ error: 'nothing to send' })
       this.store.appendConversation({
         role: 'user',
@@ -774,7 +862,7 @@ class SessionRuntime {
         ...(batch.references?.length
           ? { references: batch.references.map((r) => ({ n: r.n, label: r.label })) }
           : {}),
-        ...(batch.skill ? { skill: batch.skill } : {}),
+        ...(batch.skills?.length ? { skills: batch.skills } : {}),
       })
       if (this.acp) this.deliverToAcp()
       this.wakePollers()
@@ -865,6 +953,45 @@ class SessionRuntime {
     })
 
     // Show an earlier conversation and put the agent back on it.
+    // The conversations this review has had, named. Fetched when the picker is
+    // opened rather than ridden along on every broadcast: naming them reaches
+    // outside this process - a transcript on disk, a call to codex - and a turn
+    // streaming chunks must not pay for that a hundred times a second.
+    api.get('/acp/chats', async (_req, res) => {
+      const summaries = this.store.chatSummaries()
+      const command = this.acp?.snapshot().agent ?? ''
+      let titles = new Map<string, string>()
+      try {
+        titles = await chatTitles(summaries, command, this.project)
+      } catch {
+        /* a picker of timestamps still works */
+      }
+      res.json({
+        chats: summaries
+          .map((chat) => ({
+            id: chat.id,
+            startedAt: chat.startedAt,
+            entries: chat.entries,
+            current: chat.current,
+            ...(titles.get(chat.id) ? { title: titles.get(chat.id) } : {}),
+          }))
+          // Not every conversation is one - see `worthListing`.
+          .filter(worthListing)
+          .reverse(),
+      })
+    })
+
+    // The figure, asked for because the user is looking at it. Usage moves in
+    // whatever else is running on this machine - a terminal session, another
+    // review - and a turn here is only one of the things that spends it, so the
+    // end of a turn cannot be the only time this is asked. `readLimit` throttles,
+    // so a shell that asks on every focus costs nothing it should not.
+    api.post('/acp/limit', (_req, res) => {
+      const command = this.acp?.snapshot().agent
+      if (command) this.refreshLimit(command)
+      res.json({ ok: true })
+    })
+
     api.post('/acp/chat', (req, res) => {
       const id = String(req.body?.id ?? '')
       if (!id) return res.status(400).json({ error: 'id is required' })
@@ -1242,11 +1369,14 @@ export async function daemonMain(version: string, opts: DaemonOptions = {}): Pro
     runtime.touch()
     // SPIKE: ACP mode - this session spawns and drives its own agent.
     if (typeof agent === 'string' && agent) {
-      if (!runtime.attachAcpAgent(agent)) {
-        return res.status(409).json({
-          error: 'a different agent is already attached to this session',
-          hint: 'end the session (or stop the daemon) before switching agents',
-        })
+      // A different agent already on this session is a switch, not a conflict.
+      // It was a conflict when there was no safe way to change one; there is now
+      // - the shell's own picker does it - and `--agent X` has only ever meant
+      // "this session runs X". Refusing it while the shell allows it would make
+      // the CLI the odd one out, and the advice it used to give (end the session)
+      // was destructive for something that costs a new conversation.
+      if (!runtime.attachAcpAgent(agent) && !runtime.switchAcpAgent(agent)) {
+        return res.status(409).json({ error: 'that agent cannot be started right now' })
       }
       runtime.broadcast()
     }
@@ -1277,8 +1407,17 @@ export async function daemonMain(version: string, opts: DaemonOptions = {}): Pro
   const port = typeof controlAddress === 'object' && controlAddress ? controlAddress.port : 0
 
   writeRegistry({ port, pid: process.pid, startedAt: Date.now() })
+  // Whatever a killed predecessor could not kill for itself. Before any session
+  // is restored, so a review that is about to start its agent again is not
+  // sharing the machine with the one it left behind.
+  const reaped = reapOrphanedAgents()
+  if (reaped > 0) {
+    // eslint-disable-next-line no-console
+    console.error(`reaped ${reaped} agent process group(s) left by a killed daemon`)
+  }
   const cleanup = () => {
     clearRegistry(process.pid)
+    clearAgentRecord()
     process.exit(0)
   }
   process.on('SIGTERM', cleanup)

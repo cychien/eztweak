@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { listSkills } from '../src/skills.js'
+import { listSkills, skillPrefix, spendSkillMarkers } from '../src/skills.js'
 
 function root(): string {
   return mkdtempSync(join(tmpdir(), 'ez-skills-'))
@@ -105,4 +105,102 @@ test('a skill with no description is still listed', () => {
 
 test('a project with nowhere to look yields nothing rather than throwing', () => {
   assert.deepEqual(listSkills(join(tmpdir(), 'ez-does-not-exist'), root()), [])
+})
+
+// A skill can declare that only the agent may reach for it. Offering one is worse
+// than leaving it out: the CLI refuses the command - "this skill can only be
+// invoked by Claude, not directly by users" - and refusing it *is* the turn. The
+// prompt never reaches the model, so the batch comes back with no reply, no error
+// and nothing to explain the silence.
+test('a skill the user may not invoke is not offered', () => {
+  const home = root()
+  writeSkill(
+    home,
+    '.claude/skills',
+    'browser-only',
+    '---\nname: browser-only\ndescription: agent only\nuser-invocable: false\n---\n\nx\n',
+  )
+  writeSkill(home, '.claude/skills', 'normal-one')
+  assert.deepEqual(
+    listSkills(root(), home).map((s) => s.name),
+    ['normal-one'],
+  )
+})
+
+// Absent means invocable: the field is the exception, and most skills say nothing
+// about it.
+test('a skill that says nothing about invocation is offered', () => {
+  const home = root()
+  writeSkill(home, '.claude/skills', 'quiet')
+  assert.deepEqual(
+    listSkills(root(), home).map((s) => s.name),
+    ['quiet'],
+  )
+})
+
+test('only an explicit false shuts a skill out', () => {
+  const home = root()
+  for (const [name, value] of [
+    ['yes', 'true'],
+    ['also', 'TRUE'],
+    ['no', 'FALSE'],
+  ]) {
+    writeSkill(
+      home,
+      '.claude/skills',
+      name!,
+      `---\nname: ${name}\ndescription: x\nuser-invocable: ${value}\n---\n\nx\n`,
+    )
+  }
+  assert.deepEqual(
+    listSkills(root(), home)
+      .map((s) => s.name)
+      .sort(),
+    ['also', 'yes'],
+  )
+})
+
+
+// ------------------------------------------------- naming a skill to an agent
+
+const CLAUDE = 'npx -y @agentclientprotocol/claude-agent-acp'
+const CODEX = 'npx -y @agentclientprotocol/codex-acp'
+
+// Claude expands `/name`. Codex builds its command list as `$name` - which is
+// what the composer writes - so only Claude's has to be translated.
+test('each agent is handed the prefix it reads', () => {
+  assert.equal(skillPrefix(CLAUDE), '/')
+  assert.equal(skillPrefix(CODEX), '$')
+})
+
+// An agent nobody here has a profile for gets what the user typed. Inventing a
+// prefix for it would be a guess dressed up as a translation.
+test('an unknown agent is handed the user’s own text', () => {
+  assert.equal(skillPrefix('node my-acp-server.mjs'), '$')
+})
+
+test('markers become names in the language the agent reads', () => {
+  const text = '先 [skill 1] 然後 [skill 2] 收尾'
+  assert.equal(spendSkillMarkers(text, ['dataviz', 'review'], CLAUDE), '先 /dataviz 然後 /review 收尾')
+  assert.equal(spendSkillMarkers(text, ['dataviz', 'review'], CODEX), '先 $dataviz 然後 $review 收尾')
+})
+
+// The whole reason the record keeps markers instead of names: the same
+// conversation resumed on the other agent has to read correctly there too.
+test('the same stored comment reads correctly on either agent', () => {
+  const stored = '跑 [skill 1]'
+  assert.notEqual(
+    spendSkillMarkers(stored, ['dataviz'], CLAUDE),
+    spendSkillMarkers(stored, ['dataviz'], CODEX),
+  )
+})
+
+// Same rule the shell draws it by: something the user put there does not vanish.
+test('a marker naming nothing is left as it was written', () => {
+  assert.equal(spendSkillMarkers('跑 [skill 3]', ['onlyone'], CLAUDE), '跑 [skill 3]')
+  assert.equal(spendSkillMarkers('跑 [skill 0]', ['onlyone'], CLAUDE), '跑 [skill 0]')
+})
+
+test('text with no markers is untouched', () => {
+  assert.equal(spendSkillMarkers('這裡的間距要再緊一點', ['dataviz'], CLAUDE), '這裡的間距要再緊一點')
 })

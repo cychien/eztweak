@@ -28,6 +28,8 @@ import {
   ndJsonStream,
 } from '@agentclientprotocol/sdk'
 import { type AcpConfigValue, configValues } from './acp-config.js'
+import { limitFrom } from './usage-limit.js'
+import { killGroup, killTrackedAgents, trackAgent, untrackAgent } from './agent-children.js'
 import { type AttachedSession, SessionRouter } from './acp-session.js'
 
 export type AcpState = 'starting' | 'idle' | 'working' | 'exited'
@@ -66,6 +68,22 @@ export interface AcpAsk {
   questions: AcpAskQuestion[]
 }
 
+/** The subscription window the review will run out of first, as last reported.
+ *
+ *  The window is its length rather than a name, because the two vendors describe
+ *  theirs differently - Claude names them (`five_hour`, `seven_day`), codex gives
+ *  a duration in minutes - and a length is what both mean. It is also what the
+ *  choice between them is made on: the shortest window is the one a reviewer runs
+ *  into this afternoon. */
+export interface AcpLimit {
+  /** How long the window is, in minutes. */
+  windowMinutes: number
+  /** Share of the window still unused, 0-1. */
+  remaining: number
+  /** When the window rolls over, in unix seconds. */
+  resetsAt?: number
+}
+
 export interface AcpSnapshot {
   agent: string
   state: AcpState
@@ -81,6 +99,10 @@ export interface AcpSnapshot {
    *  the options it knows would have to be taught each new one; this one only
    *  has to be taught how to *draw* a select and a boolean. */
   configOptions?: SessionConfigOption[]
+  /** The usage window this review will hit first, when the agent has said.
+   *  Absent until it does, which can be the whole of a short session - see
+   *  `onUpdate`. */
+  limit?: AcpLimit
   /** A cancel is out and the agent has not yet said the turn is over. The button
    *  that sent it has to stop offering to send it again. */
   cancelling?: true
@@ -117,6 +139,12 @@ export interface AcpAgentOptions {
    *  taken once: every session this agent opens asks again, and the answer
    *  changes as the review moves between its own conversations. */
   resumeSessionId?: () => string | undefined
+  /** The last figure this agent reported, from before the daemon restarted. The
+   *  line is permanent once it has a number, and nothing here can ask for one -
+   *  see `usage-limit.ts`. */
+  rememberedLimit?: () => AcpLimit | undefined
+  /** The agent reported a new figure, for the next daemon to start with. */
+  onLimitChange?: (limit: AcpLimit) => void
   /** A session is up, and how. The two mean different things to the thread - one
    *  conversation continued, the other started over - so the caller is told
    *  which rather than left to assume the pessimistic one. */
@@ -129,18 +157,17 @@ export type AcpSessionStart = 'new' | 'resumed'
 
 const FEED_CAP = 100
 
+
 /** Tool titles quote absolute paths, and the sidebar is 340px wide: the project
  *  prefix is the part every one of them shares and says nothing. */
 function trimTitle(title: string, cwd: string): string {
   return title.replaceAll(`${cwd}/`, '')
 }
 
-/** Every live agent child, killed when the daemon goes down whichever way it
- *  goes down - an orphaned agent would keep burning the user's quota. */
-const liveChildren = new Set<ChildProcess>()
-process.on('exit', () => {
-  for (const child of liveChildren) child.kill('SIGKILL')
-})
+/** Every live agent, killed when the daemon goes down whichever way it can be
+ *  seen to go down - an orphaned agent would keep burning the user's quota. The
+ *  ways it cannot be seen to go down are `agent-children.ts`'s problem. */
+process.on('exit', () => killTrackedAgents())
 
 export class AcpAgent {
   private child: ChildProcess
@@ -161,6 +188,7 @@ export class AcpAgent {
    *  until a session has one, so opening a session establishes a baseline rather
    *  than reporting a change against the session before it. */
   private modeValue: string | null = null
+  private limit: AcpLimit | null
   private ask: AcpAsk | null = null
   private askResolve: ((answers: Record<string, string> | null) => void) | null = null
   private askSeq = 0
@@ -182,29 +210,33 @@ export class AcpAgent {
   private stderrTail: string[] = []
 
   constructor(private readonly opts: AcpAgentOptions) {
-    // Through a shell, because a profile is a command line ("npx -y ...") and
-    // quoting rules belong to the shell the user would have typed it into.
+    this.limit = opts.rememberedLimit?.() ?? null
+    // Through a shell, and into a process group of its own. The shell is because
+    // a profile is a command line; the group is because that shell is not the
+    // agent - `npx` and the runtime it fetches sit below it, and signalling the
+    // shell alone leaves them running. A group can be killed whole.
     this.child = spawn(opts.command, {
       shell: true,
+      detached: true,
       cwd: opts.cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
       env: process.env,
     })
+    if (this.child.pid) trackAgent(this.child.pid, opts.command)
     this.child.stderr?.on('data', (chunk: Buffer) => {
       this.stderrTail = [...this.stderrTail, chunk.toString()].slice(-20)
     })
-    liveChildren.add(this.child)
     // A spawn that never got off the ground reports asynchronously and emits no
     // `exit`, so without this it is an uncaught exception rather than an agent
     // that failed to start. Reachable whenever `cwd` is gone - a restored session
     // whose project has since been deleted, moved, or is on an unmounted volume -
     // and there it would take the daemon, and every other session, down with it.
     this.child.on('error', (err: Error) => {
-      liveChildren.delete(this.child)
+      this.untrack()
       this.fail(`agent could not start: ${err.message}`)
     })
     this.child.on('exit', (code) => {
-      liveChildren.delete(this.child)
+      this.untrack()
       if (this.state === 'exited') return
       this.fail(`agent exited (${code ?? 'signal'})`)
     })
@@ -225,6 +257,23 @@ export class AcpAgent {
     this.modeValue = value
   }
 
+  /** A figure read outside the protocol - see `readLimit`. Always the newer of
+   *  the two, since it was asked for just now and a pushed one may be a turn old.
+   *
+   *  It carries no reset time, which only the push channel types properly, so the
+   *  one already held is kept when it still describes the same window - a reset
+   *  time in the future is proof the window it belongs to has not rolled over. */
+  seedLimit(limit: AcpLimit): void {
+    const held = this.limit
+    const keepsResetTime =
+      limit.resetsAt === undefined &&
+      held?.resetsAt !== undefined &&
+      held.windowMinutes === limit.windowMinutes &&
+      held.resetsAt * 1000 > Date.now()
+    this.limit = keepsResetTime ? { ...limit, resetsAt: held.resetsAt } : limit
+    this.opts.onChange()
+  }
+
   snapshot(): AcpSnapshot {
     return {
       agent: this.opts.command,
@@ -232,6 +281,7 @@ export class AcpAgent {
       feed: this.feed,
       ...(this.ask ? { ask: this.ask } : {}),
       ...(this.configOptions.length ? { configOptions: this.configOptions } : {}),
+      ...(this.limit ? { limit: this.limit } : {}),
       ...(this.cancelling ? { cancelling: true as const } : {}),
       ...(this.error ? { error: this.error } : {}),
     }
@@ -501,9 +551,18 @@ export class AcpAgent {
     this.settleAsk()
     this.session?.retire()
     this.finish?.()
-    this.child.kill('SIGTERM')
-    const child = this.child
-    setTimeout(() => child.kill('SIGKILL'), 3000).unref()
+    const pid = this.child.pid
+    if (pid === undefined) return
+    // The group, not the child: the agent is below the shell this holds.
+    killGroup(pid, 'SIGTERM')
+    setTimeout(() => {
+      killGroup(pid)
+      untrackAgent(pid)
+    }, 3000).unref()
+  }
+
+  private untrack(): void {
+    if (this.child.pid !== undefined) untrackAgent(this.child.pid)
   }
 
   private fail(message: string): void {
@@ -658,6 +717,20 @@ export class AcpAgent {
         else this.feed.push({ kind: 'plan', entries })
         break
       }
+      // The only place a subscription limit reaches a client. It rides on a
+      // `usage_update`, and only on one the agent chose to send: the CLI emits
+      // its rate-limit event when the numbers change, throttled, and a normal
+      // turn can pass without one. So this takes what it is given and the shell
+      // shows nothing until something arrives - there is no way to ask.
+      case 'usage_update': {
+        const bag = update._meta as { '_claude/rateLimit'?: unknown } | undefined
+        const limit = limitFrom(bag?.['_claude/rateLimit'])
+        if (!limit) return
+        this.limit = limit
+        this.opts.onLimitChange?.(limit)
+        this.opts.onChange()
+        return
+      }
       // Not the feed's business, and not the turn's: these describe the session,
       // so they must not be capped away with the turn's activity or cleared when
       // it ends. Both arrive unprompted - the agent can change its own mind about
@@ -714,6 +787,17 @@ export class AcpAgent {
           clientCapabilities: {
             elicitation: { form: {} },
             session: { configOptions: { boolean: {} } },
+            // `recommendedValue` is what turns a synthetic "Default" row into the
+            // level it actually resolves to. Without it the agent offers
+            // `default` alongside low/medium/high and ticks that - which tells
+            // the reader nothing, since the whole question they have is what
+            // "default" means here. With it, the row is gone and the real level
+            // is the one ticked.
+            //
+            // A vendor extension, and named after another editor - but the cost
+            // of it going away is this reverting to the row we have today, not
+            // anything being reported wrongly.
+            _meta: { jetbrains: { air: { version: 1, capabilities: ['recommendedValue'] } } },
           },
         })
         this.canClose = !!init.agentCapabilities?.sessionCapabilities?.close

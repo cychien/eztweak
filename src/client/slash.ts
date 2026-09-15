@@ -15,11 +15,17 @@ export interface SlashCommand {
   id: string
   /** The row's name, in the user's words. */
   label: string
-  /** Optional muted note, set against the row's far edge. */
-  hint?: string
+  /** Optional muted note, set against the row's far edge. A function is asked at
+   *  render time rather than at build time, the same way `enabled` is: a note
+   *  about live state - which skill the box currently holds - would otherwise be
+   *  frozen into the list the first time it was loaded. */
+  hint?: string | (() => string | undefined)
   /** Extra words the filter should match, so `/圖片` finds the file command. */
   keywords: string[]
-  icon: IconNode
+  /** Optional. A command with no glyph is one whose name is the whole of it -
+   *  the skills under `$` are all skills, so a column of identical marks beside
+   *  them says only what the `$` already said. */
+  icon?: IconNode
   /** Whether the command is on offer right now. Asked at filter time, not at
    *  build time: `/new` only means anything while an ACP agent is attached, and
    *  the menu is built once for the life of the composer. A command the user
@@ -167,10 +173,12 @@ export function attachSlashMenu(
       item.setAttribute('role', 'option')
       const label = mk('span', 'ez-slash-label')
       label.textContent = command.label
-      item.append(icon(command.icon, 16), label)
-      if (command.hint) {
+      if (command.icon) item.append(icon(command.icon, 16))
+      item.append(label)
+      const hintText = typeof command.hint === 'function' ? command.hint() : command.hint
+      if (hintText) {
         const hint = mk('span', 'ez-slash-hint')
-        hint.textContent = command.hint
+        hint.textContent = hintText
         item.append(hint)
       }
       // mousedown, not click: a click would land after the blur that closed the

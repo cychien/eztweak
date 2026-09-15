@@ -8,6 +8,7 @@ import {
   draftFileIds,
   draftPendingNames,
   draftRefs,
+  draftSkills,
   draftText,
   dropDraftRef,
   hasPendingRef,
@@ -392,4 +393,69 @@ test('out-of-order file markers renumber against the ids they name', () => {
 test('the body always ends on text, so the caret can sit past a trailing chip', () => {
   const body = bodyFromComment('看 [file 1]', [], [aFile('f1', 'a.png')])
   assert.equal(body[body.length - 1]?.t, 'text')
+})
+
+// A skill is marked where it sits, like a file: the prefix it is invoked with
+// belongs to the agent, so the stored text carries a marker and the daemon spends
+// it once it knows who is listening.
+test('each skill is marked where it stands', () => {
+  const body: DraftNode[] = [
+    { t: 'text', v: '先 ' },
+    { t: 'skill', name: 'dataviz' },
+    { t: 'text', v: ' 然後 ' },
+    { t: 'skill', name: 'review' },
+    { t: 'text', v: ' 收尾' },
+  ]
+  assert.equal(draftText(body), '先 [skill 1] 然後 [skill 2] 收尾')
+  assert.deepEqual(draftSkills(body), ['dataviz', 'review'])
+})
+
+test('a box with no skill in it names none', () => {
+  assert.deepEqual(draftSkills([{ t: 'text', v: '就這樣改' }]), [])
+})
+
+// The markers count in the order the chips appear, and the list comes out of the
+// same walk - so `[skill n]` can never name the wrong one.
+test('the markers and the list come out of one walk', () => {
+  const body: DraftNode[] = [
+    { t: 'skill', name: 'a' },
+    { t: 'text', v: ' x ' },
+    { t: 'file', id: 'f1', name: 'shot.png' },
+    { t: 'text', v: ' y ' },
+    { t: 'skill', name: 'b' },
+  ]
+  assert.equal(draftText(body), '[skill 1] x [file 1] y [skill 2]')
+  const skills = draftSkills(body)
+  assert.equal(skills[0], 'a')
+  assert.equal(skills[1], 'b')
+})
+
+// A skill is neither a file to delete nor a reference to number, and the two
+// walks that do those jobs must not pick it up on the way past.
+test('a skill is not counted as a file or a reference', () => {
+  const body: DraftNode[] = [{ t: 'skill', name: 'dataviz' }]
+  assert.deepEqual(draftFileIds(body), [])
+  assert.deepEqual(draftRefs(body), [])
+})
+
+// It survives the navigation an overlay popup does not: nothing about a skill
+// chip is in flight, so there is nothing to drop.
+test('a skill chip is restorable', () => {
+  const body: DraftNode[] = [{ t: 'skill', name: 'dataviz' }, { t: 'text', v: ' 看這個' }]
+  assert.deepEqual(restorableBody(body), body)
+})
+
+// Reopening a queued annotation puts every chip back where the sentence had it.
+test('a stored comment rebuilds its skill chips', () => {
+  const body = bodyFromComment('先 [skill 1] 然後 [skill 2]', [], [], ['dataviz', 'review'])
+  assert.deepEqual(draftSkills(body), ['dataviz', 'review'])
+  assert.equal(draftText(body).startsWith('先 [skill 1] 然後 [skill 2]'), true)
+})
+
+// A marker naming a skill that is no longer there stays as literal text, exactly
+// as an unresolvable file or reference does: visible, and the user's to delete.
+test('a marker naming a skill that is gone stays as text', () => {
+  const body = bodyFromComment('跑 [skill 2] 看看', [], [], ['onlyone'])
+  assert.deepEqual(draftSkills(body), [])
+  assert.equal(draftText(body).includes('[skill 2]'), true)
 })
