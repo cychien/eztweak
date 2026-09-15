@@ -131,6 +131,10 @@ interface SnapshotWire {
    *  conversation is showing: a round's variant stands in the page whichever
    *  thread the user is reading, and the strip is about the page. */
   explores?: ExploreState[]
+  /** Whether this review can start one at all. Depends on what the agent
+   *  advertised, so the page is told rather than left to guess: a command in the
+   *  menu that always fails is worse than one that is not offered. */
+  canExplore?: true
 }
 
 /** One conversation as the picker draws it. The count is what tells two of them
@@ -420,6 +424,7 @@ class SessionRuntime {
       ...(this.acp ? { acp: this.acp.snapshot(), chats: this.chatsWire() } : {}),
       ...(update ? { update } : {}),
       ...(live.length ? { explores: live } : {}),
+      ...(this.canExplore ? { canExplore: true as const } : {}),
     }
   }
 

@@ -118,6 +118,20 @@ interface ConversationWire {
   references?: RefEcho[]
 }
 
+/** One explore round as the strip draws it. */
+interface ExploreWire {
+  id: string
+  chatId: string
+  label: string
+  anchor: unknown
+  direction?: string
+  status: 'generating' | 'done' | 'cancelled' | 'dismissed'
+  variants: { id: string; name: string; html: string; note?: string }[]
+  selected: string | null
+  adopted?: string
+  startedAt: number
+}
+
 interface SnapshotWire {
   version: string
   state: 'active' | 'ended'
@@ -134,6 +148,8 @@ interface SnapshotWire {
   /** The conversations this review has had, newest first. ACP mode only. */
   chats?: ChatWire[]
   update?: UpdateWire
+  explores?: ExploreWire[]
+  canExplore?: true
 }
 
 interface ChatWire {
@@ -141,6 +157,8 @@ interface ChatWire {
   startedAt: number
   entries: number
   current: boolean
+  /** The conversation this one branched off, when it did. */
+  parentChatId?: string
 }
 
 /** A newer daemon on the registry, and how far the update has got once the user
@@ -862,6 +880,154 @@ const stage = h('div', 'ez-stage')
 const canvas = h('div', 'ez-canvas')
 stage.appendChild(canvas)
 
+/** The variant strip: what the agent produced for one element, across the bottom
+ *  of the stage.
+ *
+ *  Across the stage rather than in the sidebar because it is about the *page* -
+ *  every preview on the canvas shows the selected variant at once, and the thing
+ *  you are comparing is what you are looking at, not what you are reading.
+ *
+ *  One round at a time, with a switcher when there is more than one. Rounds on
+ *  different elements all stand on the page together; the strip is only about
+ *  which of them you are currently choosing within. */
+const strip = h('div', 'ez-strip')
+strip.hidden = true
+const stripRounds = h('div', 'ez-strip-rounds')
+const stripChips = h('div', 'ez-strip-chips')
+const stripActions = h('div', 'ez-strip-actions')
+strip.append(stripRounds, stripChips, stripActions)
+
+/** Say something went wrong where the strip would have appeared. Its own line
+ *  rather than the thread's: an explore that never started wrote nothing to the
+ *  conversation, so there is nowhere else for this to be. */
+function stripNotice(text: string): void {
+  strip.hidden = false
+  stripRounds.replaceChildren()
+  stripChips.replaceChildren(h('div', 'ez-strip-pending', text))
+  stripActions.replaceChildren()
+  setTimeout(() => {
+    if (!liveExplores().length) strip.hidden = true
+  }, 4000)
+}
+
+/** Which round the strip is showing. Null means "the newest", which is what the
+ *  user just started; it only becomes a real id once they pick another, so a new
+ *  round does not have to fight a stale selection to be seen. */
+let stripRound: string | null = null
+
+/** What each frame currently has standing in it, so a repaint only posts the
+ *  swaps that actually changed. Without it every snapshot - and they arrive on
+ *  every keystroke the agent streams - would re-swap the page under the user. */
+const posted = new Map<string, string | null>()
+
+function liveExplores(): ExploreWire[] {
+  return snapshot?.explores ?? []
+}
+
+function shownRound(): ExploreWire | undefined {
+  const rounds = liveExplores()
+  return rounds.find((r) => r.id === stripRound) ?? rounds[rounds.length - 1]
+}
+
+/** Push every round's selection into every preview, and only what moved. */
+function paintVariants(): void {
+  const rounds = liveExplores()
+  for (const round of rounds) {
+    const variant = round.variants.find((v) => v.id === round.selected)
+    const html = variant?.html ?? null
+    if (posted.get(round.id) === (variant?.id ?? null)) continue
+    posted.set(round.id, variant?.id ?? null)
+    broadcast({ type: 'ez:variant', exploreId: round.id, anchor: round.anchor, html })
+  }
+  // A round that is gone - dismissed, or the session moved on - takes its markup
+  // off the page with it.
+  for (const id of [...posted.keys()]) {
+    if (rounds.some((r) => r.id === id)) continue
+    posted.delete(id)
+    broadcast({ type: 'ez:variant', exploreId: id, anchor: null, html: null })
+  }
+}
+
+/** A newly mounted frame has none of this yet. */
+function seedVariants(id: string): void {
+  for (const round of liveExplores()) {
+    const variant = round.variants.find((v) => v.id === round.selected)
+    toFrame(id, {
+      type: 'ez:variant',
+      exploreId: round.id,
+      anchor: round.anchor,
+      html: variant?.html ?? null,
+    })
+  }
+}
+
+function select(round: ExploreWire, variantId: string | null): void {
+  void api('/explore/select', {
+    method: 'POST',
+    body: JSON.stringify({ id: round.id, variantId }),
+  })
+}
+
+function paintStrip(): void {
+  const rounds = liveExplores()
+  strip.hidden = rounds.length === 0
+  if (!rounds.length) {
+    stripRound = null
+    return
+  }
+  const round = shownRound()!
+  stripRound = round.id
+
+  stripRounds.replaceChildren()
+  stripRounds.hidden = rounds.length < 2
+  for (const one of rounds) {
+    const tab = h('button', `ez-strip-round${one.id === round.id ? ' ez-on' : ''}`, one.label)
+    tab.title = one.direction ? `${one.label}：${one.direction}` : one.label
+    tab.onclick = () => {
+      stripRound = one.id
+      paintStrip()
+    }
+    stripRounds.append(tab)
+  }
+
+  stripChips.replaceChildren()
+  const original = h('button', `ez-strip-chip${round.selected === null ? ' ez-on' : ''}`, '原本')
+  original.onclick = () => select(round, null)
+  stripChips.append(original)
+  for (const variant of round.variants) {
+    const chip = h('button', `ez-strip-chip${variant.id === round.selected ? ' ez-on' : ''}`)
+    chip.append(h('span', undefined, variant.name))
+    if (variant.note) chip.append(h('span', 'ez-strip-note', variant.note))
+    chip.title = variant.note ?? variant.name
+    chip.onclick = () => select(round, variant.id)
+    stripChips.append(chip)
+  }
+  if (round.status === 'generating') {
+    stripChips.append(h('div', 'ez-strip-pending', round.variants.length ? '還在想…' : '正在產生…'))
+  }
+
+  stripActions.replaceChildren()
+  const onBranch = snapshot?.chats?.find((c) => c.current)?.id === round.chatId
+  if (onBranch) {
+    const parent = snapshot?.chats?.find((c) => c.id === round.chatId)?.parentChatId
+    if (parent) {
+      const back = h('button', 'ez-strip-action', '回主線')
+      back.title = '回到開始探索前的對話'
+      // Mid-turn the agent is still on this branch, and moving would abandon a
+      // turn the user can see running. The cancel chord is the way out of that.
+      back.disabled = !!snapshot?.agentBusy
+      back.onclick = () =>
+        void api('/acp/chat', { method: 'POST', body: JSON.stringify({ id: parent }) })
+      stripActions.append(back)
+    }
+  }
+  const close = h('button', 'ez-strip-action', '關閉')
+  close.title = '結束這一輪探索，頁面回到原本的樣子'
+  close.onclick = () =>
+    void api('/explore/dismiss', { method: 'POST', body: JSON.stringify({ id: round.id }) })
+  stripActions.append(close)
+}
+
 /** Which sizes the canvas shows. Its own control, in the corner of the thing it
  *  changes rather than up in the header: what is on the canvas is a property of
  *  the canvas, and the header is already carrying the one question of whether to
@@ -892,7 +1058,7 @@ const shownItems = CANVAS_DEVICES.map((d) => {
 
 const shownWrap = h('div', 'ez-shown')
 shownWrap.append(shownBtn, shownMenu)
-stageWrap.append(stage, shownWrap)
+stageWrap.append(stage, shownWrap, strip)
 
 let shownMenuOpen = false
 
@@ -2118,7 +2284,13 @@ async function sendBatch(): Promise<void> {
   const skills = noteAttach.skills()
   // A skill on its own is a request: "run this over what you can see" needs no
   // annotation and no note.
-  if (count === 0 && !text && attachments.length === 0 && references.length === 0 && !skills.length) {
+  if (
+    count === 0 &&
+    !text &&
+    attachments.length === 0 &&
+    references.length === 0 &&
+    !skills.length
+  ) {
     return
   }
   // Called off before the box is emptied: an answer arriving after the reset
@@ -2486,7 +2658,6 @@ function chatTime(at: number): string {
 async function switchChat(id: string): Promise<void> {
   await api('/acp/chat', { method: 'POST', body: JSON.stringify({ id }) })
 }
-
 
 // -------------------------------------------------------------- agent config
 
@@ -3062,6 +3233,9 @@ function render(): void {
   paintSendState()
   paintConfig(s.acp)
   paintLimit(s.acp)
+  paintStrip()
+  paintVariants()
+  broadcast({ type: 'ez:can-explore', on: s.canExplore === true })
   agentWrap.hidden = !s.acp
   // The row carries the gap below it, so it has to go when both of its controls
   // do - otherwise a poll-mode review keeps six pixels of nothing.
@@ -3203,16 +3377,18 @@ function acpAskEl(ask: AcpAskWire): HTMLElement {
   const values = new Map<string, AcpAskAnswer>()
   const choicesOnly = ask.fields.every((f) => f.kind === 'select')
   const customKeys = new Set(
-    ask.fields.flatMap((f) => ((f.kind === 'select' || f.kind === 'multiselect') && f.custom ? [f.custom.key] : [])),
+    ask.fields.flatMap((f) =>
+      (f.kind === 'select' || f.kind === 'multiselect') && f.custom ? [f.custom.key] : [],
+    ),
   )
   const typedCustom = (): boolean => [...values.keys()].some((k) => customKeys.has(k))
   let settled = false
   const send = (body: Record<string, unknown>): void => {
     if (settled) return
     settled = true
-    for (const c of card.querySelectorAll<HTMLButtonElement | HTMLInputElement | HTMLTextAreaElement>(
-      'button, input, textarea',
-    )) {
+    for (const c of card.querySelectorAll<
+      HTMLButtonElement | HTMLInputElement | HTMLTextAreaElement
+    >('button, input, textarea')) {
       c.disabled = true
     }
     void api('/acp/answer', { method: 'POST', body: JSON.stringify({ id: ask.id, ...body }) })
@@ -3225,7 +3401,9 @@ function acpAskEl(ask: AcpAskWire): HTMLElement {
       (f) =>
         f.optional ||
         values.has(f.key) ||
-        ((f.kind === 'select' || f.kind === 'multiselect') && !!f.custom && values.has(f.custom.key)),
+        ((f.kind === 'select' || f.kind === 'multiselect') &&
+          !!f.custom &&
+          values.has(f.custom.key)),
     )
   const submit = (): void => {
     if (complete()) send({ answers: Object.fromEntries(values) })
@@ -3248,7 +3426,11 @@ function acpAskEl(ask: AcpAskWire): HTMLElement {
   ask.fields.forEach((field, i) => {
     let labelId: string | undefined
     if (field.text || (mixed && field.optional)) {
-      const label = h('div', 'ez-acp-ask-q', `${field.text ?? ''}${mixed && field.optional ? '（選填）' : ''}`)
+      const label = h(
+        'div',
+        'ez-acp-ask-q',
+        `${field.text ?? ''}${mixed && field.optional ? '（選填）' : ''}`,
+      )
       labelId = `${ask.id}-q${i}`
       label.id = labelId
       card.append(label)
@@ -3468,6 +3650,9 @@ window.addEventListener('message', (e: MessageEvent) => {
     host?: 'popup' | 'note'
     draft?: DraftWire
     ref?: RefWire
+    anchor?: unknown
+    capture?: unknown
+    direction?: string
     resumed?: boolean
     ratio?: number
     dx?: number
@@ -3524,12 +3709,32 @@ window.addEventListener('message', (e: MessageEvent) => {
   if (data?.type === 'ez:page' && data.url) {
     dispatchNav({ t: 'moved', url: data.url, from })
   }
+  // The user typed a direction into an element's composer and asked for
+  // variants. The shell owns the request because it is the one holding the
+  // session's api - and the one that can say why it was refused.
+  if (data?.type === 'ez:explore' && data.anchor && data.capture) {
+    void (async () => {
+      const res = await api('/explore/start', {
+        method: 'POST',
+        body: JSON.stringify({
+          anchor: data.anchor,
+          capture: data.capture,
+          direction: data.direction ?? '',
+        }),
+      })
+      if (!res.ok) stripNotice('這個 agent 現在無法執行探索')
+    })()
+  }
   if (data?.type === 'ez:ready') {
     dispatchNav({ t: 'loaded', url: data.url ?? data.page ?? '/', from })
     // Straight to the frame, not through `sendMode`: this is a replay of state
     // the overlay lost, and `sendMode` calls off any pick that is still out -
     // which is exactly the pick this fresh overlay has to be handed back.
     toFrame(from, { type: 'ez:set-mode', mode: annotateMode })
+    // A fresh page has none of this: whether it may offer the command, and what
+    // is meant to be standing in place of what.
+    toFrame(from, { type: 'ez:can-explore', on: snapshot?.canExplore === true })
+    seedVariants(from)
     const frame = frames.get(from)
     if (frame) {
       toFrame(from, {

@@ -2820,3 +2820,134 @@ body.ez-arranging .ez-frame {
 .ez-notice-row[data-active] .ez-notice-row-when {
   color: var(--ink-faint);
 }
+
+/* --------------------------------------------------------- variant strip */
+
+/* `display` set in an author rule outranks the UA's `[hidden]`, so every part of
+   the strip that sets one has to say this for itself. The strip is hidden far
+   more often than it is shown, so getting it wrong is not a corner case. */
+.ez-strip[hidden],
+.ez-strip-rounds[hidden] {
+  display: none;
+}
+
+/* Across the bottom of the stage, over the canvas rather than in it: the canvas
+   pans and scrolls, and a control that slides away with it is one you have to
+   chase. Same reason the size picker sits where it does. */
+.ez-strip {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 12px;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+  box-shadow: 0 6px 20px oklch(0% 0 0 / 0.1);
+}
+
+.ez-strip-rounds {
+  display: flex;
+  gap: 4px;
+  padding-right: 10px;
+  border-right: 1px solid var(--border);
+  flex: 0 0 auto;
+  max-width: 30%;
+  overflow-x: auto;
+}
+
+.ez-strip-round {
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: none;
+  color: var(--muted-foreground);
+  font-size: 11.5px;
+  padding: 4px 7px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.ez-strip-round.ez-on {
+  background: var(--muted);
+  color: var(--foreground);
+}
+
+/* The chips are the point of the strip, so they get the room that is left and
+   scroll rather than wrap: a strip that grows taller pushes the page up. */
+.ez-strip-chips {
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+}
+
+.ez-strip-chip {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  flex: 0 0 auto;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--muted);
+  color: var(--foreground);
+  font-size: 12px;
+  text-align: left;
+  padding: 5px 10px;
+  cursor: pointer;
+}
+
+.ez-strip-chip:hover {
+  border-color: var(--ink-ghost);
+}
+
+.ez-strip-chip.ez-on {
+  border-color: var(--ink);
+  background: var(--panel);
+}
+
+.ez-strip-note {
+  font-size: 11px;
+  color: var(--muted-foreground);
+}
+
+.ez-strip-pending {
+  align-self: center;
+  font-size: 11.5px;
+  color: var(--muted-foreground);
+  padding: 0 4px;
+}
+
+.ez-strip-actions {
+  display: flex;
+  gap: 6px;
+  flex: 0 0 auto;
+  padding-left: 10px;
+  border-left: 1px solid var(--border);
+}
+
+.ez-strip-action {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--foreground);
+  font-size: 11.5px;
+  padding: 5px 9px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.ez-strip-action:hover:not(:disabled) {
+  border-color: var(--ink-ghost);
+}
+
+.ez-strip-action:disabled {
+  opacity: 0.45;
+  cursor: default;
+}

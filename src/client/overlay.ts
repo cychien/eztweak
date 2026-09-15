@@ -3,11 +3,13 @@
 import Add01Icon from '@hugeicons/core-free-icons/Add01Icon'
 import AlignSelectionIcon from '@hugeicons/core-free-icons/AlignSelectionIcon'
 import TextSelectIcon from '@hugeicons/core-free-icons/TextSelectIcon'
+import MagicWand01Icon from '@hugeicons/core-free-icons/MagicWand01Icon'
 import { type AttachController, attachify } from './attach.js'
 import { GRACE_MS, draftExpired, draftPendingNames, normalizeDraft } from './draft.js'
 import type { AnchorWire, DraftSubject, DraftWire, RefWire } from './draft.js'
 import { type IconNode, icon } from './icon.js'
 import { modLabel } from './pick.js'
+import { type Candidate, SWAPPED_ATTR, VariantSwapper, captureElement } from './variant.js'
 import { following, scrollRange, scrollRatio } from './scroll-sync.js'
 import {
   type Point,
@@ -109,6 +111,23 @@ function setFrameZoom(zoom: number): void {
   scheduleRepaint()
 }
 let annotations: AnnotationWire[] = []
+/** Whether this review can run an explore at all. The shell knows - it depends
+ *  on what the agent advertised - and says so, because a command in the menu
+ *  that always fails is worse than one that is not offered. */
+let canExplore = false
+/** What is standing in for what on this page. Built with the overlay's own
+ *  `cssPath` and `componentChain`, so the candidates it searches are described
+ *  exactly the way the anchors it is searching for were built. */
+const swapper = new VariantSwapper(document, (element): Candidate => {
+  const source = element.closest(`[${SOURCE_ATTR}]`)?.getAttribute(SOURCE_ATTR)
+  const text = (element.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, 80)
+  return {
+    ...(source ? { source } : {}),
+    components: componentChain(element),
+    selector: cssPath(element),
+    ...(text ? { text } : {}),
+  }
+})
 let hoverTarget: Element | null = null
 /** A popup is open in one of the other previews. One annotation is composed at
  *  a time wherever it lives, so a held frame stops highlighting, selecting and
@@ -214,11 +233,7 @@ function componentChain(element: Element): string[] {
   const names: string[] = []
   let current = fiber as { type?: unknown; return?: unknown } | null
   while (current && names.length < 3) {
-    const type = current.type as
-      | { displayName?: string; name?: string }
-      | string
-      | null
-      | undefined
+    const type = current.type as { displayName?: string; name?: string } | string | null | undefined
     if (type && typeof type !== 'string') {
       const name = type.displayName || type.name
       if (name && /^[A-Z]/.test(name) && !names.includes(name)) names.push(name)
@@ -546,6 +561,11 @@ function openPopup(
    *  what clears the previous one, and a caller assigning it first would have
    *  it wiped out from under them. */
   run: Range | null = null,
+  /** The element this popup is about, when it is about one. Only an element can
+   *  be explored - a region resolves to a common ancestor and a bare pin to
+   *  whatever sat under it, neither of which is a thing to produce variants of -
+   *  so the command is only offered when this is here. */
+  exploreElement: Element | null = null,
 ): void {
   closePopup()
   selectionRange = run
@@ -564,6 +584,13 @@ function openPopup(
   // and an upload settling repaints it from `pending()` mid-request.
   let saving = false
 
+  /** The element this popup is about, when it is about one - which is what an
+   *  explore needs and a region or a bare pin does not have. */
+  const exploreTarget = subject.kind === 'element' ? exploreElement : null
+  let exploring = false
+  const pill = el('div', 'ez-explore-pill')
+  pill.textContent = '探索 UI variant · 可再補一句方向'
+  pill.hidden = true
   const attach = attachify({
     api: API,
     mk: el,
@@ -585,6 +612,22 @@ function openPopup(
         icon: AlignSelectionIcon as IconNode,
         run: () => void armPick('popup', newPickId()),
       },
+      ...(canExplore && exploreTarget
+        ? [
+            {
+              id: 'explore',
+              label: 'Explore',
+              hint: '請 agent 生出這個元素的幾種樣式',
+              keywords: ['explore', 'variant', 'ui', '探索', '樣式', '版本'],
+              icon: MagicWand01Icon as IconNode,
+              run: () => {
+                exploring = true
+                pill.hidden = false
+                input.focus()
+              },
+            },
+          ]
+        : []),
     ],
   })
   const input = attach.editable
@@ -607,7 +650,19 @@ function openPopup(
     save.disabled = true
     saving = true
     try {
-      await onSave(comment, attachments, references)
+      // An explore is not an annotation: nothing is queued, nothing is sent to
+      // the review's own conversation, and what the user typed is the direction
+      // rather than a comment. The pill is what says which of the two this is.
+      if (exploring && exploreTarget) {
+        post({
+          type: 'ez:explore',
+          anchor: buildAnchor(exploreTarget),
+          capture: captureElement(exploreTarget),
+          direction: comment,
+        })
+      } else {
+        await onSave(comment, attachments, references)
+      }
     } catch {
       // Nothing was recorded, so the composer is taken back whole - text, files
       // and references still in it - rather than the remark being lost in silence.
@@ -635,7 +690,7 @@ function openPopup(
     e.stopPropagation()
   }
 
-  popup.append(attach.wrap, actions)
+  popup.append(pill, attach.wrap, actions)
   popup.setAttribute('data-ez-subject', subject.kind)
   document.body.appendChild(popup)
   ui.popup = popup
@@ -878,9 +933,7 @@ function markerPosition(a: AnnotationWire): { top: number; left: number } | null
 function renderMarkers(): void {
   ui.markers.textContent = ''
   if (pick) return
-  const relevant = annotations.filter(
-    (a) => a.anchor.page === location.pathname && madeHere(a),
-  )
+  const relevant = annotations.filter((a) => a.anchor.page === location.pathname && madeHere(a))
   relevant.forEach((a, i) => {
     const at = markerPosition(a)
     if (!at) return
@@ -1387,11 +1440,7 @@ function onMouseMove(e: MouseEvent): void {
   // the pointer and sits on the run's own element. Letting it keep chasing would
   // offer a different element than the one the bubble is about to annotate.
   const run = pick ? null : liveSelectionRange()
-  const target = run
-    ? selectionOwner(run)
-    : e.target instanceof Element
-      ? e.target
-      : null
+  const target = run ? selectionOwner(run) : e.target instanceof Element ? e.target : null
   if (target !== hoverTarget) {
     hoverTarget = target
     moveHighlight(target)
@@ -1500,6 +1549,8 @@ function onClick(e: MouseEvent): void {
     subjectOf('element', target),
     () => target.getBoundingClientRect(),
     (comment, files, refs) => saveAnnotation('element', target, comment, files, refs),
+    null,
+    target,
   )
 }
 
@@ -1773,9 +1824,13 @@ function boot(): void {
   if (framed) document.addEventListener('click', onNavClick)
   document.addEventListener('mouseup', onMouseUp, true)
   document.addEventListener('keydown', onKeyDown, true)
-  document.addEventListener('keyup', (e) => {
-    if (isModKey(e.key)) setModHeld(false)
-  }, true)
+  document.addEventListener(
+    'keyup',
+    (e) => {
+      if (isModKey(e.key)) setModHeld(false)
+    },
+    true,
+  )
   // A window that loses focus mid-hold never delivers the keyup.
   window.addEventListener('blur', () => {
     setModHeld(false)
@@ -1806,7 +1861,22 @@ function boot(): void {
       returnTo?: string
       draft?: DraftWire
       held?: boolean
+      exploreId?: string
+      anchor?: AnchorWire
+      html?: string | null
+      on?: boolean
     }
+    // What the page is being asked to show in place of what it really has, and
+    // whether an explore can be started at all.
+    if (data?.type === 'ez:variant' && data.exploreId && data.anchor !== undefined) {
+      swapper.set({
+        exploreId: data.exploreId,
+        anchor: data.anchor,
+        html: data.html ?? null,
+      })
+    }
+    if (data?.type === 'ez:variants-clear') swapper.clear()
+    if (data?.type === 'ez:can-explore') canExplore = data.on === true
     if (data?.type === 'ez:set-mode') setMode(data.mode ?? 'off')
     if (data?.type === 'ez:escape') escape()
     if (data?.type === 'ez:viewport') {

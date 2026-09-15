@@ -647,3 +647,22 @@
   font-size: 11.5px;
   line-height: 1.55;
 }
+
+/* The real element, while a variant stands in for it. Out of layout rather than
+   merely invisible: the variant has to take its flex or grid slot, or what the
+   user is looking at is the variant plus a hole where the original was. */
+[data-ez-swapped] {
+  display: none !important;
+}
+
+/* Says which of the two things this composer is about to do. The pill is the
+   whole of that signal, so it reads as a sentence rather than a tag. */
+.ez-explore-pill {
+  margin-bottom: 7px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  background: oklch(95% 0.04 285);
+  color: oklch(42% 0.13 285);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
