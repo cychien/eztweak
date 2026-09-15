@@ -3,7 +3,7 @@
 import Add01Icon from '@hugeicons/core-free-icons/Add01Icon'
 import AlignSelectionIcon from '@hugeicons/core-free-icons/AlignSelectionIcon'
 import TextSelectIcon from '@hugeicons/core-free-icons/TextSelectIcon'
-import MagicWand04Icon from '@hugeicons/core-free-icons/MagicWand04Icon'
+import MagicWand01Icon from '@hugeicons/core-free-icons/MagicWand01Icon'
 import { type AttachController, attachify } from './attach.js'
 import { GRACE_MS, draftExpired, draftPendingNames, normalizeDraft } from './draft.js'
 import type { AnchorWire, DraftSubject, DraftWire, RefWire } from './draft.js'
@@ -619,7 +619,7 @@ function openPopup(
               label: 'Explore',
               hint: '請 agent 生出這個元素的幾種樣式',
               keywords: ['explore', 'variant', 'ui', '探索', '樣式', '版本'],
-              icon: MagicWand04Icon as IconNode,
+              icon: MagicWand01Icon as IconNode,
               run: () => {
                 exploring = true
                 pill.hidden = false
