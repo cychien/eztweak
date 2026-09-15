@@ -120,6 +120,12 @@ export interface Chat {
    *  best, that no such session exists. */
   agent?: string
   startedAt: number
+  /** The conversation this one was branched off, when it was. A branch carries
+   *  the parent's history - the agent was handed a copy of it - but nothing said
+   *  in the branch reaches the parent, which is the point: an explore can be
+   *  talked about at length and the review still returns to where it forked
+   *  from, carrying only what the user chose to take back. */
+  parentChatId?: string
 }
 
 /** One chat, with what it takes to choose between them: when, how much, and
@@ -136,6 +142,9 @@ export interface ChatSummary {
   agent?: string
   /** The first thing the user said in it, for a conversation no agent will name. */
   said?: string
+  /** The conversation this one branched off, when it did. What the picker draws
+   *  the indent from, and what 回主線 goes back to. */
+  parentChatId?: string
 }
 
 export interface ConversationClear {
@@ -535,6 +544,25 @@ export class SessionStore {
     return chat
   }
 
+  /** Begin a conversation branched off the current one.
+   *
+   *  Unlike `startChat`, this one is born knowing its session: the agent has
+   *  already copied the transcript into `acpSessionId`, and recording it here is
+   *  what makes the reopen that follows a *resume of the copy* rather than a
+   *  fresh start. The order matters - the store moves first, because what the
+   *  agent opens is read back off it. */
+  startBranch(acpSessionId: string, agent: string): Chat {
+    const chat: Chat = {
+      id: newId(),
+      startedAt: Date.now(),
+      parentChatId: this.currentChat.id,
+      acpSessionId,
+      agent,
+    }
+    this.patchSession({ chats: [...this.chats, chat], currentChatId: chat.id })
+    return chat
+  }
+
   /** Show an earlier conversation and put the agent back on it. */
   switchChat(id: string): Chat | null {
     const chat = this.chats.find((c) => c.id === id)
@@ -610,6 +638,7 @@ export class SessionStore {
         current: chat.id === current,
         ...(chat.acpSessionId ? { acpSessionId: chat.acpSessionId } : {}),
         ...(chat.agent ? { agent: chat.agent } : {}),
+        ...(chat.parentChatId ? { parentChatId: chat.parentChatId } : {}),
         ...(said
           ? {
               said:

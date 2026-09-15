@@ -14,6 +14,9 @@
  *
  *  Env: EZ_FAKE_NO_RESUME     do not advertise session/resume
  *       EZ_FAKE_REFUSE_RESUME advertise it, then refuse every resume
+ *       EZ_FAKE_NO_FORK       do not advertise session/fork
+ *       EZ_FAKE_REFUSE_FORK   advertise it, then refuse every fork
+ *       EZ_FAKE_NO_MCP        do not advertise mcpCapabilities.http
  *    REPORT    reply with {opened, closed, prompts, log} as JSON
  *    else      reply with `<sessionId>:<prompt>` and stop with `end_turn` */
 
@@ -57,6 +60,15 @@ let refuseHaiku = false
  *  known before asking, the other only after. */
 const canResume = !process.env.EZ_FAKE_NO_RESUME
 const refuseResume = !!process.env.EZ_FAKE_REFUSE_RESUME
+/** Whether this agent branches, and whether it takes the request and fails.
+ *  `EZ_FAKE_NO_FORK` is an agent that cannot; `EZ_FAKE_REFUSE_FORK` one that
+ *  says it can and then will not - both are real, and they differ in whether
+ *  the client knows before asking. */
+const canFork = !process.env.EZ_FAKE_NO_FORK
+const refuseFork = !!process.env.EZ_FAKE_REFUSE_FORK
+/** Whether this agent can reach an HTTP MCP server, which is what decides
+ *  whether the client offers it any. */
+const mcpHttp = !process.env.EZ_FAKE_NO_MCP
 /** Where the sessions this agent has live, when a test wants them to outlast the
  *  process. A real agent keeps transcripts on disk, which is the whole reason a
  *  restarted daemon can resume one; an agent that forgot them on exit would make
@@ -73,6 +85,19 @@ const persisted = (() => {
 
 /** Sessions this agent still has. A resume of anything else is refused. */
 const live = new Set(persisted?.live ?? [])
+/** Sessions that have been forked but not yet resumed. Mirrors the real agent
+ *  measured on claude-agent-acp 0.77.0: `session/fork` answers with an id, and
+ *  that id is not promptable until `session/resume` has read the copied
+ *  transcript. A client that forks and then prompts is wrong, and this is what
+ *  says so. */
+const unresumedForks = new Set()
+/** Which session each fork was taken from, so a test can prove the copy was
+ *  made from the conversation the review was actually on. */
+const forkedFrom = new Map()
+/** The mcp servers each session was opened with, by name. The whole point of
+ *  the explore tool is that they reach the agent, and a session opened without
+ *  them is the failure that looks like nothing at all. */
+const mcpBySession = new Map()
 /** How many sessions have ever been opened, so ids do not restart at s1 in a
  *  second process and quietly collide with the first one's. */
 let everOpened = persisted?.everOpened ?? 0
@@ -122,11 +147,19 @@ const app = agent({ name: 'fake-acp-agent' })
     log.push(`initialize:boolean=${!!ctx.params.clientCapabilities?.session?.configOptions?.boolean}`)
     return {
       protocolVersion: PROTOCOL_VERSION,
-      agentCapabilities: { sessionCapabilities: { close: {}, ...(canResume ? { resume: {} } : {}) } },
+      agentCapabilities: {
+        sessionCapabilities: {
+          close: {},
+          ...(canResume ? { resume: {} } : {}),
+          ...(canFork ? { fork: {} } : {}),
+        },
+        ...(mcpHttp ? { mcpCapabilities: { http: true } } : {}),
+      },
     }
   })
-  .onRequest(methods.agent.session.new, () => {
+  .onRequest(methods.agent.session.new, (ctx) => {
     const sessionId = `s${++everOpened}`
+    mcpBySession.set(sessionId, (ctx.params.mcpServers ?? []).map((m) => m.name))
     opened.push(sessionId)
     live.add(sessionId)
     persist()
@@ -153,10 +186,26 @@ const app = agent({ name: 'fake-acp-agent' })
     config[configId] = value
     return { configOptions: configOptions() }
   })
+  .onRequest(methods.agent.session.fork, (ctx) => {
+    const { sessionId } = ctx.params
+    log.push(`fork:${sessionId}`)
+    if (refuseFork || !live.has(sessionId)) throw new Error(`cannot fork: ${sessionId}`)
+    const forked = `s${++everOpened}`
+    live.add(forked)
+    unresumedForks.add(forked)
+    forkedFrom.set(forked, sessionId)
+    opened.push(forked)
+    persist()
+    // Only the id, the way the real one answers. No configOptions: the client
+    // has to resume to get them, and to make the session promptable at all.
+    return { sessionId: forked }
+  })
   .onRequest(methods.agent.session.resume, (ctx) => {
     const { sessionId } = ctx.params
     log.push(`resume:${sessionId}`)
     if (refuseResume || !live.has(sessionId)) throw new Error(`no such session: ${sessionId}`)
+    unresumedForks.delete(sessionId)
+    mcpBySession.set(sessionId, (ctx.params.mcpServers ?? []).map((m) => m.name))
     // A resumed session comes back on this agent's defaults, the way the real one
     // does - which is what makes a re-asserted pick observable on this path too.
     config.model = 'opus'
@@ -175,6 +224,8 @@ const app = agent({ name: 'fake-acp-agent' })
   })
   .onRequest(methods.agent.session.prompt, async (ctx) => {
     const { sessionId, prompt } = ctx.params
+    // A forked session is not live until it has been resumed.
+    if (unresumedForks.has(sessionId)) throw new Error(`Session not found: ${sessionId}`)
     const text = prompt.map((b) => (b.type === 'text' ? b.text : '')).join('')
     const say = (t) =>
       ctx.client.notify(methods.client.session.update, {
@@ -197,7 +248,16 @@ const app = agent({ name: 'fake-acp-agent' })
       return { stopReason: 'end_turn' }
     }
     if (text.includes('REPORT')) {
-      await say(JSON.stringify({ opened, closed, prompts, log }))
+      await say(
+        JSON.stringify({
+          opened,
+          closed,
+          prompts,
+          log,
+          forkedFrom: Object.fromEntries(forkedFrom),
+          mcpBySession: Object.fromEntries(mcpBySession),
+        }),
+      )
       return { stopReason: 'end_turn' }
     }
     // An option set by nobody's request: a real agent does this when its own

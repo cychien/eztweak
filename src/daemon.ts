@@ -123,6 +123,9 @@ interface ChatWire {
   startedAt: number
   entries: number
   current: boolean
+  /** The conversation this one branched off, when it did. The picker draws the
+   *  indent from it, and 回主線 is a switch to it. */
+  parentChatId?: string
 }
 
 /** Bind `app` on the loopback at `port`, or reject. Deliberately not
@@ -597,6 +600,33 @@ class SessionRuntime {
 
 
 
+  /** Branch the review off the conversation it is on: the agent copies the
+   *  transcript into a new session, a new chat is recorded against it, and the
+   *  review moves there. Everything said from now on belongs to the branch and
+   *  never reaches the parent.
+   *
+   *  The copy has to happen before the move, because a branch is only a branch if
+   *  the agent kept the history: a fork the agent refused would otherwise leave
+   *  the review on a fresh, empty conversation that looks like a branch and is
+   *  not. So a refusal here leaves everything exactly where it was, and the
+   *  caller decides what to say about it.
+   *
+   *  Resuming the copy is `reopenSession`'s job, which is also where the mcp
+   *  servers and the review's pinned model get re-asserted - both of which a
+   *  resumed session needs, since it comes back on the agent's own defaults. */
+  async branchAcpChat(): Promise<boolean> {
+    if (!this.acp?.canBranch) return false
+    const agent = this.acp.snapshot().agent
+    const forked = await this.acp.forkSession()
+    if (!forked) return false
+    return this.moveToChat(() => this.store.startBranch(forked, agent).id)
+  }
+
+  /** The conversation this one branched off, when it did. */
+  parentChatId(): string | undefined {
+    return this.store.currentChat.parentChatId
+  }
+
   /** Show an earlier conversation and put the agent back on it. */
   switchAcpChat(id: string): boolean {
     if (!this.store.chats.some((c) => c.id === id)) return false
@@ -1022,6 +1052,17 @@ class SessionRuntime {
         return res.status(409).json({ error: 'that conversation cannot be opened right now' })
       }
       res.json({ ok: true })
+    })
+
+    // Branch the conversation: the agent copies what has been said so far into a
+    // session of its own and the review moves there. Answers with the new chat
+    // and the one it came from, so the caller can offer the way back without
+    // reading the whole picker.
+    api.post('/acp/branch', async (_req, res) => {
+      if (!(await this.branchAcpChat())) {
+        return res.status(409).json({ error: 'this agent cannot branch the conversation right now' })
+      }
+      res.json({ chatId: this.store.currentChat.id, parentChatId: this.parentChatId() })
     })
 
     // SPIKE: clear the agent's context and carry on in a fresh session.

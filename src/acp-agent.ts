@@ -230,6 +230,9 @@ export class AcpAgent {
    *  assumed - a session opened with a server the agent cannot reach may fail
    *  outright, and the feature that needs it is better absent than broken. */
   private canMcpHttp = false
+  /** Set when the agent advertises `session/fork`, which is what lets an explore
+   *  run on a copy of the conversation instead of in it. */
+  private canFork = false
   /** Resolved when the agent is done, and nothing else: it is what holds the
    *  connection open, so a session swap must not disturb it. */
   private finish: (() => void) | null = null
@@ -437,6 +440,40 @@ export class AcpAgent {
     this.cancelling = true
     this.opts.onChange()
     return true
+  }
+
+  /** Whether this agent can branch a conversation at all. */
+  get canBranch(): boolean {
+    return this.canFork && this.canResume
+  }
+
+  /** Copy the live conversation into a new session and answer with its id,
+   *  without moving onto it: the caller records it against a new chat and then
+   *  reopens, which is what puts the agent there.
+   *
+   *  Fork *and* resume, because a forked session is not live. Measured on
+   *  `claude-agent-acp` 0.77.0: `session/fork` answers with an id and nothing
+   *  else, and prompting that id fails with "Session not found" until
+   *  `session/resume` has read the copied transcript. So this only does the copy;
+   *  `openSession` does the resume, which is also where the mcp servers and the
+   *  review's pinned model get re-asserted - and they must be, since a resumed
+   *  session comes back on the agent's own defaults.
+   *
+   *  Null when the agent cannot do it or is not in a state to be asked. A caller
+   *  that gets null has lost nothing: the review is still on the conversation it
+   *  was on. */
+  async forkSession(): Promise<string | null> {
+    if (!this.ctx || !this.session || !this.canBranch) return null
+    if (this.state !== 'idle') return null
+    try {
+      const forked = await this.ctx.request(methods.agent.session.fork, {
+        sessionId: this.session.sessionId,
+        cwd: this.opts.cwd,
+      })
+      return forked?.sessionId ?? null
+    } catch {
+      return null
+    }
   }
 
   /** Let go of the session this agent is on and open whichever one it should be
@@ -813,6 +850,7 @@ export class AcpAgent {
         this.canClose = !!init.agentCapabilities?.sessionCapabilities?.close
         this.canResume = !!init.agentCapabilities?.sessionCapabilities?.resume
         this.canMcpHttp = !!init.agentCapabilities?.mcpCapabilities?.http
+        this.canFork = !!init.agentCapabilities?.sessionCapabilities?.fork
         this.ctx = ctx
         await this.openSession()
         // `connectWith` closes the stream when this returns, so this is the

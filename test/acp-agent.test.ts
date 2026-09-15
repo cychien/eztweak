@@ -5,6 +5,7 @@ import { after, test } from 'node:test'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { AcpAgent } from '../src/acp-agent.js'
+import type { McpServerEntry } from '../src/mcp-explore.js'
 import type { AcpLimit, AcpSessionStart, AcpSnapshot } from '../src/acp-agent.js'
 
 const FAKE = join(dirname(fileURLToPath(import.meta.url)), 'helpers', 'fake-acp-agent.mjs')
@@ -35,6 +36,9 @@ interface HarnessOptions {
   /** A figure from before this daemon started, as `usage-limit.ts` would supply
    *  it. */
   rememberedLimit?: AcpLimit
+  /** The mcp servers to open every session with, as the daemon's explore rounds
+   *  would supply them. */
+  mcpServers?: () => McpServerEntry[]
   /** Prompts to hand over the way `deliverToAcp` does - on the agent going idle,
    *  from the same `onChange` the daemon acts on. Ordering claims about a pick
    *  landing before a session's first turn only mean anything against this. */
@@ -100,6 +104,7 @@ function harness(options: HarnessOptions = {}) {
       wake()
     },
     ...(options.resume ? { resumeSessionId: options.resume } : {}),
+    ...(options.mcpServers ? { mcpServers: options.mcpServers } : {}),
     onSessionOpen: (sessionId, how) => {
       opens.push({ sessionId, how })
       wake()
@@ -777,4 +782,103 @@ test('a form with a required field the shell cannot draw is declined without ask
   })
   const turn = await h.ask(`ELICIT ${form}`)
   assert.deepEqual(JSON.parse(turn.reply), { action: 'decline' })
+})
+
+// ------------------------------------------------------------------ branching
+
+/** One explore round's server, as `ExploreMcp.serverEntries` builds it. */
+const EXPLORE_SERVERS: McpServerEntry[] = [
+  { type: 'http', name: 'eztweak-explore-r1', url: 'http://127.0.0.1:1/x', headers: [] },
+]
+
+/** What a fork is for: the branch carries the parent's history, the parent never
+ *  hears what was said in the branch, and the review can go back. These assert
+ *  the mechanics of the copy - that the client forks the *live* session and then
+ *  resumes the copy, in that order. Whether the agent really carried the
+ *  transcript over is the agent's promise, measured against the real one. */
+test('forking is refused when the agent cannot do it, and nothing moves', async () => {
+  const h = harness({ env: { EZ_FAKE_NO_FORK: '1' } })
+  after(() => h.acp.stop())
+  await h.ask('one')
+  assert.equal(h.acp.canBranch, false)
+  assert.equal(await h.acp.forkSession(), null)
+  assert.equal(h.opens.length, 1)
+})
+
+test('a fork the agent takes and then refuses leaves the review where it was', async () => {
+  const h = harness({ env: { EZ_FAKE_REFUSE_FORK: '1' } })
+  after(() => h.acp.stop())
+  await h.ask('one')
+  assert.equal(h.acp.canBranch, true)
+  assert.equal(await h.acp.forkSession(), null)
+  assert.equal(h.opens.length, 1)
+})
+
+test('a branch is resumed, not prompted - a forked session is not live until it is', async () => {
+  let resume: string | undefined
+  const h = harness({ resume: () => resume })
+  after(() => h.acp.stop())
+  await h.ask('one')
+
+  const forked = (await h.acp.forkSession())!
+  // The daemon's move: record the copy against a new chat, then reopen. If the
+  // client prompted the fork without resuming it, the fake agent - like the real
+  // one - answers "Session not found" and this turn never ends.
+  resume = forked
+  assert.equal(h.acp.reopenSession(), true)
+  await h.until('the branch', (s) => s.state === 'idle')
+  assert.deepEqual(h.opens.at(-1), { sessionId: forked, how: 'resumed' })
+  assert.equal((await h.ask('on the branch')).reply, `${forked}:on the branch`)
+
+  // Back to the parent, which is an ordinary resume of the session it was on.
+  resume = h.opens[0]!.sessionId
+  assert.equal(h.acp.reopenSession(), true)
+  await h.until('the parent', (s) => s.state === 'idle')
+  const report = JSON.parse((await h.ask('REPORT')).reply) as Report & {
+    forkedFrom: Record<string, string>
+  }
+  assert.deepEqual(report.forkedFrom, { [forked]: h.opens[0]!.sessionId })
+  assert.deepEqual(
+    report.log.filter((l) => l.startsWith('fork:') || l.startsWith('resume:')),
+    [`fork:${h.opens[0]!.sessionId}`, `resume:${forked}`, `resume:${h.opens[0]!.sessionId}`],
+  )
+})
+
+test("a remembered pick is re-asserted on a branch, which comes back on the agent's default", async () => {
+  let resume: string | undefined
+  const h = harness({ resume: () => resume, pinned: { model: 'haiku' } })
+  after(() => h.acp.stop())
+  await h.idle()
+  await h.until('the pick', (s) => option(s, 'model')?.currentValue === 'haiku')
+
+  const forked = (await h.acp.forkSession())!
+  resume = forked
+  h.acp.reopenSession()
+  await h.until('the branch', (s) => s.state === 'idle')
+  assert.equal(option(h.acp.snapshot(), 'model')?.currentValue, 'haiku')
+})
+
+test('the explore servers reach every session, including a branch', async () => {
+  let resume: string | undefined
+  const h = harness({ resume: () => resume, mcpServers: () => EXPLORE_SERVERS })
+  after(() => h.acp.stop())
+  await h.ask('one')
+  const forked = (await h.acp.forkSession())!
+  resume = forked
+  h.acp.reopenSession()
+  await h.until('the branch', (s) => s.state === 'idle')
+  const report = JSON.parse((await h.ask('REPORT')).reply) as Report & {
+    mcpBySession: Record<string, string[]>
+  }
+  assert.deepEqual(report.mcpBySession[h.opens[0]!.sessionId], ['eztweak-explore-r1'])
+  assert.deepEqual(report.mcpBySession[forked], ['eztweak-explore-r1'])
+})
+
+test('an agent that cannot reach an http mcp server is offered none', async () => {
+  const h = harness({ env: { EZ_FAKE_NO_MCP: '1' }, mcpServers: () => EXPLORE_SERVERS })
+  after(() => h.acp.stop())
+  const report = JSON.parse((await h.ask('REPORT')).reply) as Report & {
+    mcpBySession: Record<string, string[]>
+  }
+  assert.deepEqual(report.mcpBySession[h.opens[0]!.sessionId], [])
 })
