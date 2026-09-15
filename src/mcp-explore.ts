@@ -41,6 +41,14 @@ import { z } from 'zod'
 import { MAX_VARIANT_HTML, checkVariant, variantProblemMessage } from './explore.js'
 import { URL_PREFIX } from './constants.js'
 
+/** Where a round's server answers, as one string rather than a prefix here and
+ *  a route there: the url the agent is handed and the path the daemon listens on
+ *  have to agree, and two places that each know half of it is exactly how they
+ *  come not to. The route is mounted relative to the api router, so it takes the
+ *  tail; the agent needs the whole thing. */
+export const MCP_PATH = `${URL_PREFIX}/api/mcp`
+export const MCP_ROUTE = '/mcp/:exploreId'
+
 /** One variant, as the agent sent it and the daemon accepted it. */
 export interface IncomingVariant {
   name: string
@@ -104,7 +112,7 @@ export class ExploreMcp {
     return [...this.rounds.keys()].map((exploreId) => ({
       type: 'http',
       name: `eztweak-explore-${exploreId}`,
-      url: `http://127.0.0.1:${port}${URL_PREFIX}/mcp/${exploreId}`,
+      url: `http://127.0.0.1:${port}${MCP_PATH}/${exploreId}`,
       headers: [{ name: 'authorization', value: `Bearer ${this.rounds.get(exploreId)!.token}` }],
     }))
   }

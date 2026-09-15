@@ -2,8 +2,7 @@ import assert from 'node:assert/strict'
 import { after, test } from 'node:test'
 import { createServer } from 'node:http'
 import express from 'express'
-import { URL_PREFIX } from '../src/constants.js'
-import { type IncomingVariant, ExploreMcp } from '../src/mcp-explore.js'
+import { type IncomingVariant, ExploreMcp, MCP_PATH, MCP_ROUTE } from '../src/mcp-explore.js'
 
 /** One JSON-RPC round trip, as an MCP client makes it. */
 async function rpc(
@@ -27,7 +26,7 @@ async function rpc(
 
 /** An initialized MCP connection to one round, and a way to call its tool. */
 async function client(port: number, exploreId: string, token: string) {
-  const url = `http://127.0.0.1:${port}${URL_PREFIX}/mcp/${exploreId}`
+  const url = `http://127.0.0.1:${port}${MCP_PATH}/${exploreId}`
   let id = 0
   const init = await rpc(
     url,
@@ -54,9 +53,14 @@ async function client(port: number, exploreId: string, token: string) {
 function harness() {
   const mcp = new ExploreMcp()
   const got: IncomingVariant[] = []
+  // Mounted the way the daemon mounts it: an api router under the url prefix,
+  // with the route relative to it. Building the path any other way here would
+  // let the two drift and the test still pass.
+  const api = express.Router()
+  api.use(express.json())
+  api.post(MCP_ROUTE, mcp.handler())
   const app = express()
-  app.use(express.json())
-  app.post(`${URL_PREFIX}/mcp/:exploreId`, mcp.handler())
+  app.use(MCP_PATH.slice(0, -'/mcp'.length), api)
   const server = createServer(app)
   const ready = new Promise<number>((resolve) =>
     server.listen(0, '127.0.0.1', () => {
@@ -160,8 +164,8 @@ test('each live round is its own server entry, named and tokened apart', async (
   assert.deepEqual(
     entries.map((e) => [e.type, e.name, e.url]),
     [
-      ['http', 'eztweak-explore-r1', `http://127.0.0.1:4321${URL_PREFIX}/mcp/r1`],
-      ['http', 'eztweak-explore-r2', `http://127.0.0.1:4321${URL_PREFIX}/mcp/r2`],
+      ['http', 'eztweak-explore-r1', `http://127.0.0.1:4321${MCP_PATH}/r1`],
+      ['http', 'eztweak-explore-r2', `http://127.0.0.1:4321${MCP_PATH}/r2`],
     ],
   )
   assert.deepEqual(entries[0]!.headers, [{ name: 'authorization', value: `Bearer ${a.token}` }])

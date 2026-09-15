@@ -1,12 +1,18 @@
 /** Parsing for the parts of a request that arrive as free-form JSON from a page
  *  we do not control. Pure, so the rules are testable without a server. */
 
-import type { Anchor, Reference } from './protocol.js'
+import type { Anchor, ExploreCapture, Reference } from './protocol.js'
 
 /** A comment pointing at more elements than this is a bug or an attack, not a
  *  person. Rejecting is better than truncating: silently dropping references
  *  would leave the `[ref N]` markers in the comment naming nothing. */
 const MAX_REFERENCES = 16
+
+/** How much of the explored element's markup the agent is shown. Enough for a
+ *  component, not for a page: the point is what this element looks like, and a
+ *  whole section's worth of DOM buys nothing the prompt can use. Truncation is
+ *  flagged rather than hidden, so the agent knows it is not seeing all of it. */
+const MAX_CAPTURE_HTML = 16 * 1024
 
 const str = (v: unknown, max: number): string | undefined =>
   typeof v === 'string' && v ? v.slice(0, max) : undefined
@@ -111,6 +117,53 @@ export function parseReferences(raw: unknown, max = MAX_REFERENCES): Reference[]
     // nonsense number leaves the agent unable to tell which reference is which.
     if (typeof n !== 'number' || !Number.isInteger(n) || n < 1 || n > 999) return null
     out.push({ n, anchor: clean, label: str(label, 120) ?? '' })
+  }
+  return out
+}
+
+/** The design-relevant computed values, and nothing else. A whitelist rather
+ *  than a cap on how many arrive: the page is asked for exactly these, and a
+ *  client sending anything else is sending something the prompt has no use for. */
+const CAPTURE_STYLES = [
+  'font-family',
+  'font-size',
+  'font-weight',
+  'line-height',
+  'letter-spacing',
+  'color',
+  'background-color',
+  'border',
+  'border-radius',
+  'padding',
+  'gap',
+  'box-shadow',
+  'text-transform',
+]
+
+/** What the page said the explored element currently looks like. Bounded for
+ *  the same reason every other client-supplied field is: it ends up inside the
+ *  agent's prompt. Null when there is no markup to explore, which is a 400 -
+ *  a round with nothing to vary is not a round. */
+export function sanitizeCapture(raw: unknown): ExploreCapture | null {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null
+  const v = raw as Record<string, unknown>
+  const html = str(v.html, MAX_CAPTURE_HTML)
+  if (!html) return null
+  const out: ExploreCapture = { html }
+  if (v.truncated === true || (typeof v.html === 'string' && v.html.length > MAX_CAPTURE_HTML)) {
+    out.truncated = true
+  }
+  const styles: Record<string, string> = {}
+  const given =
+    typeof v.styles === 'object' && v.styles !== null ? (v.styles as Record<string, unknown>) : {}
+  for (const property of CAPTURE_STYLES) {
+    const value = str(given[property], 120)
+    if (value) styles[property] = value
+  }
+  if (Object.keys(styles).length) out.styles = styles
+  const width = v.parentWidth
+  if (typeof width === 'number' && Number.isFinite(width) && width > 0) {
+    out.parentWidth = Math.round(width)
   }
   return out
 }

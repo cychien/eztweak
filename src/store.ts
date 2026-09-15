@@ -4,13 +4,30 @@ import { join } from 'node:path'
 import { ATTACHMENT_GRACE_MS, SESSIONS_DIR } from './constants.js'
 import type { AcpConfigValue } from './acp-config.js'
 import type {
+  Anchor,
   Annotation,
   Attachment,
   ConversationEntry,
+  ExploreState,
+  ExploreStatus,
+  ExploreVariant,
   FeedbackBatch,
   Reference,
   SessionEndedBy,
 } from './protocol.js'
+
+/** Whether two anchors point at the same place on the page, for the one
+ *  question that needs to know: can these two explore rounds both have their
+ *  variant standing in a slot, or are they fighting over one.
+ *
+ *  `source` first, because `file:line` is the only identity here that survives a
+ *  re-render. Without the build plugin there is only the selector, which is
+ *  weaker - two rounds on structurally identical elements may be judged the same
+ *  - and the cost of that is one selection cleared, not a wrong swap. */
+export function sameTarget(a: Anchor, b: Anchor): boolean {
+  if (a.source && b.source) return a.source === b.source && a.text === b.text
+  return !!a.selector && a.selector === b.selector
+}
 
 export function newId(): string {
   return randomBytes(6).toString('hex')
@@ -248,6 +265,86 @@ export class SessionStore {
     return this.readJson<ConversationEntry[]>('conversation.json') ?? []
   }
 
+  // ------------------------------------------------------------------ explore
+
+  /** Every round this review has had, oldest first, dismissed ones included -
+   *  the thread still refers to them, and a dismissed round is history rather
+   *  than a mistake. Callers that draw the strip filter them out. */
+  get explores(): ExploreState[] {
+    return this.readJson<ExploreState[]>('explores.json') ?? []
+  }
+
+  private writeExplores(explores: ExploreState[]): void {
+    this.writeJson('explores.json', explores)
+  }
+
+  private patchExplore(id: string, patch: (e: ExploreState) => ExploreState): ExploreState | null {
+    const explores = this.explores
+    const found = explores.find((e) => e.id === id)
+    if (!found) return null
+    const next = patch(found)
+    this.writeExplores(explores.map((e) => (e.id === id ? next : e)))
+    return next
+  }
+
+  /** Open a round on one element.
+   *
+   *  Any live round already holding this element's place gives it up: two rounds
+   *  cannot both have their variant standing in one slot, and the newer one is
+   *  the one the user just asked for. Rounds on *other* elements are left alone,
+   *  which is what lets a button and a heading be explored at once. */
+  startExplore(
+    round: Omit<ExploreState, 'status' | 'variants' | 'selected' | 'startedAt'>,
+  ): ExploreState {
+    const fresh: ExploreState = {
+      ...round,
+      status: 'generating',
+      variants: [],
+      selected: null,
+      startedAt: Date.now(),
+    }
+    const explores = this.explores.map((e) =>
+      e.selected && sameTarget(e.anchor, fresh.anchor) ? { ...e, selected: null } : e,
+    )
+    this.writeExplores([...explores, fresh])
+    return fresh
+  }
+
+  /** Record a variant against a round that is still taking them. Null when the
+   *  round is over or gone, which is how a late one is refused. */
+  addVariant(id: string, variant: Omit<ExploreVariant, 'id' | 'createdAt'>): ExploreState | null {
+    const round = this.explores.find((e) => e.id === id)
+    if (!round || round.status !== 'generating') return null
+    return this.patchExplore(id, (e) => ({
+      ...e,
+      variants: [...e.variants, { ...variant, id: newId(), createdAt: Date.now() }],
+    }))
+  }
+
+  setExploreStatus(id: string, status: ExploreStatus): ExploreState | null {
+    return this.patchExplore(id, (e) => ({ ...e, status }))
+  }
+
+  /** Put one of a round's variants on the page, or `null` for the original.
+   *  Refused for a variant the round does not have, so the page can never be
+   *  asked to show markup nothing recorded. */
+  selectVariant(id: string, variantId: string | null): ExploreState | null {
+    const round = this.explores.find((e) => e.id === id)
+    if (!round) return null
+    if (variantId !== null && !round.variants.some((v) => v.id === variantId)) return null
+    return this.patchExplore(id, (e) => ({ ...e, selected: variantId }))
+  }
+
+  /** Close a round: nothing of it is on the page any more, and its url stops
+   *  taking variants. Kept in the list, because the thread refers to it. */
+  dismissExplore(id: string): ExploreState | null {
+    return this.patchExplore(id, (e) => ({ ...e, status: 'dismissed', selected: null }))
+  }
+
+  markExploreAdopted(id: string, variantId: string): ExploreState | null {
+    return this.patchExplore(id, (e) => ({ ...e, adopted: variantId }))
+  }
+
   addAnnotation(a: Annotation): void {
     this.writeJson('queue.json', [...this.annotations, a])
   }
@@ -421,9 +518,7 @@ export class SessionStore {
     const cutoff = now - ATTACHMENT_GRACE_MS
     const referenced = this.referencedAttachmentIds()
     const index = this.attachmentIndex
-    const doomed = Object.values(index).filter(
-      (a) => !referenced.has(a.id) && a.createdAt < cutoff,
-    )
+    const doomed = Object.values(index).filter((a) => !referenced.has(a.id) && a.createdAt < cutoff)
     this.dropAttachments(doomed)
 
     // Files written before the crash that stopped their index entry. Nothing

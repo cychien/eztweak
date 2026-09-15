@@ -84,6 +84,67 @@ export interface Annotation {
   references?: Reference[]
 }
 
+/** What the agent is shown of the element it is exploring, captured in the page
+ *  at the moment the user asked.
+ *
+ *  Separate from `Anchor`, which answers *where* the element is. This answers
+ *  what it currently looks like, which is the question a variant is an answer to
+ *  - and unlike the anchor it cannot be resolved later, because by then the
+ *  agent's own variant may be standing in its place. */
+export interface ExploreCapture {
+  /** The element's own markup, capped. What the variants are variants *of*. */
+  html: string
+  /** Set when `html` was cut short, so the agent knows it is not seeing all of
+   *  it rather than inventing what it cannot see. */
+  truncated?: true
+  /** The few computed values that read as design decisions rather than as
+   *  layout: font, size, weight, colour, background, radius, padding, gap. Keyed
+   *  by CSS property name, in the browser's own serialisation. */
+  styles?: Record<string, string>
+  /** The content width of the element's parent, in CSS pixels. What says how
+   *  much room a variant has to work in. */
+  parentWidth?: number
+}
+
+/** One variant the agent produced, as it is stored and drawn. */
+export interface ExploreVariant {
+  id: string
+  name: string
+  html: string
+  note?: string
+  createdAt: number
+}
+
+/** One round of exploring one element.
+ *
+ *  A list of these, not one: the user explores a button, then a heading, and
+ *  both stay on the page at once because they are different anchors. Rounds are
+ *  told apart by id everywhere - in the strip, in the swap, and in the url the
+ *  agent sends variants to - so a variant can only ever land in the round it was
+ *  asked for. */
+export interface ExploreState {
+  id: string
+  /** The branch conversation this round is being had in. */
+  chatId: string
+  /** A short name for the element, for the strip and the thread. */
+  label: string
+  anchor: Anchor
+  /** What the user typed after `/explore`, when they typed anything. */
+  direction?: string
+  status: ExploreStatus
+  variants: ExploreVariant[]
+  /** Which variant is on the page, or null for the original. */
+  selected: string | null
+  /** Set once this round's pick has been sent to the main line. */
+  adopted?: string
+  startedAt: number
+}
+
+/** `generating` - the branch turn is running. `done` - it finished. `cancelled` -
+ *  the user stopped it; whatever had arrived stays. `dismissed` - the user closed
+ *  the strip, so nothing of this round is on the page any more. */
+export type ExploreStatus = 'generating' | 'done' | 'cancelled' | 'dismissed'
+
 export interface FeedbackBatch {
   batchId: string
   items: Annotation[]

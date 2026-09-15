@@ -447,6 +447,12 @@ export class AcpAgent {
     return this.canFork && this.canResume
   }
 
+  /** Whether this agent will reach an MCP server eztweak serves over HTTP,
+   *  which is the only way it can be given a tool of eztweak's. */
+  get servesMcpHttp(): boolean {
+    return this.canMcpHttp
+  }
+
   /** Copy the live conversation into a new session and answer with its id,
    *  without moving onto it: the caller records it against a new chat and then
    *  reopens, which is what puts the agent there.

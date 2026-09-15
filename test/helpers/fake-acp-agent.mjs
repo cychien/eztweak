@@ -142,6 +142,47 @@ function configOptions() {
   ]
 }
 
+/** One JSON-RPC call to an MCP server the client handed us, over plain HTTP.
+ *  Hand-rolled rather than through the MCP SDK: the fake agent is here to prove
+ *  the wire works, and a second implementation of the client half is exactly
+ *  what would hide a mismatch in it. */
+async function mcpCall(server, method, params, id) {
+  const headers = { 'content-type': 'application/json', accept: 'application/json, text/event-stream' }
+  for (const h of server.headers ?? []) headers[h.name] = h.value
+  const res = await fetch(server.url, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ jsonrpc: '2.0', id, method, params }),
+  })
+  return { status: res.status, body: await res.json().catch(() => null) }
+}
+
+/** Answer an explore the way a real agent does: initialize against the round's
+ *  server, then send variants through its tool one at a time. */
+async function sendVariants(sessionId, variants) {
+  const server = (mcpBySession.get(sessionId)?.servers ?? []).find((s) =>
+    s.name.startsWith('eztweak-explore-'),
+  )
+  if (!server) return ['no explore server was offered']
+  let id = 0
+  await mcpCall(server, 'initialize', {
+    protocolVersion: '2025-06-18',
+    capabilities: {},
+    clientInfo: { name: 'fake-acp-agent', version: '1' },
+  }, ++id)
+  const said = []
+  for (const variant of variants) {
+    const { body } = await mcpCall(
+      server,
+      'tools/call',
+      { name: 'explore_variant', arguments: variant },
+      ++id,
+    )
+    said.push(body?.result?.content?.[0]?.text ?? `error: ${JSON.stringify(body?.error ?? body)}`)
+  }
+  return said
+}
+
 const app = agent({ name: 'fake-acp-agent' })
   .onRequest(methods.agent.initialize, (ctx) => {
     log.push(`initialize:boolean=${!!ctx.params.clientCapabilities?.session?.configOptions?.boolean}`)
@@ -159,7 +200,10 @@ const app = agent({ name: 'fake-acp-agent' })
   })
   .onRequest(methods.agent.session.new, (ctx) => {
     const sessionId = `s${++everOpened}`
-    mcpBySession.set(sessionId, (ctx.params.mcpServers ?? []).map((m) => m.name))
+    mcpBySession.set(sessionId, {
+      names: (ctx.params.mcpServers ?? []).map((m) => m.name),
+      servers: ctx.params.mcpServers ?? [],
+    })
     opened.push(sessionId)
     live.add(sessionId)
     persist()
@@ -205,7 +249,10 @@ const app = agent({ name: 'fake-acp-agent' })
     log.push(`resume:${sessionId}`)
     if (refuseResume || !live.has(sessionId)) throw new Error(`no such session: ${sessionId}`)
     unresumedForks.delete(sessionId)
-    mcpBySession.set(sessionId, (ctx.params.mcpServers ?? []).map((m) => m.name))
+    mcpBySession.set(sessionId, {
+      names: (ctx.params.mcpServers ?? []).map((m) => m.name),
+      servers: ctx.params.mcpServers ?? [],
+    })
     // A resumed session comes back on this agent's defaults, the way the real one
     // does - which is what makes a re-asserted pick observable on this path too.
     config.model = 'opus'
@@ -255,7 +302,7 @@ const app = agent({ name: 'fake-acp-agent' })
           prompts,
           log,
           forkedFrom: Object.fromEntries(forkedFrom),
-          mcpBySession: Object.fromEntries(mcpBySession),
+          mcpBySession: Object.fromEntries([...mcpBySession].map(([k, v]) => [k, v.names])),
         }),
       )
       return { stopReason: 'end_turn' }
@@ -300,6 +347,27 @@ const app = agent({ name: 'fake-acp-agent' })
         sessionId,
         update: { sessionUpdate: 'current_mode_update', currentModeId: 'plan' },
       })
+      return { stopReason: 'end_turn' }
+    }
+    // An explore turn: the daemon's own prompt asks for variants through the
+    // tool it served, so this answers it the way a real agent does - over HTTP,
+    // to the url it was handed in `mcpServers`. A direction of BADVARIANTS
+    // sends markup the validator has to refuse, so a test can see what the
+    // agent is told about it.
+    if (text.includes('explore_variant')) {
+      prompts.push({ sessionId, text })
+      const variants = text.includes('BADVARIANTS')
+        ? [
+            { name: 'two roots', html: '<div>a</div><div>b</div>' },
+            { name: 'scripted', html: '<div><script>go()</script></div>' },
+            { name: 'fine', html: '<button class="cta">ok</button>' },
+          ]
+        : [
+            { name: '緊湊版', html: '<button class="cta">免費試用</button>', note: 'tighter' },
+            { name: 'Outline', html: '<button class="cta outline">免費試用 14 天</button>' },
+          ]
+      const said = await sendVariants(sessionId, variants)
+      await say(said.join(' | '))
       return { stopReason: 'end_turn' }
     }
     // Ask the user a form, the way AskUserQuestion reaches a client: the payload
