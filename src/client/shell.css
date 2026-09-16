@@ -2996,7 +2996,6 @@ body.ez-arranging .ez-frame {
   margin-inline: -14px;
   padding-inline: 14px;
   border-bottom: 1px solid var(--border);
-  margin-bottom: 8px;
   font-size: 12px;
   line-height: 1.5;
   animation: ez-fork-in var(--t-pop) var(--ease-out) both;
@@ -3111,8 +3110,11 @@ body.ez-arranging .ez-frame {
   right: auto;
   z-index: 5;
   display: flex;
-  min-width: 200px;
-  max-width: 100%;
+  /* Bounded on both sides. `.ez-menu` sizes to `max-content`, so without a cap
+     one long element label sets the width of the panel and pushes it past the
+     sidebar; with one, the label is what gives way. */
+  min-width: 190px;
+  max-width: min(100%, 290px);
   transform-origin: top left;
   animation: ez-menu-in var(--t-menu) var(--ease-out) both;
   /* The same seven-row budget the resume list keeps, for the same reason: a
@@ -3139,22 +3141,22 @@ body.ez-arranging .ez-frame {
   border-radius: 6px;
 }
 
-/* A branch sits under the line it came off, and a branch of a branch under
-   that. Measured on a real review, chains reach five deep - `/explore` forks
-   from wherever you are, so exploring from inside an explore goes a level
-   further down. The indent is that depth. */
+/* Every row is a direct branch of the same line, so there is no depth to draw
+   and no indent to draw it with. */
 .ez-fork-row {
-  padding-left: calc(6px + var(--depth, 0) * 12px);
+  padding-left: 6px;
 }
 
 /* The name is what the row is chosen by, so it keeps its width and the detail
-   gives way. Without this one long element label sets the width of the whole
-   panel and squeezes every other row's name. */
+   gives way. The base row gives the name `flex: 1`, whose `flex-basis: 0` makes
+   it the *first* thing to run out of room - so it needs its content width back,
+   and the detail needs to be the one that flexes. */
 .ez-fork-row .ez-notice-row-name {
-  flex-shrink: 0;
+  flex: 0 0 auto;
 }
 
 .ez-fork-row .ez-notice-row-when {
+  flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
