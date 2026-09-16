@@ -446,7 +446,6 @@
   color: var(--ez-ink-faint);
 }
 
-
 .ez-actions {
   display: flex;
   justify-content: flex-end;
@@ -706,6 +705,12 @@ ez-variant {
 .ez-popup-explore .ez-btn-primary:hover {
   background: var(--ez-explore-accent);
   opacity: 0.88;
+}
+
+/* The header rides higher in the box than a first line of text would, so the
+   field gives a pixel back at the top to keep the block optically centred. */
+.ez-popup-explore .ez-attach-field {
+  padding-top: 6px;
 }
 
 /* The field picks up the hue while armed, so the box being typed into is visibly

@@ -193,6 +193,12 @@ const ui = {
   popup: null as HTMLElement | null,
   /** Lives beside the popup: its uploads are only ever discarded with it. */
   popupAttach: null as AttachController | null,
+  /** A step *inside* the open popup that Escape should take back before the
+   *  popup itself. Only `/explore` has one today. Returns whether it took the
+   *  press, the way `closeSlash` does - the layers above it are settled the
+   *  same way, and a hook that cannot say "not mine" would eat presses that
+   *  belong to the popup. */
+  popupBack: null as (() => boolean) | null,
   selectionBubble: null as HTMLElement | null,
 }
 
@@ -494,6 +500,7 @@ function closePopup(): void {
   // the annotation and clears this first, so nothing here can delete them.
   ui.popupAttach?.discard()
   ui.popupAttach = null
+  ui.popupBack = null
   if (ui.popup) post({ type: 'ez:popup', open: false })
   ui.popup?.remove()
   ui.popup = null
@@ -546,6 +553,11 @@ function escape(): void {
     cancelPick('escape')
     return
   }
+  // A step inside the popup - an armed `/explore` - is a layer above the popup
+  // and below the pick: taking it back returns the ordinary composer, holding
+  // everything that was typed before the command, rather than throwing the
+  // whole remark away.
+  if (ui.popupBack?.()) return
   if (mode === 'off') return
   if (ui.popup) dismiss()
   else exitToIdle()
@@ -553,8 +565,8 @@ function escape(): void {
 
 /** `anchor` is re-evaluated on every repaint, so the popup tracks its subject
  *  through scrolls and reflows instead of freezing where it opened. */
-const COMPOSE_PLACEHOLDER = '想怎麼調整？輸入 / 用指令 (⌘+Enter 儲存)'
-const EXPLORE_PLACEHOLDER = '給予探索方向，或留空自由探索'
+const COMPOSE_PLACEHOLDER = '想怎麼調整？輸入 / 用指令 (⌘+Enter 送出)'
+const EXPLORE_PLACEHOLDER = '給予探索方向，或留白自由探索'
 
 function openPopup(
   subject: DraftSubject,
@@ -638,11 +650,36 @@ function openPopup(
   ui.popupAttach = attach
   attach.field.prepend(exploreHead)
 
+  /** What the ordinary composer was holding when `/explore` was armed. Kept as
+   *  nodes rather than markup so a chip whose upload is still in flight keeps
+   *  its identity and lands back in the box it left. */
+  let stashed: DocumentFragment | null = null
+
   /** Arming and disarming are the same repaint, which is why they are one
    *  function: every part of the composer that says which of the two things this
-   *  box is about to do has to move together, or it says both. */
+   *  box is about to do has to move together, or it says both.
+   *
+   *  The remark and the direction are different things, so they are different
+   *  buffers. Arming puts the remark aside and offers an empty box for the
+   *  direction; stepping back throws the direction away and hands the remark
+   *  back untouched. `/explore` is a step on the way to asking for variants, like
+   *  any other command in this menu - it must not cost the user what they had
+   *  already written, and it must not hand the next explore the last one's
+   *  direction. */
   function setExploring(on: boolean): void {
+    if (on === exploring) return
     exploring = on
+    const current = document.createDocumentFragment()
+    // Appending moves the nodes, so this empties the box in the same breath.
+    current.append(...input.childNodes)
+    if (on) stashed = current
+    else if (stashed) {
+      input.append(stashed)
+      stashed = null
+    }
+    // Moving nodes fires nothing, and the placeholder and the send button are
+    // both driven off `input`.
+    input.dispatchEvent(new InputEvent('input', { bubbles: true }))
     exploreHead.hidden = !on
     popup.classList.toggle('ez-popup-explore', on)
     input.dataset.placeholder = on ? EXPLORE_PLACEHOLDER : COMPOSE_PLACEHOLDER
@@ -653,6 +690,26 @@ function openPopup(
     saveIcon.toggleAttribute('hidden', on)
     saveLabel.textContent = on ? '探索' : '加入待送清單'
     input.focus()
+    caretToEnd()
+  }
+
+  /** After nodes are moved back in, the caret would otherwise sit at the start of
+   *  restored text - in front of the sentence the user was part-way through. */
+  function caretToEnd(): void {
+    const range = document.createRange()
+    range.selectNodeContents(input)
+    range.collapse(false)
+    const selection = document.getSelection()
+    selection?.removeAllRanges()
+    selection?.addRange(range)
+  }
+
+  // Escape takes this step back before it takes the popup, the same way it
+  // unwinds every other layer.
+  ui.popupBack = () => {
+    if (!exploring) return false
+    setExploring(false)
+    return true
   }
 
   const submit = async () => {
@@ -662,7 +719,10 @@ function openPopup(
     const references = attach.refs()
     // A pasted screenshot, or an element pointed at, can be the whole remark, so
     // text is only required when nothing came with it.
-    if (!comment && attachments.length === 0 && references.length === 0) {
+    // An explore with no direction is a request in its own right - "show me
+    // options" - which is what its placeholder offers. Only a *remark* has to
+    // say something.
+    if (!exploring && !comment && attachments.length === 0 && references.length === 0) {
       input.focus()
       return
     }
