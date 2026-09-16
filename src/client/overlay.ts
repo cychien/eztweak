@@ -741,6 +741,11 @@ function openPopup(
           anchor: buildAnchor(exploreTarget),
           capture: captureElement(exploreTarget),
           direction: comment,
+          // The direction travels with whatever was put in the sentence. "Like
+          // this screenshot", "make it match that button" are directions, and
+          // the markers in the text name these.
+          attachments,
+          references,
         })
       } else {
         await onSave(comment, attachments, references)

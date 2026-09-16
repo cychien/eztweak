@@ -270,6 +270,7 @@ test('the sweep drops only stale, unreferenced attachments', () => {
   const stale = store.addAttachment('stale.png', 'image/png', bytes('x'))
   const queued = store.addAttachment('queued.png', 'image/png', bytes('x'))
   const sent = store.addAttachment('sent.png', 'image/png', bytes('x'))
+  const explored = store.addAttachment('explored.png', 'image/png', bytes('x'))
 
   store.addAnnotation({
     id: 'q',
@@ -280,6 +281,14 @@ test('the sweep drops only stale, unreferenced attachments', () => {
     attachments: [queued],
   })
   store.sendBatch('note', [sent])
+  store.startExplore({
+    id: 'r1',
+    chatId: 'c1',
+    label: 'CTA',
+    anchor,
+    direction: '照 [file 1] 的風格',
+    attachments: [explored],
+  })
 
   // Date the orphan back past the grace window, so the sweep runs against the
   // real clock and the rule under test is age, not a doctored `now`.
@@ -294,6 +303,11 @@ test('the sweep drops only stale, unreferenced attachments', () => {
   assert.equal(existsSync(store.attachmentPath(fresh)), true, 'young orphan is still in grace')
   assert.equal(existsSync(store.attachmentPath(queued)), true, 'queued annotation still holds it')
   assert.equal(existsSync(store.attachmentPath(sent)), true, 'sent batch still holds it')
+  assert.equal(
+    existsSync(store.attachmentPath(explored)),
+    true,
+    'an explore round still holds its direction files',
+  )
 })
 
 // A crash between the two writes leaves bytes nothing will ever name.

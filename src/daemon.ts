@@ -26,15 +26,18 @@ import { AGENT_PROFILES, type AgentProfile, agentBrandFor, agentProfileFor } fro
 import { clearAgentRecord, reapOrphanedAgents } from './agent-children.js'
 import { attachmentIds, parseReferences, sanitizeAnchor, sanitizeCapture } from './anchor.js'
 import { injectOverlay, wantsHtml } from './inject.js'
+import type { AttachmentLocator } from './label.js'
 import { shortAnchor, toAgentAttachments, toAgentItem, toConversationItem } from './label.js'
 import { type IncomingVariant, ExploreMcp, MCP_ROUTE } from './mcp-explore.js'
 import type {
   Anchor,
   Annotation,
+  Attachment,
   ExploreCapture,
   ExploreState,
   ExploreStatus,
   PollResult,
+  Reference,
   SessionEndedBy,
 } from './protocol.js'
 import { listSkills, skillPrefix, spendSkillMarkers } from './skills.js'
@@ -241,7 +244,12 @@ function acpPrompt(
  *  The rules the tool enforces are stated here too. A rejection costs a turn and
  *  arrives after the agent has written the variant; a rule read before it starts
  *  costs nothing. */
-function explorePrompt(round: ExploreState, capture: ExploreCapture): string {
+function explorePrompt(
+  round: ExploreState,
+  capture: ExploreCapture,
+  files: AttachmentLocator,
+): string {
+  const attachments = toAgentAttachments(round.attachments, files)
   const styles = Object.entries(capture.styles ?? {})
   const slot = capture.slot
   const layout = slot
@@ -258,6 +266,28 @@ function explorePrompt(round: ExploreState, capture: ExploreCapture): string {
     round.direction
       ? `They asked for: ${round.direction}`
       : 'They gave no direction, so range across genuinely different treatments rather than varying one thing.',
+    ...(attachments?.length
+      ? [
+          '',
+          '`[file n]` in that direction is `attachments[n-1]` here - read the file at `path`:',
+          '',
+          '```json',
+          JSON.stringify(attachments, null, 2),
+          '```',
+        ]
+      : []),
+    ...(round.references?.length
+      ? [
+          '',
+          '`[ref n]` in that direction names the entry here whose `n` matches. Each is another element',
+          'on the same page the user is pointing you at - resolve it from `anchor.source` (file:line)',
+          'when present, else from `components` / `section` / `selector` / `text`:',
+          '',
+          '```json',
+          JSON.stringify(round.references, null, 2),
+          '```',
+        ]
+      : []),
     '',
     '## The element, as it currently renders',
     '',
@@ -839,6 +869,8 @@ class SessionRuntime {
     anchor: Anchor
     capture: ExploreCapture
     direction?: string
+    attachments?: Attachment[]
+    references?: Reference[]
   }): Promise<ExploreState | null> {
     if (!this.canExplore) return null
     const id = newId()
@@ -854,13 +886,19 @@ class SessionRuntime {
       label,
       anchor: input.anchor,
       ...(input.direction ? { direction: input.direction } : {}),
+      ...(input.attachments?.length ? { attachments: input.attachments } : {}),
+      ...(input.references?.length ? { references: input.references } : {}),
     })
     this.store.appendConversation({
       role: 'user',
       text: input.direction ? `探索 ${label}：${input.direction}` : `探索 ${label}`,
       ts: Date.now(),
+      ...(round.attachments?.length ? { attachments: round.attachments.map((a) => a.name) } : {}),
+      ...(round.references?.length
+        ? { references: round.references.map((r) => ({ n: r.n, label: r.label })) }
+        : {}),
     })
-    this.pendingExplore = explorePrompt(round, input.capture)
+    this.pendingExplore = explorePrompt(round, input.capture, this.store)
     this.deliverToAcp()
     this.broadcast()
     return round
@@ -1369,10 +1407,21 @@ class SessionRuntime {
         return res.status(400).json({ error: 'anchor and capture are required' })
       }
       const direction = typeof req.body?.direction === 'string' ? req.body.direction.trim() : ''
+      // The same resolution `/annotations` does, because the markers in the text
+      // mean the same thing here: `[file n]` is a path the agent opens, `[ref n]`
+      // an element it is being pointed at.
+      const ids = attachmentIds(req.body?.attachments)
+      if (!ids) return res.status(400).json({ error: 'attachments must be an array of ids' })
+      const files = this.store.getAttachments(ids)
+      if (!files) return res.status(400).json({ error: 'unknown attachment id' })
+      const refs = parseReferences(req.body?.references)
+      if (!refs) return res.status(400).json({ error: 'references must be an array of anchors' })
       const round = await this.startExplore({
         anchor,
         capture,
         ...(direction ? { direction } : {}),
+        ...(files.length ? { attachments: files } : {}),
+        ...(refs.length ? { references: refs } : {}),
       })
       if (!round) {
         return res.status(409).json({ error: 'this agent cannot run an explore right now' })

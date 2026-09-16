@@ -3896,6 +3896,8 @@ window.addEventListener('message', (e: MessageEvent) => {
     anchor?: unknown
     capture?: unknown
     direction?: string
+    attachments?: string[]
+    references?: RefWire[]
     resumed?: boolean
     ratio?: number
     dx?: number
@@ -3963,6 +3965,8 @@ window.addEventListener('message', (e: MessageEvent) => {
           anchor: data.anchor,
           capture: data.capture,
           direction: data.direction ?? '',
+          attachments: data.attachments ?? [],
+          references: data.references ?? [],
         }),
       })
       if (!res.ok) stripNotice('這個 agent 現在無法執行探索')

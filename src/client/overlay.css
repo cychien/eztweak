@@ -536,7 +536,7 @@
    here - there is no element being framed, only a page standing in for another
    one. */
 .ez-pick-veil[data-ez-explore] {
-  box-shadow: inset 0 0 0 1.5px color-mix(in oklab, var(--ez-explore-accent) 62%, transparent);
+  box-shadow: inset 0 0 0 2px color-mix(in oklab, var(--ez-explore-accent) 62%, transparent);
 }
 
 /* The box being dragged. Dashed, where every other frame the overlay draws is

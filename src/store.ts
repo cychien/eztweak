@@ -507,6 +507,7 @@ export class SessionStore {
       take(batch.attachments)
       for (const item of batch.items) take(item.attachments)
     }
+    for (const round of this.explores) take(round.attachments)
     return ids
   }
 

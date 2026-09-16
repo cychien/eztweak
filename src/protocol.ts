@@ -163,6 +163,13 @@ export interface ExploreState {
   selected: string | null
   /** Set once this round's pick has been sent to the main line. */
   adopted?: string
+  /** Files put in the direction - "like this screenshot". `[file n]` in
+   *  `direction` is `attachments[n-1]`, the same positional contract a comment
+   *  has. */
+  attachments?: Attachment[]
+  /** Elements the direction points at - "make it match that one". `[ref n]`
+   *  names the entry whose `n` matches, which is not its position. */
+  references?: Reference[]
   startedAt: number
 }
 

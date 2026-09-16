@@ -206,3 +206,59 @@ test('an explore without markup to vary is a bad request', async () => {
     400,
   )
 })
+
+test('the direction takes its files and references with it', async () => {
+  const port = await ready()
+  const uploaded = await fetch(`http://127.0.0.1:${port}/__eztweak/api/attachments`, {
+    method: 'POST',
+    headers: { 'content-type': 'image/png', 'x-ez-name': 'mood.png' },
+    body: Buffer.from('not really a png'),
+  })
+  const file = (await uploaded.json()) as { id: string; name: string }
+
+  const round = await explore(port, {
+    direction: '照 [file 1] 的風格，做得像 [ref 2]',
+    attachments: [file.id],
+    references: [{ n: 2, label: '主要按鈕', anchor: { selector: 'header > button.primary' } }],
+  })
+
+  assert.deepEqual(
+    round.attachments?.map((a) => a.name),
+    ['mood.png'],
+  )
+  assert.deepEqual(
+    round.references?.map((r) => [r.n, r.label]),
+    [[2, '主要按鈕']],
+  )
+
+  // The markers name something the agent was actually handed: a path it can open
+  // and an anchor it can resolve. A marker with nothing behind it is the bug.
+  await api(port, '/send', { note: 'REPORT' })
+  const said = await waitFor(async () => {
+    const s = await state(port)
+    return s.conversation?.find((e) => e.role === 'agent' && e.text.includes('prompts'))
+  }, 'the agent to report')
+  const { prompts } = JSON.parse(said.text) as { prompts: { text: string }[] }
+  const asked = prompts.map((p) => p.text).find((t) => t.includes('照 [file 1] 的風格'))!
+  assert.ok(asked, 'the explore prompt was not among what the agent saw')
+  assert.match(asked, /mood\.png/)
+  assert.match(asked, /attachments\/[^"]+/)
+  assert.match(asked, /header > button\.primary/)
+  assert.match(asked, /"n": 2/)
+})
+
+test('an explore with attachments that are not there is a bad request', async () => {
+  const port = await ready()
+  const res = await api(port, '/explore/start', {
+    anchor: ANCHOR,
+    capture: CAPTURE,
+    attachments: ['nope'],
+  })
+  assert.equal(res.status, 400)
+  const bad = await api(port, '/explore/start', {
+    anchor: ANCHOR,
+    capture: CAPTURE,
+    references: [{ label: 'no n' }],
+  })
+  assert.equal(bad.status, 400)
+})
