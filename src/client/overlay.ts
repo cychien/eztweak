@@ -553,6 +553,9 @@ function escape(): void {
 
 /** `anchor` is re-evaluated on every repaint, so the popup tracks its subject
  *  through scrolls and reflows instead of freezing where it opened. */
+const COMPOSE_PLACEHOLDER = '想怎麼調整？輸入 / 用指令 (⌘+Enter 儲存)'
+const EXPLORE_PLACEHOLDER = '給予探索方向，或留空自由探索'
+
 function openPopup(
   subject: DraftSubject,
   anchor: () => DOMRect,
@@ -575,7 +578,9 @@ function openPopup(
 
   const actions = el('div', 'ez-actions')
   const save = el('button', 'ez-btn ez-btn-primary') as HTMLButtonElement
-  save.append(icon(Add01Icon as IconNode, 14), document.createTextNode('加入待送清單'))
+  const saveIcon = icon(Add01Icon as IconNode, 14)
+  const saveLabel = document.createTextNode('加入待送清單')
+  save.append(saveIcon, saveLabel)
   const cancel = el('button', 'ez-btn')
   cancel.textContent = '取消'
   actions.append(cancel, save)
@@ -588,14 +593,17 @@ function openPopup(
    *  explore needs and a region or a bare pin does not have. */
   const exploreTarget = subject.kind === 'element' ? exploreElement : null
   let exploring = false
-  const pill = el('div', 'ez-explore-pill')
-  pill.textContent = '探索 UI variant · 可再補一句方向'
-  pill.hidden = true
+  /** Sits inside the field, above the text, because it labels *this box* - in the
+   *  gap above it would read as a separate notice about the popup. */
+  const exploreHead = el('div', 'ez-explore-head')
+  exploreHead.append(icon(MagicWand01Icon as IconNode, 15), el('span', 'ez-explore-title'))
+  exploreHead.querySelector('.ez-explore-title')!.textContent = '探索樣式'
+  exploreHead.hidden = true
   const attach = attachify({
     api: API,
     mk: el,
     className: 'ez-input',
-    placeholder: '想怎麼調整？輸入 / 用指令 (⌘+Enter 儲存)',
+    placeholder: COMPOSE_PLACEHOLDER,
     onChange: () => {
       save.disabled = saving || attach.pending() > 0
       // The shell is holding a copy of this box in case the page it sits on goes
@@ -617,14 +625,10 @@ function openPopup(
             {
               id: 'explore',
               label: 'Explore',
-              hint: '請 agent 生出這個元素的幾種樣式',
+              hint: '探索樣式',
               keywords: ['explore', 'variant', 'ui', '探索', '樣式', '版本'],
               icon: MagicWand01Icon as IconNode,
-              run: () => {
-                exploring = true
-                pill.hidden = false
-                input.focus()
-              },
+              run: () => setExploring(true),
             },
           ]
         : []),
@@ -632,6 +636,24 @@ function openPopup(
   })
   const input = attach.editable
   ui.popupAttach = attach
+  attach.field.prepend(exploreHead)
+
+  /** Arming and disarming are the same repaint, which is why they are one
+   *  function: every part of the composer that says which of the two things this
+   *  box is about to do has to move together, or it says both. */
+  function setExploring(on: boolean): void {
+    exploring = on
+    exploreHead.hidden = !on
+    popup.classList.toggle('ez-popup-explore', on)
+    input.dataset.placeholder = on ? EXPLORE_PLACEHOLDER : COMPOSE_PLACEHOLDER
+    input.setAttribute('aria-label', on ? EXPLORE_PLACEHOLDER : COMPOSE_PLACEHOLDER)
+    cancel.textContent = on ? '返回' : '取消'
+    // An SVG has no `hidden` property of its own, and the attribute is what the
+    // stylesheet and the a11y tree both read.
+    saveIcon.toggleAttribute('hidden', on)
+    saveLabel.textContent = on ? '探索' : '加入待送清單'
+    input.focus()
+  }
 
   const submit = async () => {
     if (saving || attach.pending() > 0) return
@@ -681,7 +703,10 @@ function openPopup(
     dismiss()
   }
   save.onclick = () => void submit()
-  cancel.onclick = dismiss
+  // One layer at a time, the way Escape unwinds them: from an armed explore this
+  // goes back to the ordinary comment box, holding everything already typed,
+  // rather than throwing the whole composer away.
+  cancel.onclick = () => (exploring ? setExploring(false) : dismiss())
   input.onkeydown = (e) => {
     if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') void submit()
     // No Escape branch: the document listener captures keydown, so it has already
@@ -690,7 +715,7 @@ function openPopup(
     e.stopPropagation()
   }
 
-  popup.append(pill, attach.wrap, actions)
+  popup.append(attach.wrap, actions)
   popup.setAttribute('data-ez-subject', subject.kind)
   document.body.appendChild(popup)
   ui.popup = popup

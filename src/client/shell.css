@@ -2019,6 +2019,7 @@ body.ez-arranging .ez-frame {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  transform: translateY(1px);
 }
 
 /* ------------------------------------------------------- agent config pill */
@@ -2048,6 +2049,7 @@ body.ez-arranging .ez-frame {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  transform: translateY(1px);
 }
 
 /* A contenteditable, not a textarea: attachment chips are elements, and they

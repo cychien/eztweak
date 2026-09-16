@@ -52,6 +52,11 @@ interface Options {
 export interface AttachController {
   /** Insert this where the composer goes. */
   wrap: HTMLElement
+  /** The bordered box the editable sits in - the drop target and the focus ring.
+   *  Exposed so a host can put a header of its own *inside* it, above the text,
+   *  rather than in the gap above the box where it would read as a separate
+   *  thing from the field it is labelling. */
+  field: HTMLElement
   /** The editable box, for `focus()` and the host's own key handling. */
   editable: HTMLElement
   /** What the user typed, chips excluded. */
@@ -219,8 +224,7 @@ export function attachify({
     return chip
   }
 
-  const fileChip = (name: string, id = '') =>
-    makeChip(name, CHIP_ATTR, id, File02Icon as IconNode)
+  const fileChip = (name: string, id = '') => makeChip(name, CHIP_ATTR, id, File02Icon as IconNode)
   /** A settled reference reads its number; a placeholder reads whatever the host
    *  gave it, because it does not have one yet. */
   const refChip = (ref: NumberedRef | null, placeholder: string) => {
@@ -479,6 +483,7 @@ export function attachify({
 
   return {
     wrap,
+    field,
     editable,
     // All three read the same single walk, so the text a comment reads as, the
     // files it carries and the elements it points at can never disagree about

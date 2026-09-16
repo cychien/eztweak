@@ -84,6 +84,17 @@
   --ez-ref: #f4d3e2;
   --ez-ref-ink: #7b3a5c;
   --ez-ref-accent: #cf5f92;
+  /* Explore's violet - the fourth hue in this palette, after the mark's orange
+     (40), the attachment sage (137) and the reference pink (350). Hue 300 is
+     true violet: 288 reads as indigo and technical, 312 leans magenta and gets
+     close to the pink it has to be told apart from. The two roles sit where
+     their siblings sit, so it is a member of the family rather than a louder
+     guest - the ink at the same lightness as the sage and pink inks (L 0.44),
+     the solid a step deeper and richer than the other accents because it is the
+     only one that carries white text on it. 7.2:1 on the field, 7.4:1 white on
+     the solid. */
+  --ez-explore-ink: #5e3f8c;
+  --ez-explore-accent: #6b3baa;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans TC', sans-serif;
 }
 
@@ -663,14 +674,49 @@ ez-variant {
   display: contents;
 }
 
-/* Says which of the two things this composer is about to do. The pill is the
-   whole of that signal, so it reads as a sentence rather than a tag. */
-.ez-explore-pill {
-  margin-bottom: 7px;
-  padding: 5px 8px;
-  border-radius: 6px;
-  background: oklch(95% 0.04 285);
-  color: oklch(42% 0.13 285);
-  font-size: 11.5px;
-  line-height: 1.5;
+/* Says which of the two things this composer is about to do. Inside the field,
+   above the text, because it is a label for the box rather than a notice about
+   the popup - and the colour is the whole of the signal, so it needs to be in
+   the same frame as the thing it is colouring. */
+.ez-explore-head {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-bottom: 4px;
+  color: var(--ez-explore-ink);
+}
+
+.ez-explore-head[hidden] {
+  display: none;
+}
+
+.ez-explore-title {
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+}
+
+/* The one button in the tool that is not ink. An explore is the only thing here
+   that spends the agent's time on something the user has not described in
+   words, so it is the only one that announces itself. */
+.ez-popup-explore .ez-btn-primary {
+  background: var(--ez-explore-accent);
+}
+
+.ez-popup-explore .ez-btn-primary:hover {
+  background: var(--ez-explore-accent);
+  opacity: 0.88;
+}
+
+/* The field picks up the hue while armed, so the box being typed into is visibly
+   the one the violet button will act on - but softened well below the button's
+   own weight. At full strength the border becomes a hard ring that competes with
+   the action it is only meant to agree with, and the panel reads as an alert. */
+.ez-popup-explore .ez-attach-field:focus-within {
+  border-color: color-mix(in oklab, var(--ez-explore-accent) 45%, var(--ez-paper-edge));
+  outline-color: color-mix(in oklab, var(--ez-explore-accent) 12%, transparent);
+}
+
+.ez-popup-explore .ez-btn-primary [hidden] {
+  display: none;
 }

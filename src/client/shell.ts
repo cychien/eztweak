@@ -2560,7 +2560,7 @@ async function switchAgent(agent: AgentWire): Promise<void> {
     // way the switch goes, so answering it once answers it for all of them.
     key: 'switch-agent',
     title: `確定要改用 ${agent.name}？`,
-    body: 'Session 綁定 Agent，切換 Agent 會開啟新對話。',
+    body: '切換 Agent 會開啟新對話，遺失現有上下文。',
     go: `改用 ${agent.name}`,
   })
   if (!ok) return
