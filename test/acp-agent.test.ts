@@ -5,7 +5,7 @@ import { after, test } from 'node:test'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { AcpAgent } from '../src/acp-agent.js'
-import type { McpServerEntry } from '../src/mcp-explore.js'
+import { type McpServerEntry, isExploreTool } from '../src/mcp-explore.js'
 import type { AcpLimit, AcpSessionStart, AcpSnapshot } from '../src/acp-agent.js'
 
 const FAKE = join(dirname(fileURLToPath(import.meta.url)), 'helpers', 'fake-acp-agent.mjs')
@@ -39,6 +39,8 @@ interface HarnessOptions {
   /** The mcp servers to open every session with, as the daemon's explore rounds
    *  would supply them. */
   mcpServers?: () => McpServerEntry[]
+  /** Which tools are the daemon's own, as it would tell the agent. */
+  ownTool?: (toolName: string) => boolean
   /** Prompts to hand over the way `deliverToAcp` does - on the agent going idle,
    *  from the same `onChange` the daemon acts on. Ordering claims about a pick
    *  landing before a session's first turn only mean anything against this. */
@@ -105,6 +107,7 @@ function harness(options: HarnessOptions = {}) {
     },
     ...(options.resume ? { resumeSessionId: options.resume } : {}),
     ...(options.mcpServers ? { mcpServers: options.mcpServers } : {}),
+    ...(options.ownTool ? { ownTool: options.ownTool } : {}),
     onSessionOpen: (sessionId, how) => {
       opens.push({ sessionId, how })
       wake()
@@ -881,4 +884,39 @@ test('an agent that cannot reach an http mcp server is offered none', async () =
     mcpBySession: Record<string, string[]>
   }
   assert.deepEqual(report.mcpBySession[h.opens[0]!.sessionId], [])
+})
+
+test("a tool that is not the daemon's own is put to the user as a permission card", async () => {
+  const h = harness({ ownTool: isExploreTool })
+  after(() => h.acp.stop())
+  await h.idle()
+  h.acp.prompt('PERMISSION')
+  const asked = await h.until('the ask', (s) => !!s.ask)
+  assert.equal(asked.ask!.kind, 'permission')
+  assert.equal(asked.ask!.title, 'Bash')
+  const field = asked.ask!.fields[0]!
+  assert.deepEqual(
+    field.kind === 'select' ? field.options.map((o) => [o.id, o.hint]) : field.kind,
+    [
+      ['allow-once', 'allow_once'],
+      ['allow-always', 'allow_always'],
+      ['reject', 'reject_once'],
+    ],
+  )
+  assert.equal(h.acp.answer(asked.ask!.id, { option: 'reject' }), true)
+  await h.until('the turn', () => h.turns.length === 1)
+  assert.equal(h.turns[0]!.reply, 'Bash: reject')
+})
+
+test("the daemon's own tool is granted once, with no card and nothing to write down", async () => {
+  // Named the way Claude Code names an MCP tool on one of our round servers.
+  const tool = 'mcp__eztweak-explore-r1__explore_variant'
+  const h = harness({ ownTool: isExploreTool, env: { EZ_FAKE_PERMISSION_TOOL: tool } })
+  after(() => h.acp.stop())
+  await h.idle()
+  const turn = await h.ask('PERMISSION')
+  // Granted as a one-off - `allow_once` - never as the "always" that would have
+  // become a rule in the project's settings keyed by a round id, dead on arrival.
+  assert.equal(turn.reply, `${tool}: allow-once`)
+  assert.equal(h.acp.snapshot().ask, undefined)
 })

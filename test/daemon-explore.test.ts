@@ -7,7 +7,7 @@ const world = new DaemonWorld(4500)
 after(() => world.dispose())
 
 interface State {
-  acp?: { state?: string }
+  acp?: { state?: string; ask?: unknown }
   chats?: { id: string; current: boolean; parentChatId?: string }[]
   conversation?: { role: string; text: string }[]
   explores?: ExploreState[]
@@ -42,6 +42,16 @@ const api = (port: number, path: string, body?: unknown) =>
   })
 
 const state = (port: number) => world.state(port) as Promise<State>
+
+/** What the fake agent saw and did, out of its REPORT turn. */
+async function report(port: number): Promise<{ log: string[]; prompts: { text: string }[] }> {
+  await api(port, '/send', { note: 'REPORT' })
+  const said = await waitFor(async () => {
+    const s = await state(port)
+    return s.conversation?.find((e) => e.role === 'agent' && e.text.includes('prompts'))
+  }, 'the agent to report')
+  return JSON.parse(said.text) as { log: string[]; prompts: { text: string }[] }
+}
 
 const ANCHOR = {
   source: 'src/App.tsx:42',
@@ -101,6 +111,16 @@ test('an explore runs on a branch and its variants come back through the tool', 
   // The thread on the branch says what was asked, in the user's own words.
   const said = (await state(port)).conversation ?? []
   assert.ok(said.some((e) => e.role === 'user' && e.text.includes('更緊湊')))
+
+  // The agent asked permission to call the tool before it sent anything, the
+  // way Claude Code does outside Auto mode - and got it from the daemon, once,
+  // without a card the user would have had to answer for the round to finish.
+  const { log } = await report(port)
+  assert.ok(
+    log.includes(`permission:mcp__eztweak-explore-${round.id}__explore_variant:allow-once`),
+    log.join('\n'),
+  )
+  assert.equal((await state(port)).acp?.ask, undefined)
 })
 
 test('the round is over when the turn is, and a late variant is refused', async () => {
@@ -233,12 +253,7 @@ test('the direction takes its files and references with it', async () => {
 
   // The markers name something the agent was actually handed: a path it can open
   // and an anchor it can resolve. A marker with nothing behind it is the bug.
-  await api(port, '/send', { note: 'REPORT' })
-  const said = await waitFor(async () => {
-    const s = await state(port)
-    return s.conversation?.find((e) => e.role === 'agent' && e.text.includes('prompts'))
-  }, 'the agent to report')
-  const { prompts } = JSON.parse(said.text) as { prompts: { text: string }[] }
+  const { prompts } = await report(port)
   const asked = prompts.map((p) => p.text).find((t) => t.includes('照 [file 1] 的風格'))!
   assert.ok(asked, 'the explore prompt was not among what the agent saw')
   assert.match(asked, /mood\.png/)

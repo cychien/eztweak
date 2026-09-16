@@ -49,6 +49,18 @@ import { URL_PREFIX } from './constants.js'
 export const MCP_PATH = `${URL_PREFIX}/api/mcp`
 export const MCP_ROUTE = '/mcp/:exploreId'
 
+const SERVER_PREFIX = 'eztweak-explore-'
+const TOOL_NAME = 'explore_variant'
+
+/** Whether a tool the agent wants to call is this one - `explore_variant` on one
+ *  of eztweak's own round servers - as the agent names it when it asks
+ *  permission: `mcp__<server>__<tool>`, Claude Code's convention. An agent that
+ *  names tools some other way is not recognised, and its request is put to the
+ *  user like any other, which is the conservative failure. */
+export function isExploreTool(toolName: string): boolean {
+  return toolName.startsWith(`mcp__${SERVER_PREFIX}`) && toolName.endsWith(`__${TOOL_NAME}`)
+}
+
 /** One variant, as the agent sent it and the daemon accepted it. */
 export interface IncomingVariant {
   name: string
@@ -111,7 +123,7 @@ export class ExploreMcp {
   serverEntries(port: number): McpServerEntry[] {
     return [...this.rounds.keys()].map((exploreId) => ({
       type: 'http',
-      name: `eztweak-explore-${exploreId}`,
+      name: `${SERVER_PREFIX}${exploreId}`,
       url: `http://127.0.0.1:${port}${MCP_PATH}/${exploreId}`,
       headers: [{ name: 'authorization', value: `Bearer ${this.rounds.get(exploreId)!.token}` }],
     }))
@@ -185,7 +197,7 @@ const DESCRIPTION = [
 
 function register(server: McpServer, sink: VariantSink): void {
   server.registerTool(
-    'explore_variant',
+    TOOL_NAME,
     {
       title: 'Show a UI variant',
       description: DESCRIPTION,

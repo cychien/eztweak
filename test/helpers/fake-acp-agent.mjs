@@ -186,6 +186,25 @@ async function sendVariants(sessionId, variants) {
   return said
 }
 
+/** `session/request_permission` as Claude Code sends it for a tool call: the
+ *  options its own dialog has, in its order. Resolves to the option id the
+ *  client selected, or the outcome when it selected none. */
+async function askPermission(ctx, sessionId, toolName) {
+  const response = await ctx.client.request(methods.client.session.requestPermission, {
+    sessionId,
+    toolCall: { toolCallId: `call-${toolName}`, name: toolName, title: toolName, kind: 'other' },
+    options: [
+      { optionId: 'allow-once', name: 'Yes', kind: 'allow_once' },
+      { optionId: 'allow-always', name: "Yes, and don't ask again", kind: 'allow_always' },
+      { optionId: 'reject', name: 'No', kind: 'reject_once' },
+    ],
+  })
+  const picked =
+    response.outcome.outcome === 'selected' ? response.outcome.optionId : response.outcome.outcome
+  log.push(`permission:${toolName}:${picked}`)
+  return picked
+}
+
 const app = agent({ name: 'fake-acp-agent' })
   .onRequest(methods.agent.initialize, (ctx) => {
     log.push(`initialize:boolean=${!!ctx.params.clientCapabilities?.session?.configOptions?.boolean}`)
@@ -365,6 +384,17 @@ const app = agent({ name: 'fake-acp-agent' })
     // agent is told about it.
     if (text.includes('explore_variant')) {
       prompts.push({ sessionId, text })
+      // Permission first, the way Claude Code asks it outside Auto mode: the
+      // tool's full name, and the three options its dialog offers. What the
+      // client picks is logged, and a refusal ends the turn with nothing sent.
+      const server = (mcpBySession.get(sessionId)?.servers ?? []).find((s) =>
+        s.name.startsWith('eztweak-explore-'),
+      )
+      const picked = await askPermission(ctx, sessionId, `mcp__${server?.name}__explore_variant`)
+      if (picked !== 'allow-once' && picked !== 'allow-always') {
+        await say(`not allowed: ${picked}`)
+        return { stopReason: 'end_turn' }
+      }
       const variants = text.includes('BADVARIANTS')
         ? [
             { name: 'two roots', html: '<div>a</div><div>b</div>' },
@@ -377,6 +407,15 @@ const app = agent({ name: 'fake-acp-agent' })
           ]
       const said = await sendVariants(sessionId, variants)
       await say(said.join(' | '))
+      return { stopReason: 'end_turn' }
+    }
+    // Ask permission for a tool - `Bash` unless `EZ_FAKE_PERMISSION_TOOL` names
+    // one - and reply with what the client decided, so a test sees whether the
+    // request was put to the user or settled on the client's own authority.
+    if (text.includes('PERMISSION')) {
+      prompts.push({ sessionId, text })
+      const tool = process.env.EZ_FAKE_PERMISSION_TOOL || 'Bash'
+      await say(`${tool}: ${await askPermission(ctx, sessionId, tool)}`)
       return { stopReason: 'end_turn' }
     }
     // Ask the user a form, the way AskUserQuestion reaches a client: the payload

@@ -28,7 +28,7 @@ import { attachmentIds, parseReferences, sanitizeAnchor, sanitizeCapture } from 
 import { injectOverlay, wantsHtml } from './inject.js'
 import type { AttachmentLocator } from './label.js'
 import { shortAnchor, toAgentAttachments, toAgentItem, toConversationItem } from './label.js'
-import { type IncomingVariant, ExploreMcp, MCP_ROUTE } from './mcp-explore.js'
+import { type IncomingVariant, ExploreMcp, MCP_ROUTE, isExploreTool } from './mcp-explore.js'
 import type {
   Anchor,
   Annotation,
@@ -646,6 +646,7 @@ class SessionRuntime {
       // read now rather than captured, because a restored session can come back
       // on a different one.
       mcpServers: () => this.exploreMcp.serverEntries(this.port),
+      ownTool: isExploreTool,
       // Delivery rides on every state change: the moment the agent first goes
       // idle - or comes back idle - whatever is queued goes out.
       onChange: () => {

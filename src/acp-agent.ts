@@ -160,6 +160,12 @@ export interface AcpAgentOptions {
    *  per live explore round. Read at open time for the same reason as the rest,
    *  and ignored entirely by an agent that cannot reach an HTTP one. */
   mcpServers?: () => McpServer[]
+  /** Whether a tool the agent asks permission to call is one of eztweak's own -
+   *  served by this daemon, for this review. Such a request is granted here
+   *  without a card: the user asked for the thing the tool does when they
+   *  started the round, and "may eztweak talk to eztweak" is not a question they
+   *  can meaningfully answer. Every other tool's request still goes to them. */
+  ownTool?: (toolName: string) => boolean
   /** The last figure this agent reported, from before the daemon restarted. The
    *  line is permanent once it has a number, and nothing here can ask for one -
    *  see `usage-limit.ts`. */
@@ -712,6 +718,17 @@ export class AcpAgent {
   private async requestPermission(
     params: RequestPermissionRequest,
   ): Promise<RequestPermissionResponse> {
+    // Our own tool is let through as a one-off, never as "always": an always is
+    // what the agent writes into the project's settings as a rule keyed by the
+    // tool's full name, and that name carries the round id - so the rule would
+    // never match again and the file would grow a dead line per round. Once
+    // costs nothing and leaves nothing behind. An agent offering no once falls
+    // through to the user rather than being granted something broader.
+    const toolName = params.toolCall.name ?? params.toolCall.title ?? ''
+    if (this.opts.ownTool?.(toolName)) {
+      const once = params.options.find((o) => o.kind === 'allow_once')
+      if (once) return { outcome: { outcome: 'selected', optionId: once.optionId } }
+    }
     const field: AcpAskField = {
       key: 'option',
       kind: 'select',

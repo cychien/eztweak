@@ -2,7 +2,13 @@ import assert from 'node:assert/strict'
 import { after, test } from 'node:test'
 import { createServer } from 'node:http'
 import express from 'express'
-import { type IncomingVariant, ExploreMcp, MCP_PATH, MCP_ROUTE } from '../src/mcp-explore.js'
+import {
+  type IncomingVariant,
+  ExploreMcp,
+  MCP_PATH,
+  MCP_ROUTE,
+  isExploreTool,
+} from '../src/mcp-explore.js'
 
 /** One JSON-RPC round trip, as an MCP client makes it. */
 async function rpc(
@@ -171,4 +177,18 @@ test('each live round is its own server entry, named and tokened apart', async (
   assert.deepEqual(entries[0]!.headers, [{ name: 'authorization', value: `Bearer ${a.token}` }])
   mcp.closeAll()
   assert.deepEqual(mcp.serverEntries(4321), [])
+})
+
+test('the tool is recognised by its full name on one of our servers, and by nothing looser', () => {
+  const mcp = new ExploreMcp()
+  mcp.open('7d503b164853', () => 'ok')
+  const [entry] = mcp.serverEntries(4321)
+  // The name an agent uses when it asks permission is built from the server
+  // name it was handed, so the recogniser is tested against that, not a literal.
+  assert.equal(isExploreTool(`mcp__${entry!.name}__explore_variant`), true)
+  assert.equal(isExploreTool('Bash'), false)
+  assert.equal(isExploreTool('explore_variant'), false)
+  assert.equal(isExploreTool(`mcp__${entry!.name}__something_else`), false)
+  assert.equal(isExploreTool('mcp__other-server__explore_variant'), false)
+  mcp.closeAll()
 })
