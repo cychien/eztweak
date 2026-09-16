@@ -24,7 +24,11 @@ import type {
  *  re-render. Without the build plugin there is only the selector, which is
  *  weaker - two rounds on structurally identical elements may be judged the same
  *  - and the cost of that is one selection cleared, not a wrong swap. */
+/** How a round closes: with its variants under `status`, or - holding none -
+ *  dismissed, off the strip and off the page. A round already dismissed stays so
+ *  whatever it holds. */
 function closeExplore(round: ExploreState, status: ExploreStatus): ExploreState {
+  if (round.status === 'dismissed') return round
   return round.variants.length
     ? { ...round, status }
     : { ...round, status: 'dismissed', selected: null }
@@ -334,16 +338,20 @@ export class SessionStore {
     return this.patchExplore(id, (e) => closeExplore(e, status))
   }
 
-  /** No turn survives the daemon, so a round still generating when its session
-   *  is restored is over - cancelled, with whatever had arrived. Left alone it
+  /** Bring every round into line with how rounds close now, on restore.
+   *
+   *  No turn survives the daemon, so a round still generating when its session
+   *  comes back is over - cancelled, with whatever had arrived. Left alone it
    *  stayed generating for good, a strip saying 還在想 about an agent that was
-   *  not. */
+   *  not. And a round closed by an earlier version holding nothing is dismissed
+   *  the way `endExplore` would dismiss it today, so the strip is not carrying
+   *  tabs for rounds that were empty before the rule existed. */
   settleExplores(): void {
     const explores = this.explores
-    if (!explores.some((e) => e.status === 'generating')) return
-    this.writeExplores(
-      explores.map((e) => (e.status === 'generating' ? closeExplore(e, 'cancelled') : e)),
+    const settled = explores.map((e) =>
+      closeExplore(e, e.status === 'generating' ? 'cancelled' : e.status),
     )
+    if (settled.some((e, i) => e.status !== explores[i]!.status)) this.writeExplores(settled)
   }
 
   /** Put one of a round's variants on the page, or `null` for the original.

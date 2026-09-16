@@ -605,6 +605,12 @@ test('a round still generating when the store is reopened is over, because no tu
   first.startExplore({ id: 'partial', chatId: 'c2', label: 'B', anchor: { ...anchor, text: 'x' } })
   first.addVariant('partial', { name: 'v', html: '<i/>' })
 
+  // Closed by an earlier version, when an empty round was allowed to stay: a
+  // tab with nothing behind it, which today's rule would not have left.
+  first.startExplore({ id: 'legacy', chatId: 'c3', label: 'C', anchor: { ...anchor, text: 'y' } })
+  const legacy = first.explores.map((e) => (e.id === 'legacy' ? { ...e, status: 'cancelled' } : e))
+  writeFileSync(join(first.dir, 'explores.json'), JSON.stringify(legacy))
+
   const reopened = new SessionStore(origin, PROJECT)
   reopened.settleExplores()
   assert.deepEqual(
@@ -612,6 +618,7 @@ test('a round still generating when the store is reopened is over, because no tu
     [
       ['bare', 'dismissed'],
       ['partial', 'cancelled'],
+      ['legacy', 'dismissed'],
     ],
   )
   // Idempotent: nothing left to settle, nothing rewritten.
