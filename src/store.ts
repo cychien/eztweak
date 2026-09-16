@@ -24,6 +24,12 @@ import type {
  *  re-render. Without the build plugin there is only the selector, which is
  *  weaker - two rounds on structurally identical elements may be judged the same
  *  - and the cost of that is one selection cleared, not a wrong swap. */
+function closeExplore(round: ExploreState, status: ExploreStatus): ExploreState {
+  return round.variants.length
+    ? { ...round, status }
+    : { ...round, status: 'dismissed', selected: null }
+}
+
 export function sameTarget(a: Anchor, b: Anchor): boolean {
   if (a.source && b.source) return a.source === b.source && a.text === b.text
   return !!a.selector && a.selector === b.selector
@@ -321,8 +327,23 @@ export class SessionStore {
     }))
   }
 
-  setExploreStatus(id: string, status: ExploreStatus): ExploreState | null {
-    return this.patchExplore(id, (e) => ({ ...e, status }))
+  /** The round's turn is over, however it ended. What a closed round keeps is
+   *  what had arrived, so one that ends holding nothing is dismissed outright:
+   *  there is no variant to leave on the page and no reason for a tab. */
+  endExplore(id: string, status: ExploreStatus): ExploreState | null {
+    return this.patchExplore(id, (e) => closeExplore(e, status))
+  }
+
+  /** No turn survives the daemon, so a round still generating when its session
+   *  is restored is over - cancelled, with whatever had arrived. Left alone it
+   *  stayed generating for good, a strip saying 還在想 about an agent that was
+   *  not. */
+  settleExplores(): void {
+    const explores = this.explores
+    if (!explores.some((e) => e.status === 'generating')) return
+    this.writeExplores(
+      explores.map((e) => (e.status === 'generating' ? closeExplore(e, 'cancelled') : e)),
+    )
   }
 
   /** Put one of a round's variants on the page, or `null` for the original.

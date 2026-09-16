@@ -497,6 +497,8 @@ class SessionRuntime {
     // Session start is the one moment no composer can be holding a fresh upload,
     // which is what makes an unreferenced attachment safe to judge by age alone.
     this.store.sweepAttachments()
+    // Likewise: a round mid-turn when the last daemon went down has no turn now.
+    this.store.settleExplores()
     this.bus.setMaxListeners(50)
   }
 
@@ -940,7 +942,7 @@ class SessionRuntime {
     const round = this.generatingExplore()
     if (!round) return
     this.exploreMcp.close(round.id)
-    this.store.setExploreStatus(round.id, status)
+    this.store.endExplore(round.id, status)
     if (!round.variants.length && status === 'done') {
       this.store.appendConversation({
         role: 'system',

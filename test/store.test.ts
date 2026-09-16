@@ -584,3 +584,37 @@ test('asking for a fresh chat while already on an empty one has nothing to do', 
   assert.equal(store.switchChat(fresh)?.id, fresh)
   assert.equal(store.onEmptyNewestChat, true)
 })
+
+// A closed round keeps what arrived. When nothing did, there is nothing to keep
+// and nothing for the strip to show - so it leaves rather than lingering as a tab.
+test('a round that ends with nothing is dismissed; one that ends with something is kept', () => {
+  const store = new SessionStore('http://localhost:9012', PROJECT)
+  store.startExplore({ id: 'empty', chatId: 'c1', label: 'A', anchor })
+  store.startExplore({ id: 'full', chatId: 'c2', label: 'B', anchor: { ...anchor, text: 'other' } })
+  store.addVariant('full', { name: 'v', html: '<i/>' })
+
+  assert.equal(store.endExplore('empty', 'cancelled')!.status, 'dismissed')
+  assert.equal(store.endExplore('full', 'cancelled')!.status, 'cancelled')
+  assert.equal(store.explores.find((e) => e.id === 'full')!.variants.length, 1)
+})
+
+test('a round still generating when the store is reopened is over, because no turn survived', () => {
+  const origin = 'http://localhost:9013'
+  const first = new SessionStore(origin, PROJECT)
+  first.startExplore({ id: 'bare', chatId: 'c1', label: 'A', anchor })
+  first.startExplore({ id: 'partial', chatId: 'c2', label: 'B', anchor: { ...anchor, text: 'x' } })
+  first.addVariant('partial', { name: 'v', html: '<i/>' })
+
+  const reopened = new SessionStore(origin, PROJECT)
+  reopened.settleExplores()
+  assert.deepEqual(
+    reopened.explores.map((e) => [e.id, e.status]),
+    [
+      ['bare', 'dismissed'],
+      ['partial', 'cancelled'],
+    ],
+  )
+  // Idempotent: nothing left to settle, nothing rewritten.
+  reopened.settleExplores()
+  assert.equal(reopened.explores.find((e) => e.id === 'partial')!.variants.length, 1)
+})

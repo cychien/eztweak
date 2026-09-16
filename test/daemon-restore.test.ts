@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -208,4 +208,56 @@ test('a restored session whose project is gone reports a dead agent, not a dead 
   }, 'the agent to report that it could not start')
   assert.match(state.acp?.error ?? '', /could not start|exited/)
   assert.equal(state.agentOnline, false)
+})
+
+// The daemon went down with a round mid-turn. No turn survives that, so the
+// round comes back closed - and the one that had nothing yet does not come back
+// on the strip at all.
+test('an explore mid-turn when the daemon went down is over when the session returns', async () => {
+  const origin = 'http://127.0.0.1:11'
+  const live = await world.liveDaemon()
+  const opened = await world.openSession(live.port, {
+    url: `${origin}/`,
+    project: PROJECT,
+    agent: FAKE_AGENT,
+  })
+  await acpIdle(opened.port)
+
+  const dir = readdirSync(join(world.dataDir, 'sessions')).find((d) => {
+    const s = JSON.parse(
+      readFileSync(join(world.dataDir, 'sessions', d, 'session.json'), 'utf8'),
+    ) as { targetOrigin: string }
+    return s.targetOrigin === origin
+  })!
+  const round = (id: string, variants: unknown[]) => ({
+    id,
+    chatId: 'c',
+    label: id,
+    anchor: { text: id },
+    status: 'generating',
+    variants,
+    selected: null,
+    startedAt: Date.now(),
+  })
+  writeFileSync(
+    join(world.dataDir, 'sessions', dir, 'explores.json'),
+    JSON.stringify([
+      round('bare', []),
+      round('partial', [{ id: 'v1', name: 'v', html: '<i/>', createdAt: Date.now() }]),
+    ]),
+  )
+
+  await world.stopDaemon(live.port)
+  world.spawnDaemon()
+  const second = await world.liveDaemon()
+  const found = await world.control(
+    second.port,
+    `/control/sessions/find?origin=${encodeURIComponent(origin)}`,
+  )
+  const { port } = (await found.json()) as { port: number }
+  const state = (await world.state(port)) as { explores?: { id: string; status: string }[] }
+  assert.deepEqual(
+    state.explores?.map((e) => [e.id, e.status]),
+    [['partial', 'cancelled']],
+  )
 })
