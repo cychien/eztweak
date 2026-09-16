@@ -522,11 +522,16 @@
   box-shadow: inset 0 0 64px -18px color-mix(in oklab, var(--ez-ref-accent) 62%, transparent);
 }
 
-/* The same wash for the same kind of moment, in explore's own colour: the user
-   has said which element and is describing what to do with it, and until they
-   send, the page is waiting on them rather than on the agent. */
+/* The same wash in explore's own colour, saying the page is standing in a
+   variant rather than showing the real thing.
+
+   Fainter than the pick's, and pulled tighter to the edges, because the two are
+   on for very different lengths of time. A pick lasts seconds and can afford to
+   be noticed; this is on for as long as someone wants to look at variants, over
+   the very colours they are looking at. It has to be answerable at the edge of
+   attention and invisible to the judgement being made in the middle. */
 .ez-pick-veil[data-ez-explore] {
-  box-shadow: inset 0 0 64px -18px color-mix(in oklab, var(--ez-explore-accent) 62%, transparent);
+  box-shadow: inset 0 0 52px -24px color-mix(in oklab, var(--ez-explore-accent) 30%, transparent);
 }
 
 /* The box being dragged. Dashed, where every other frame the overlay draws is

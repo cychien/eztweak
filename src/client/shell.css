@@ -2983,8 +2983,13 @@ body.ez-arranging .ez-frame {
   position: relative;
   /* Its own animation makes this a stacking context, which traps the menu's
      z-index inside it - so the bar has to carry one too, or the thread below
-     paints straight over a popover that is nominally above everything. */
-  z-index: 5;
+     paints straight over a popover that is nominally above everything.
+
+     One, not five. Five put it level with the header's own menus, and being
+     later in the document it then cut through the size picker hanging over it.
+     The bar belongs above the conversation and below everything the chrome
+     drops. */
+  z-index: 1;
   display: flex;
   align-items: center;
   gap: 5px;
