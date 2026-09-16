@@ -3,6 +3,7 @@
 import Cancel01Icon from '@hugeicons/core-free-icons/Cancel01Icon'
 import AlignSelectionIcon from '@hugeicons/core-free-icons/AlignSelectionIcon'
 import ArrowDown01Icon from '@hugeicons/core-free-icons/ArrowDown01Icon'
+import MagicWand01Icon from '@hugeicons/core-free-icons/MagicWand01Icon'
 import ArrowRight02Icon from '@hugeicons/core-free-icons/ArrowRight02Icon'
 import Grid02Icon from '@hugeicons/core-free-icons/Grid02Icon'
 import ChatGptIcon from '@hugeicons/core-free-icons/ChatGptIcon'
@@ -1777,14 +1778,28 @@ editAttach.wrap.addEventListener(
  *  a strip of height on every review, to say something that is true on almost
  *  none of them; floating in the corner costs nothing until there is something
  *  to say. The thread scrolls under it, which is why it carries a ground. */
-const forkChip = h('button', 'ez-fork-chip')
-forkChip.hidden = true
+const forkBar = h('nav', 'ez-fork-bar')
+forkBar.hidden = true
+forkBar.setAttribute('aria-label', '目前的對話位置')
+/** The way back to the review itself. A branch's most likely exit by far, so it
+ *  is a click rather than a click-then-choose. */
+const forkRoot = h('button', 'ez-fork-root', '主對話')
+/** The levels between the review and here, when a branch was opened from a
+ *  branch. Carries its own separator, so hiding it leaves a crumb that still
+ *  reads as one trail rather than two names run together. */
+const forkEllipsis = h('span', 'ez-fork-gap')
+forkEllipsis.append(h('span', 'ez-fork-sep', '…'), h('span', 'ez-fork-sep', '›'))
+/** The conversation being read, and the trigger for everything else it could
+ *  be. The current crumb is the natural place for it: a breadcrumb's last item
+ *  is where you are, so opening a list of the others from it needs no second
+ *  control. */
+const forkChip = h('button', 'ez-fork-here')
 forkChip.setAttribute('aria-haspopup', 'menu')
 forkChip.setAttribute('aria-expanded', 'false')
-const forkTrail = h('span', 'ez-fork-trail')
-forkChip.append(forkTrail, icon(ArrowDown01Icon as IconNode, 12))
+const forkName = h('span', 'ez-fork-name')
+forkChip.append(icon(MagicWand01Icon as IconNode, 13), forkName)
 
-const forkMenu = h('div', 'ez-menu ez-menu-right ez-fork-menu')
+const forkMenu = h('div', 'ez-menu ez-fork-menu')
 forkMenu.setAttribute('role', 'menu')
 forkMenu.setAttribute('aria-label', '回到某個對話')
 forkMenu.hidden = true
@@ -1861,6 +1876,10 @@ function openFork(): void {
 }
 
 forkChip.onclick = () => (forkOpen ? closeFork() : openFork())
+forkRoot.onclick = () => {
+  const root = [...(snapshot?.chats ?? [])].reverse()[0]
+  if (root && !root.current) void switchChat(root.id)
+}
 forkMenu.onkeydown = (e) => {
   if (walkMenu(e, forkRows)) return
   if (e.key === 'Escape') {
@@ -1890,7 +1909,7 @@ function paintFork(s: SnapshotWire): void {
   const chats = s.chats ?? []
   const current = chats.find((c) => c.current)
   const onBranch = !!current?.parentChatId
-  forkChip.hidden = !onBranch
+  forkBar.hidden = !onBranch
   if (!onBranch) {
     if (forkOpen) closeFork()
     shownChatId = current?.id ?? null
@@ -1899,7 +1918,7 @@ function paintFork(s: SnapshotWire): void {
   // The crumb always starts at the review itself, not at the immediate parent.
   // Branches can nest, and "探索樣式 › 探索樣式" says nothing; where the user
   // came from ultimately is what they are being offered a way back to. The
-  // levels in between are shown as an ellipsis and listed in the popover.
+  // levels in between become an ellipsis and are listed in the popover.
   let depth = 0
   let at: ChatWire | undefined = current
   while (at?.parentChatId) {
@@ -1908,13 +1927,10 @@ function paintFork(s: SnapshotWire): void {
   }
   // The oldest chat is the review's main line; `chats` arrives newest first.
   const here = chatName(current, false)
-  forkTrail.textContent = ''
-  forkTrail.append(h('span', 'ez-fork-from', '主對話'), h('span', 'ez-fork-sep', '›'))
-  if (depth > 1) {
-    forkTrail.append(h('span', 'ez-fork-from', '…'), h('span', 'ez-fork-sep', '›'))
-  }
-  forkTrail.append(h('span', 'ez-fork-here', here))
-  forkChip.title = `主對話 ${'› … '.repeat(depth > 1 ? 1 : 0)}› ${here} · 點一下切換對話`
+  forkEllipsis.hidden = depth < 2
+  forkName.textContent = here
+  forkChip.title = `${here}${current.detail ? ` · ${current.detail}` : ''} · 點一下切換對話`
+  forkRoot.title = '回到主對話'
 }
 
 /** The thread moved between conversations. Push it sideways, in the direction
@@ -1945,7 +1961,11 @@ const convList = h('div', 'ez-conv')
 const convScroll = h('div', 'ez-fade ez-conv-scroll')
 convScroll.appendChild(convList)
 
-convSection.append(convScroll, forkChip, forkMenu, notices)
+forkBar.append(forkRoot, h('span', 'ez-fork-sep', '›'), forkEllipsis, forkChip, forkMenu)
+// Above the thread and in the flow, so the conversation starts below it rather
+// than under it: a breadcrumb is where you *are*, which is part of the page
+// rather than something floating over it.
+convSection.append(forkBar, convScroll, notices)
 
 const resizer = h('div', 'ez-resizer')
 resizer.tabIndex = 0
