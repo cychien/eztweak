@@ -3139,11 +3139,12 @@ body.ez-arranging .ez-frame {
   border-radius: 6px;
 }
 
-/* A branch sits under the line it came off. One step, not a tree of them: the
-   nesting here is only ever one deep in practice, and an indent per level would
-   be a mechanism with nothing to do. */
-.ez-fork-row[data-nested] {
-  padding-left: 18px;
+/* A branch sits under the line it came off, and a branch of a branch under
+   that. Measured on a real review, chains reach five deep - `/explore` forks
+   from wherever you are, so exploring from inside an explore goes a level
+   further down. The indent is that depth. */
+.ez-fork-row {
+  padding-left: calc(6px + var(--depth, 0) * 12px);
 }
 
 /* The name is what the row is chosen by, so it keeps its width and the detail

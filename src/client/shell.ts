@@ -1865,17 +1865,32 @@ function openFork(): void {
   // back - it is going somewhere else entirely, which `/resume` is for. What
   // this control offers is where you are and what you came from.
   const here = current ? rootOf(current, all) : undefined
-  const chats = here ? all.filter((c) => rootOf(c, all).id === here.id) : all
+  // Branches only. The line they came off has its own crumb a few pixels to the
+  // left, so listing it here would be the same destination offered twice - and
+  // this control is for the thing the crumb cannot do, which is reach the other
+  // sessions nested under it.
+  const chats = here
+    ? all.filter((c) => c.parentChatId && rootOf(c, all).id === here.id)
+    : all.filter((c) => c.parentChatId)
   forkMenu.textContent = ''
   forkRows = chats.map((chat) => {
     const row = h('button', 'ez-notice-row ez-fork-row')
     row.setAttribute('role', 'menuitemradio')
     row.setAttribute('aria-checked', String(chat.current))
     if (chat.current) row.dataset.current = ''
-    if (chat.parentChatId) row.dataset.nested = ''
+    // Branches nest: `/explore` forks from wherever the review is, so exploring
+    // from inside an explore goes a level deeper. The indent is that depth, not
+    // a flat mark - every row here is nested, and what differs is how far.
+    let depth = 0
+    for (let at = chat; at.parentChatId && depth < 8; depth += 1) {
+      const parent = all.find((c) => c.id === at.parentChatId)
+      if (!parent) break
+      at = parent
+    }
+    row.style.setProperty('--depth', String(depth - 1))
     row.append(
       icon(ArrowRight02Icon as IconNode, 12),
-      h('span', 'ez-notice-row-name', chatName(chat, chat.id === here?.id)),
+      h('span', 'ez-notice-row-name', chatName(chat, false)),
       h('span', 'ez-notice-row-when', chatDetail(chat)),
     )
     row.addEventListener('pointerenter', () => pointAtForkRow(row))
