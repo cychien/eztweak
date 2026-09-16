@@ -2,8 +2,8 @@
 
 import Cancel01Icon from '@hugeicons/core-free-icons/Cancel01Icon'
 import AlignSelectionIcon from '@hugeicons/core-free-icons/AlignSelectionIcon'
-import ArrowDown01Icon from '@hugeicons/core-free-icons/ArrowDown01Icon'
-import ArrowRight01Icon from '@hugeicons/core-free-icons/ArrowRight01Icon'
+import ChevronDownIcon from '@hugeicons/core-free-icons/ChevronDownIcon'
+import ChevronRightIcon from '@hugeicons/core-free-icons/ChevronRightIcon'
 import MagicWand01Icon from '@hugeicons/core-free-icons/MagicWand01Icon'
 import ArrowRight02Icon from '@hugeicons/core-free-icons/ArrowRight02Icon'
 import Grid02Icon from '@hugeicons/core-free-icons/Grid02Icon'
@@ -591,7 +591,7 @@ const deviceName = h('button', 'ez-seg-label')
 deviceName.onclick = () => setDevice(deviceId)
 
 const deviceCaret = h('button', 'ez-seg-caret')
-deviceCaret.append(icon(ArrowDown01Icon as IconNode, 11))
+deviceCaret.append(icon(ChevronDownIcon as IconNode, 12))
 deviceCaret.setAttribute('aria-haspopup', 'menu')
 deviceCaret.setAttribute('aria-expanded', 'false')
 
@@ -1959,7 +1959,7 @@ convScroll.appendChild(convList)
 // hairline, because it is text being asked to be a mark. The icon keeps the
 // stroke the rest of this UI is drawn with.
 const forkSep = h('span', 'ez-fork-sep')
-forkSep.append(icon(ArrowRight01Icon as IconNode, 14))
+forkSep.append(icon(ChevronRightIcon as IconNode, 14))
 forkBar.append(forkRoot, forkSep, forkChip, forkMenu)
 // Above the thread and in the flow, so the conversation starts below it rather
 // than under it: a breadcrumb is where you *are*, which is part of the page
@@ -2786,7 +2786,7 @@ function paintAgents(): void {
   agentPill.append(
     ...brandMark(agentBrandFor(command), 14),
     h('span', 'ez-agent-name', agentProfileFor(command)?.name ?? 'Agent'),
-    icon(ArrowDown01Icon as IconNode, 11),
+    icon(ChevronDownIcon as IconNode, 12),
   )
 
   agentMenu.textContent = ''
@@ -2984,7 +2984,7 @@ function paintConfig(acp: AcpWire | undefined): void {
       ? shortConfigValueName(configValueName(named, named.currentValue))
       : (named && configLabel(named)) || ''
   configPill.textContent = ''
-  configPill.append(h('span', 'ez-config-name', label), icon(ArrowDown01Icon as IconNode, 11))
+  configPill.append(h('span', 'ez-config-name', label), icon(ChevronDownIcon as IconNode, 12))
   // The qualifier the label dropped, plus the agent's own description of the
   // value - which is where "Best for everyday, complex tasks" lives.
   const full = named && named.type === 'select' ? configValueName(named, named.currentValue) : ''
