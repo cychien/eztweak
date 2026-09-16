@@ -1784,7 +1784,7 @@ forkBar.hidden = true
 forkBar.setAttribute('aria-label', '目前的對話位置')
 /** The way back to the review itself. A branch's most likely exit by far, so it
  *  is a click rather than a click-then-choose. */
-const forkRoot = h('button', 'ez-fork-root', '主對話')
+const forkRoot = h('button', 'ez-fork-root')
 /** The conversation being read, and the trigger for everything else it could
  *  be. The current crumb is the natural place for it: a breadcrumb's last item
  *  is where you are, so opening a list of the others from it needs no second
@@ -1817,14 +1817,31 @@ function closeFork(focusChip = false): void {
   if (focusChip) forkChip.focus()
 }
 
-/** The name a conversation goes by here. The root is the review itself; a branch
- *  is named by what it was opened to do, because that is what the user will be
- *  looking for when they come back to it. */
+/** The top of the tree this conversation belongs to: walk up until a chat has
+ *  no parent. A review can have several - `/new` starts one each time - and a
+ *  branch belongs to exactly one of them. Bounded, because a parent chain read
+ *  off the wire is not this code's to trust with an unbounded walk. */
+function rootOf(chat: ChatWire, chats: ChatWire[]): ChatWire {
+  let at = chat
+  for (let hops = 0; at.parentChatId && hops < 32; hops += 1) {
+    const parent = chats.find((c) => c.id === at.parentChatId)
+    if (!parent) break
+    at = parent
+  }
+  return at
+}
+
+/** The name a conversation goes by here. A branch is named by what it was opened
+ *  to do, because that is what the user will be looking for when they come back
+ *  to it; the line it came off is the main one.
+ *
+ *  `isRoot` means "the top of the tree being shown", not "the review's first
+ *  conversation". Everything this control draws is scoped to one tree, so there
+ *  is only ever one of these on screen and 主對話 is unambiguous - while inside
+ *  a branch, the line you came off *is* the main conversation, whether or not
+ *  the review happened to start there. */
 function chatName(chat: ChatWire, isRoot: boolean): string {
   if (chat.parentChatId) return chat.title ?? '分支對話'
-  // Only the *first* conversation is the review's main line. `/new` opens more
-  // top-level ones, and calling them all 主對話 would offer a list of rows the
-  // user cannot tell apart - which is exactly what the picker is for.
   return isRoot ? '主對話' : (chat.title ?? '對話')
 }
 
@@ -1837,11 +1854,18 @@ function chatDetail(chat: ChatWire): string {
 function openFork(): void {
   const s = snapshot
   if (!s?.chats) return
-  // Oldest first, so the main line is at the top and the branches read as having
-  // come off it in the order they were opened. The picker's own order, not the
-  // header's - this is a tree being read, not a history being scrolled.
-  const chats = [...s.chats].reverse()
-  const rootId = chats[0]?.id
+  // Oldest first, so the line this branch came off is at the top and the
+  // branches read as having come off it in the order they were opened. The
+  // picker's own order, not the header's - this is a tree being read, not a
+  // history being scrolled.
+  const all = [...s.chats].reverse()
+  const current = all.find((c) => c.current)
+  // One tree only. `/new` starts a separate conversation with branches of its
+  // own, and stepping from inside this branch into one of those is not going
+  // back - it is going somewhere else entirely, which `/resume` is for. What
+  // this control offers is where you are and what you came from.
+  const here = current ? rootOf(current, all) : undefined
+  const chats = here ? all.filter((c) => rootOf(c, all).id === here.id) : all
   forkMenu.textContent = ''
   forkRows = chats.map((chat) => {
     const row = h('button', 'ez-notice-row ez-fork-row')
@@ -1851,7 +1875,7 @@ function openFork(): void {
     if (chat.parentChatId) row.dataset.nested = ''
     row.append(
       icon(ArrowRight02Icon as IconNode, 12),
-      h('span', 'ez-notice-row-name', chatName(chat, chat.id === rootId)),
+      h('span', 'ez-notice-row-name', chatName(chat, chat.id === here?.id)),
       h('span', 'ez-notice-row-when', chatDetail(chat)),
     )
     row.addEventListener('pointerenter', () => pointAtForkRow(row))
@@ -1873,8 +1897,11 @@ function openFork(): void {
 
 forkChip.onclick = () => (forkOpen ? closeFork() : openFork())
 forkRoot.onclick = () => {
-  const root = [...(snapshot?.chats ?? [])].reverse()[0]
-  if (root && !root.current) void switchChat(root.id)
+  const chats = [...(snapshot?.chats ?? [])].reverse()
+  const current = chats.find((c) => c.current)
+  if (!current) return
+  const root = rootOf(current, chats)
+  if (!root.current) void switchChat(root.id)
 }
 forkMenu.onkeydown = (e) => {
   if (walkMenu(e, forkRows)) return
@@ -1922,9 +1949,12 @@ function paintFork(s: SnapshotWire): void {
   // and one crumb's worth of it crowds a line whose job is to say "you are one
   // level down". The element is a keystroke away in the popover.
   const here = chatName(current, false)
+  const root = rootOf(current, chats)
+  const rootName = chatName(root, true)
+  forkRoot.textContent = rootName
+  forkRoot.title = `回到${rootName}`
   forkName.textContent = here
   forkChip.title = `${here} · 點一下切換對話`
-  forkRoot.title = '回到主對話'
 }
 
 /** The thread moved between conversations. Push it sideways, in the direction
