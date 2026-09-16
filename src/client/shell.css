@@ -3087,6 +3087,19 @@ body.ez-arranging .ez-frame {
   cursor: pointer;
 }
 
+/* The one signal that this crumb does something. It carries no plate and grows
+   none on hover - a breadcrumb that sprouts a button is no longer a breadcrumb -
+   so it answers by lifting off the ground instead. Far enough to be felt, and
+   measured to stay above 4.5:1 there; the mark beside it goes with it, or half
+   the crumb would answer and half would not. */
+.ez-fork-here:hover {
+  color: color-mix(in oklab, var(--explore-ink) 80%, var(--paper));
+}
+
+.ez-fork-here:hover svg {
+  color: color-mix(in oklab, var(--explore-accent) 80%, var(--paper));
+}
+
 /* The one violet here. The name is a location and takes the page's ink; the
    mark says which kind of branch it is, which is the only thing on this line
    that is about explore rather than about position. */
@@ -3113,13 +3126,18 @@ body.ez-arranging .ez-frame {
   /* Bounded on both sides. `.ez-menu` sizes to `max-content`, so without a cap
      one long element label sets the width of the panel and pushes it past the
      sidebar; with one, the label is what gives way. */
-  min-width: 190px;
-  max-width: min(100%, 290px);
+  min-width: 170px;
+  max-width: min(100%, 280px);
   transform-origin: top left;
   animation: ez-menu-in var(--t-menu) var(--ease-out) both;
-  /* The same seven-row budget the resume list keeps, for the same reason: a
-     list that grows past the panel is one the user has to hunt in. */
-  --notice-row: 22px;
+  /* Tighter than the resume card's list. That one is a card in the thread with
+     room to breathe; this is a menu hung off a crumb, and a menu that stands
+     taller than the thing it dropped from reads as a panel rather than a list
+     of two or three siblings. Still the same seven-row budget before it
+     scrolls. */
+  --notice-row: 19px;
+  padding: 3px;
+  gap: 0;
   max-height: calc(var(--notice-row) * 7);
   overflow-y: auto;
   overscroll-behavior: contain;
@@ -3137,14 +3155,13 @@ body.ez-arranging .ez-frame {
 }
 
 .ez-fork-row {
-  padding: 2px 6px;
-  border-radius: 6px;
+  border-radius: 5px;
 }
 
 /* Every row is a direct branch of the same line, so there is no depth to draw
    and no indent to draw it with. */
 .ez-fork-row {
-  padding-left: 6px;
+  padding: 0 6px;
 }
 
 /* The name is what the row is chosen by, so it keeps its width and the detail
