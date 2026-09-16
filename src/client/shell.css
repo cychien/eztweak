@@ -3017,10 +3017,13 @@ body.ez-arranging .ez-frame {
 
 /* The trail behind you recedes; the crumb you are on is the one being read.
    The same weighting shadcn's breadcrumb uses, and the reason it reads at a
-   glance rather than as two names of equal claim. */
+   glance rather than as two names of equal claim.
+
+   4.89:1 on this ground. A step lighter measured 3.44:1 and two steps 2.01:1,
+   which is a word you can see is there and cannot make out. */
 .ez-fork-root,
 .ez-fork-sep {
-  color: var(--ink-ghost);
+  color: var(--muted-foreground);
 }
 
 /* A line of text that happens to be clickable, not a button. No padding, no

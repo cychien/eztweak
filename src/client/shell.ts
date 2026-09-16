@@ -1959,7 +1959,7 @@ convScroll.appendChild(convList)
 // hairline, because it is text being asked to be a mark. The icon keeps the
 // stroke the rest of this UI is drawn with.
 const forkSep = h('span', 'ez-fork-sep')
-forkSep.append(icon(ChevronRightIcon as IconNode, 14))
+forkSep.append(icon(ChevronRightIcon as IconNode, 12))
 forkBar.append(forkRoot, forkSep, forkChip, forkMenu)
 // Above the thread and in the flow, so the conversation starts below it rather
 // than under it: a breadcrumb is where you *are*, which is part of the page
