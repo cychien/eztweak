@@ -343,6 +343,13 @@ function explorePrompt(
     '',
     "The variant is placed in a **shadow root** standing in the element's slot. Consequences:",
     '',
+    capture.styles?.['box-sizing']
+      ? `- **\`box-sizing\` is \`${capture.styles['box-sizing']}\` on every element inside the root**, matching the element it`
+      : '- **`box-sizing` inside the root matches the element it stands in for**, on every element - the',
+    capture.styles?.['box-sizing']
+      ? '  stands in for, so `width: 100%` with padding lays out the way it does on the page. Nothing'
+      : '  page has set it, so `width: 100%` with padding lays out the way it does on the page. Nothing',
+    '  else from the page comes with it.',
     "- **None of the page's CSS reaches it.** Not `.btn`, not resets, nothing. Class names from the",
     '  page do nothing inside; write every rule the variant needs yourself, in one `<style>` inside the',
     '  root or as inline styles. The rules above are there to be copied from.',

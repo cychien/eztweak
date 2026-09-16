@@ -166,11 +166,25 @@ export function buildVariant(html: string, doc: Document): Element | null {
  *  can look inside. */
 export const HOST_TAG = 'ez-variant'
 
-export function mountVariant(root: Element, exploreId: string, doc: Document): HTMLElement {
+export function mountVariant(
+  root: Element,
+  exploreId: string,
+  doc: Document,
+  /** The sizing model of the element the variant stands in for. */
+  boxSizing: string,
+): HTMLElement {
   const host = doc.createElement(HOST_TAG)
   host.setAttribute(VARIANT_ATTR, exploreId)
   host.style.display = 'contents'
-  host.attachShadow({ mode: 'open' }).append(root)
+  // The one reset that decides layout rather than looks. Nearly every page sets
+  // `border-box` on `*`, and nothing from the page reaches a shadow tree - so a
+  // variant written the way the page is written, `width: 100%` with padding,
+  // came out content-box and overflowed its slot by exactly that padding. The
+  // element's own value, not a fixed one: the variant should lay out under the
+  // rule its original did.
+  const baseline = doc.createElement('style')
+  baseline.textContent = `*, *::before, *::after { box-sizing: ${boxSizing}; }`
+  host.attachShadow({ mode: 'open' }).append(baseline, root)
   return host
 }
 
@@ -242,8 +256,12 @@ export class VariantSwapper {
     const target = elements[index]!
     const root = buildVariant(swap.html!, this.doc)
     if (!root) return
+    const boxSizing = this.doc.defaultView?.getComputedStyle(target).boxSizing || 'content-box'
     target.setAttribute(SWAPPED_ATTR, swap.exploreId)
-    target.insertAdjacentElement('afterend', mountVariant(root, swap.exploreId, this.doc))
+    target.insertAdjacentElement(
+      'afterend',
+      mountVariant(root, swap.exploreId, this.doc, boxSizing),
+    )
   }
 
   private restore(exploreId: string): void {
@@ -309,6 +327,7 @@ const cssEscape = (value: string): string =>
  *  not the ones a layout engine would. Mirrored in `sanitizeCapture`, which is
  *  what actually decides - this list only decides what is worth asking for. */
 const CAPTURE_STYLES = [
+  'box-sizing',
   'font-family',
   'font-size',
   'font-weight',

@@ -143,6 +143,7 @@ export function parseReferences(raw: unknown, max = MAX_REFERENCES): Reference[]
  *  than a cap on how many arrive: the page is asked for exactly these, and a
  *  client sending anything else is sending something the prompt has no use for. */
 const CAPTURE_STYLES = [
+  'box-sizing',
   'font-family',
   'font-size',
   'font-weight',

@@ -61,7 +61,12 @@ const ANCHOR = {
 }
 const CAPTURE = {
   html: '<button class="cta">免費試用 14 天</button>',
-  styles: { 'font-size': '16px', 'background-color': 'rgb(59, 130, 246)', nonsense: 'dropped' },
+  styles: {
+    'box-sizing': 'border-box',
+    'font-size': '16px',
+    'background-color': 'rgb(59, 130, 246)',
+    nonsense: 'dropped',
+  },
   parentWidth: 640.4,
 }
 
@@ -115,11 +120,15 @@ test('an explore runs on a branch and its variants come back through the tool', 
   // The agent asked permission to call the tool before it sent anything, the
   // way Claude Code does outside Auto mode - and got it from the daemon, once,
   // without a card the user would have had to answer for the round to finish.
-  const { log } = await report(port)
+  const { log, prompts } = await report(port)
   assert.ok(
     log.includes(`permission:mcp__eztweak-explore-${round.id}__explore_variant:allow-once`),
     log.join('\n'),
   )
+  // The agent is told the one reset the variant is given, and its value, so it
+  // can write `width: 100%` with padding the way the page does.
+  const asked = prompts.map((p) => p.text).find((t) => t.includes('更緊湊'))!
+  assert.match(asked, /`box-sizing` is `border-box` on every element inside the root/)
   assert.equal((await state(port)).acp?.ask, undefined)
 })
 

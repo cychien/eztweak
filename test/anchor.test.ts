@@ -127,7 +127,12 @@ test('the framed list is bounded in length and in width', () => {
 test('a capture keeps what a variant needs to be written and drops what it does not', () => {
   const capture = sanitizeCapture({
     html: '<a class="btn">go</a>',
-    styles: { 'font-size': '15px', 'background-color': 'rgb(37, 99, 235)', zzz: 'dropped' },
+    styles: {
+      'box-sizing': 'border-box',
+      'font-size': '15px',
+      'background-color': 'rgb(37, 99, 235)',
+      zzz: 'dropped',
+    },
     parentWidth: 640.4,
     rules: ['.btn { padding: 12px }', '.btn:hover { opacity: .9 }', 42, ''],
     slot: {
@@ -152,7 +157,11 @@ test('a capture keeps what a variant needs to be written and drops what it does 
   })
   assert.deepEqual(capture, {
     html: '<a class="btn">go</a>',
-    styles: { 'font-size': '15px', 'background-color': 'rgb(37, 99, 235)' },
+    styles: {
+      'box-sizing': 'border-box',
+      'font-size': '15px',
+      'background-color': 'rgb(37, 99, 235)',
+    },
     parentWidth: 640,
     rules: ['.btn { padding: 12px }', '.btn:hover { opacity: .9 }'],
     slot: {

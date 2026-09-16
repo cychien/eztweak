@@ -2,6 +2,7 @@ import { relative } from 'node:path'
 import { parse } from '@babel/parser'
 import MagicString from 'magic-string'
 import { SOURCE_ATTR } from './constants.js'
+import { projectRoot } from './project-root.js'
 
 /**
  * Structural subset of Vite's Plugin type. Deliberately not imported from
@@ -43,15 +44,18 @@ function walk(node: BabelNode, visit: (node: BabelNode) => void): void {
  * Dev-only JSX transform: stamps `data-ez-source="relative/file.tsx:line"` on
  * host elements (lowercase tags) so overlay annotations resolve to exact
  * source locations. `apply: 'serve'` — never part of a production build.
+ *
+ * Relative to the *project*, not to Vite's root: the path is for the agent to
+ * open, and the agent stands where the CLI was run - see `projectRoot`.
  */
 export function eztweakSource(): ReviewkitSourcePlugin {
-  let root = process.cwd()
+  let root = projectRoot(process.cwd())
   return {
     name: 'eztweak:source',
     apply: 'serve',
     enforce: 'pre',
     configResolved(config) {
-      root = config.root
+      root = projectRoot(config.root)
     },
     transform(code, id) {
       const [file] = id.split('?')
