@@ -2989,7 +2989,7 @@ body.ez-arranging .ez-frame {
   align-items: center;
   gap: 5px;
   min-width: 0;
-  padding: 7px 0 8px;
+  padding: 7px 0 7px;
   /* Full-bleed, like the section rules above and below it: this separates two
      regions of the sidebar, and a line inset from both edges reads as belonging
      to the crumb rather than as the boundary it is. */
@@ -3137,12 +3137,14 @@ body.ez-arranging .ez-frame {
   max-width: min(100%, 280px);
   transform-origin: top left;
   animation: ez-menu-in var(--t-menu) var(--ease-out) both;
-  /* The resume card's list, to the pixel: 20px rows carrying their height as
-     leading rather than as padding, and nothing between them. That list is the
-     one this is a second instance of, so matching it is not a coincidence to be
-     re-derived - it is the point. Seven rows before it scrolls, the same
-     budget, for the same reason. */
-  --notice-row: 20px;
+  /* Looser than the resume card's list, which was tried and read as cramped
+     here. That list sits inside a card that already has padding around it; this
+     one is the panel, so the breathing room the card was providing has to come
+     from the rows and the plate themselves. The plate is asymmetric on purpose:
+     the extra is wanted above and below the list, not beside it, where the rows
+     already carry their own. Seven rows before it scrolls, as before. */
+  --notice-row: 26px;
+  padding: 7px 4px;
   gap: 0;
   max-height: calc(var(--notice-row) * 7);
   overflow-y: auto;
