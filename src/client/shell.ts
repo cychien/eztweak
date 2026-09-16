@@ -3,6 +3,7 @@
 import Cancel01Icon from '@hugeicons/core-free-icons/Cancel01Icon'
 import AlignSelectionIcon from '@hugeicons/core-free-icons/AlignSelectionIcon'
 import ArrowDown01Icon from '@hugeicons/core-free-icons/ArrowDown01Icon'
+import ArrowRight01Icon from '@hugeicons/core-free-icons/ArrowRight01Icon'
 import MagicWand01Icon from '@hugeicons/core-free-icons/MagicWand01Icon'
 import ArrowRight02Icon from '@hugeicons/core-free-icons/ArrowRight02Icon'
 import Grid02Icon from '@hugeicons/core-free-icons/Grid02Icon'
@@ -1833,13 +1834,6 @@ function chatDetail(chat: ChatWire): string {
   return chat.detail ?? chatTime(chat.startedAt)
 }
 
-/** What one conversation is called where there is room for a single name. What
- *  it is about beats what kind of thing it is: every branch here is an explore,
- *  so the element is the only part of the name that identifies it. */
-function chatTitle(chat: ChatWire): string {
-  return chat.detail ?? chat.title ?? chatName(chat, false)
-}
-
 function openFork(): void {
   const s = snapshot
   if (!s?.chats) return
@@ -1923,10 +1917,11 @@ function paintFork(s: SnapshotWire): void {
   // between - there is no rung to step onto there, and an ellipsis that opens
   // nothing is a control that lies. The popover lists them.
   //
-  // Named by what the session is *about* rather than by what kind of session it
-  // is. Every branch here is an explore, so "探索樣式" tells two of them apart
-  // not at all, while the element does it at a glance.
-  const here = chatTitle(current)
+  // Named by what kind of session it is. The element it was opened on is more
+  // identifying, and was tried - but it is long, it carries the viewport tag,
+  // and one crumb's worth of it crowds a line whose job is to say "you are one
+  // level down". The element is a keystroke away in the popover.
+  const here = chatName(current, false)
   forkName.textContent = here
   forkChip.title = `${here} · 點一下切換對話`
   forkRoot.title = '回到主對話'
@@ -1960,7 +1955,12 @@ const convList = h('div', 'ez-conv')
 const convScroll = h('div', 'ez-fade ez-conv-scroll')
 convScroll.appendChild(convList)
 
-forkBar.append(forkRoot, h('span', 'ez-fork-sep', '›'), forkChip, forkMenu)
+// A drawn chevron rather than the `›` character: at any size the glyph stays a
+// hairline, because it is text being asked to be a mark. The icon keeps the
+// stroke the rest of this UI is drawn with.
+const forkSep = h('span', 'ez-fork-sep')
+forkSep.append(icon(ArrowRight01Icon as IconNode, 14))
+forkBar.append(forkRoot, forkSep, forkChip, forkMenu)
 // Above the thread and in the flow, so the conversation starts below it rather
 // than under it: a breadcrumb is where you *are*, which is part of the page
 // rather than something floating over it.

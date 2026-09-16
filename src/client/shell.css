@@ -3044,6 +3044,10 @@ body.ez-arranging .ez-frame {
 .ez-fork-sep {
   flex-shrink: 0;
   user-select: none;
+  /* Drawn, not typed - see the note where it is built. Inline-flex so the mark
+     centres against the text rather than sitting on its baseline. */
+  display: inline-flex;
+  align-items: center;
 }
 
 /* The last crumb, which is also the way to every other conversation. Drawn as
