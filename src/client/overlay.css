@@ -506,37 +506,26 @@
 }
 
 /* The page underneath stays fully usable, so nothing about the page itself says
-   this moment is different. A wash pulled in from the edges does, without taking
-   a single pixel away from the content or intercepting one click.
+   this moment is different. A line at the very edge of the frame does, without
+   taking a single pixel away from the content or intercepting one click.
 
-   Only a wash - no line around the viewport. A hard border reads as chrome the
-   page has grown, and it competes with the frame drawn around the element the
-   user is actually choosing. This has to register at the edge of attention and
-   nowhere else, so it is kept faint enough to be felt rather than looked at. */
+   A line rather than a wash pulled inward: the wash lay over the colours the
+   user is looking at to judge, and this has to register at the edge of attention
+   and nowhere else. Only the colour changes between the states that use it. */
 .ez-pick-veil {
+  --ez-veil-edge: var(--ez-ref-accent);
   position: fixed;
   inset: 0;
   z-index: 2147483597;
   pointer-events: none;
   display: none;
-  box-shadow: inset 0 0 64px -18px color-mix(in oklab, var(--ez-ref-accent) 62%, transparent);
+  box-shadow: inset 0 0 0 2px color-mix(in oklab, var(--ez-veil-edge) 62%, transparent);
 }
 
-/* The same wash in explore's own colour, saying the page is standing in a
-   variant rather than showing the real thing.
-
-   A line and nothing else. The wash was there to make the state noticeable, and
-   the line does that better while costing the content nothing - it sits at the
-   very edge of the frame, outside everything being looked at, where the wash
-   reached inward over the colours being judged. Keeping both would be paying
-   that cost for a signal already delivered.
-
-   The pick's veil is the other way round for a reason: a line there would
-   compete with the frame drawn around the element being chosen. Nothing competes
-   here - there is no element being framed, only a page standing in for another
-   one. */
+/* The same line in explore's own colour, saying the page is standing in a
+   variant rather than showing the real thing. */
 .ez-pick-veil[data-ez-explore] {
-  box-shadow: inset 0 0 0 2px color-mix(in oklab, var(--ez-explore-accent) 62%, transparent);
+  --ez-veil-edge: var(--ez-explore-accent);
 }
 
 /* The box being dragged. Dashed, where every other frame the overlay draws is
