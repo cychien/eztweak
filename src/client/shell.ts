@@ -886,40 +886,32 @@ const stage = h('div', 'ez-stage')
 const canvas = h('div', 'ez-canvas')
 stage.appendChild(canvas)
 
-/** The variant strip: what the agent produced for one element, across the bottom
- *  of the stage.
+/** The variant strip: what the agent produced, across the bottom of the stage.
  *
  *  Across the stage rather than in the sidebar because it is about the *page* -
  *  every preview on the canvas shows the selected variant at once, and the thing
  *  you are comparing is what you are looking at, not what you are reading.
  *
- *  One round at a time, with a switcher when there is more than one. Rounds on
- *  different elements all stand on the page together; the strip is only about
- *  which of them you are currently choosing within. */
+ *  One pill per live round, stacked. Every round's choice is standing on the
+ *  page at the same time, so a switcher could only ever hide selections that are
+ *  already in effect. Which element a pill is about is in its tooltip: the
+ *  variants are what the eye came here for, and a name in front of them is a
+ *  word to read before you can start looking. */
 const strip = h('div', 'ez-strip')
 strip.hidden = true
-const stripRounds = h('div', 'ez-strip-rounds')
-const stripChips = h('div', 'ez-strip-chips')
-const stripActions = h('div', 'ez-strip-actions')
-strip.append(stripRounds, stripChips, stripActions)
 
 /** Say something went wrong where the strip would have appeared. Its own line
  *  rather than the thread's: an explore that never started wrote nothing to the
  *  conversation, so there is nowhere else for this to be. */
 function stripNotice(text: string): void {
   strip.hidden = false
-  stripRounds.replaceChildren()
-  stripChips.replaceChildren(h('div', 'ez-strip-pending', text))
-  stripActions.replaceChildren()
+  const pill = h('div', 'ez-strip-pill')
+  pill.append(icon(MagicWand01Icon as IconNode, 14), h('div', 'ez-strip-pending', text))
+  strip.replaceChildren(pill)
   setTimeout(() => {
     if (!liveExplores().length) strip.hidden = true
   }, 4000)
 }
-
-/** Which round the strip is showing. Null means "the newest", which is what the
- *  user just started; it only becomes a real id once they pick another, so a new
- *  round does not have to fight a stale selection to be seen. */
-let stripRound: string | null = null
 
 /** What each frame currently has standing in it, so a repaint only posts the
  *  swaps that actually changed. Without it every snapshot - and they arrive on
@@ -928,11 +920,6 @@ const posted = new Map<string, string | null>()
 
 function liveExplores(): ExploreWire[] {
   return snapshot?.explores ?? []
-}
-
-function shownRound(): ExploreWire | undefined {
-  const rounds = liveExplores()
-  return rounds.find((r) => r.id === stripRound) ?? rounds[rounds.length - 1]
 }
 
 /** Push every round's selection into every preview, and only what moved. */
@@ -977,61 +964,56 @@ function select(round: ExploreWire, variantId: string | null): void {
 function paintStrip(): void {
   const rounds = liveExplores()
   strip.hidden = rounds.length === 0
-  if (!rounds.length) {
-    stripRound = null
-    return
-  }
-  const round = shownRound()!
-  stripRound = round.id
+  strip.replaceChildren(...rounds.map((round) => roundPill(round)))
+}
 
-  stripRounds.replaceChildren()
-  stripRounds.hidden = rounds.length < 2
-  for (const one of rounds) {
-    const tab = h('button', `ez-strip-round${one.id === round.id ? ' ez-on' : ''}`, one.label)
-    tab.title = one.direction ? `${one.label}：${one.direction}` : one.label
-    tab.onclick = () => {
-      stripRound = one.id
-      paintStrip()
-    }
-    stripRounds.append(tab)
-  }
+function roundPill(round: ExploreWire): HTMLElement {
+  const pill = h('div', 'ez-strip-pill')
+  pill.title = round.direction ? `${round.label}：${round.direction}` : round.label
+  pill.setAttribute('role', 'group')
+  pill.setAttribute('aria-label', `探索 ${round.label}`)
+  pill.append(icon(MagicWand01Icon as IconNode, 14))
 
-  stripChips.replaceChildren()
+  const chips = h('div', 'ez-strip-chips')
   const original = h('button', `ez-strip-chip${round.selected === null ? ' ez-on' : ''}`, '原本')
+  original.title = '這個元素原本的樣子'
   original.onclick = () => select(round, null)
-  stripChips.append(original)
+  chips.append(original)
   for (const variant of round.variants) {
-    const chip = h('button', `ez-strip-chip${variant.id === round.selected ? ' ez-on' : ''}`)
-    chip.append(h('span', undefined, variant.name))
-    if (variant.note) chip.append(h('span', 'ez-strip-note', variant.note))
-    chip.title = variant.note ?? variant.name
+    const on = variant.id === round.selected
+    const chip = h('button', `ez-strip-chip${on ? ' ez-on' : ''}`, variant.name)
+    // The note is a sentence about what this variant did, and on the pill it
+    // would set the width that four variants have to share. It is the tooltip's
+    // to carry, alongside the name in full - the chip clips that too.
+    chip.title = variant.note ? `${variant.name}：${variant.note}` : variant.name
     chip.onclick = () => select(round, variant.id)
-    stripChips.append(chip)
+    chips.append(chip)
   }
   if (round.status === 'generating') {
-    stripChips.append(h('div', 'ez-strip-pending', round.variants.length ? '還在想…' : '正在產生…'))
+    chips.append(h('div', 'ez-strip-pending', round.variants.length ? '還在想…' : '正在產生…'))
   }
+  pill.append(chips)
 
-  stripActions.replaceChildren()
+  const actions = h('div', 'ez-strip-actions')
   const onBranch = snapshot?.chats?.find((c) => c.current)?.id === round.chatId
-  if (onBranch) {
-    const parent = snapshot?.chats?.find((c) => c.id === round.chatId)?.parentChatId
-    if (parent) {
-      const back = h('button', 'ez-strip-action', '回主線')
-      back.title = '回到開始探索前的對話'
-      // Mid-turn the agent is still on this branch, and moving would abandon a
-      // turn the user can see running. The cancel chord is the way out of that.
-      back.disabled = !!snapshot?.agentBusy
-      back.onclick = () =>
-        void api('/acp/chat', { method: 'POST', body: JSON.stringify({ id: parent }) })
-      stripActions.append(back)
-    }
+  const parent = onBranch ? snapshot?.chats?.find((c) => c.id === round.chatId)?.parentChatId : null
+  if (parent) {
+    const back = h('button', 'ez-strip-action', '回主線')
+    back.title = '回到開始探索前的對話'
+    // Mid-turn the agent is still on this branch, and moving would abandon a
+    // turn the user can see running. The cancel chord is the way out of that.
+    back.disabled = !!snapshot?.agentBusy
+    back.onclick = () =>
+      void api('/acp/chat', { method: 'POST', body: JSON.stringify({ id: parent }) })
+    actions.append(back)
   }
   const close = h('button', 'ez-strip-action', '關閉')
   close.title = '結束這一輪探索，頁面回到原本的樣子'
   close.onclick = () =>
     void api('/explore/dismiss', { method: 'POST', body: JSON.stringify({ id: round.id }) })
-  stripActions.append(close)
+  actions.append(close)
+  pill.append(actions)
+  return pill
 }
 
 /** Which sizes the canvas shows. Its own control, in the corner of the thing it

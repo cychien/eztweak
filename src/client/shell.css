@@ -68,6 +68,9 @@
      there for why hue 300 and why these two lightnesses. */
   --explore-ink: #5e3f8c;
   --explore-accent: #6b3baa;
+  /* The same violet as it reads on the variant strip's near-black pill.
+     --explore-accent is weighted for paper and all but disappears there. */
+  --explore-on-ink: #a97ae0;
   /* Motion. One strong ease-out for everything that enters or leaves, because
      the built-in curves are too weak to read as deliberate, and one duration
      band: a view arriving is the slowest thing here and still under 300ms. */
@@ -2864,145 +2867,148 @@ body.ez-arranging .ez-frame {
 
 /* --------------------------------------------------------- variant strip */
 
-/* `display` set in an author rule outranks the UA's `[hidden]`, so every part of
-   the strip that sets one has to say this for itself. The strip is hidden far
-   more often than it is shown, so getting it wrong is not a corner case. */
-.ez-strip[hidden],
-.ez-strip-rounds[hidden] {
+/* `display` set in an author rule outranks the UA's `[hidden]`, so the strip has
+   to say this for itself. It is hidden far more often than it is shown, so
+   getting it wrong is not a corner case. */
+.ez-strip[hidden] {
   display: none;
 }
 
 /* Across the bottom of the stage, over the canvas rather than in it: the canvas
    pans and scrolls, and a control that slides away with it is one you have to
-   chase. Same reason the size picker sits where it does. */
+   chase. Same reason the size picker sits where it does.
+
+   Centred and sized to its contents rather than stretched edge to edge. What is
+   in it is a handful of chips, and a bar the width of the stage spends the whole
+   bottom edge of the page saying so. */
 .ez-strip {
   position: absolute;
-  left: 12px;
-  right: 12px;
+  left: 50%;
   bottom: 12px;
+  transform: translateX(-50%);
   z-index: 3;
   display: flex;
+  flex-direction: column;
   align-items: center;
-  gap: 10px;
-  padding: 8px 10px;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--panel);
-  box-shadow: 0 6px 20px oklch(0% 0 0 / 0.1);
+  gap: 8px;
+  max-width: calc(100% - 24px);
 }
 
-.ez-strip-rounds {
+/* The dark pill the overlay already uses for anything it floats over a page -
+   see `.ez-pick-banner`. Dark because this one is over the app's own design and
+   has to stay legible above whatever is behind it, and because it is the same
+   gesture in the same place as the picker's: chrome about the page, not of it.
+   The violet is carried by the icon alone. */
+.ez-strip-pill {
   display: flex;
-  gap: 4px;
-  padding-right: 10px;
-  border-right: 1px solid var(--border);
-  flex: 0 0 auto;
-  max-width: 30%;
-  overflow-x: auto;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  padding: 7px 8px 7px 12px;
+  border-radius: 999px;
+  background: var(--ink);
+  box-shadow:
+    0 0 0 1px oklch(100% 0 0 / 0.25),
+    0 6px 20px oklch(0% 0 0 / 0.3);
+  color: #fff;
+  font-size: 12px;
+  line-height: 1.5;
 }
 
-.ez-strip-round {
-  border: 1px solid transparent;
-  border-radius: 6px;
-  background: none;
-  color: var(--muted-foreground);
-  font-size: 11.5px;
-  padding: 4px 7px;
-  white-space: nowrap;
-  cursor: pointer;
-}
-
-.ez-strip-round.ez-on {
-  background: var(--muted);
-  color: var(--foreground);
+.ez-strip-pill > svg {
+  flex-shrink: 0;
+  color: var(--explore-on-ink);
 }
 
 /* The chips are the point of the strip, so they get the room that is left and
-   scroll rather than wrap: a strip that grows taller pushes the page up. */
+   scroll rather than wrap: a pill that grows taller pushes the page up. The
+   scrollbar is suppressed because it would land on the pill's own rounded edge
+   and there is nowhere inside it for a track to sit. */
 .ez-strip-chips {
   display: flex;
-  align-items: stretch;
-  gap: 6px;
-  flex: 1 1 auto;
+  align-items: center;
+  gap: 4px;
   min-width: 0;
   overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.ez-strip-chips::-webkit-scrollbar {
+  display: none;
 }
 
 .ez-strip-chip {
-  display: inline-flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 1px;
   flex: 0 0 auto;
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  background: var(--muted);
-  color: var(--foreground);
-  font-size: 12px;
-  text-align: left;
-  padding: 5px 10px;
+  border: 0;
+  border-radius: 999px;
+  background: oklch(100% 0 0 / 0.14);
+  color: inherit;
+  font: inherit;
+  padding: 4px 11px;
+  /* Names run to 40 characters. Clipped so one long one cannot take the room
+     the other three need to be seen at all; the whole of it is in the chip's
+     tooltip. */
+  max-width: 18ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   cursor: pointer;
 }
 
 .ez-strip-chip:hover {
-  border-color: var(--ink-ghost);
+  background: oklch(100% 0 0 / 0.24);
 }
 
+/* The one on the page is filled white rather than outlined. On a ground this
+   dark an edge is the quieter of the two, and which variant you are looking at
+   is the one thing the strip has to say without being read. */
 .ez-strip-chip.ez-on {
-  border-color: var(--ink);
-  background: var(--panel);
-}
-
-.ez-strip-note {
-  font-size: 11px;
-  color: var(--muted-foreground);
-  /* Capped and clipped, with the whole of it in the chip's tooltip. A note is a
-     hint about what changed, and letting it set the chip's width means four
-     variants no longer fit on the strip - which costs the user the one thing the
-     strip is for, seeing what there is to choose between. */
-  max-width: 22ch;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.ez-strip-chip > span:first-child {
-  white-space: nowrap;
+  background: #fff;
+  color: var(--ink);
 }
 
 .ez-strip-pending {
-  align-self: center;
-  font-size: 11.5px;
-  color: var(--muted-foreground);
+  flex: 0 0 auto;
   padding: 0 4px;
+  color: oklch(100% 0 0 / 0.62);
 }
 
 .ez-strip-actions {
   display: flex;
-  gap: 6px;
+  align-items: center;
+  gap: 4px;
   flex: 0 0 auto;
-  padding-left: 10px;
-  border-left: 1px solid var(--border);
+  padding-left: 8px;
+  border-left: 1px solid oklch(100% 0 0 / 0.18);
 }
 
 .ez-strip-action {
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--panel);
-  color: var(--foreground);
+  border: 0;
+  border-radius: 999px;
+  background: oklch(100% 0 0 / 0.14);
+  color: inherit;
+  font: inherit;
   font-size: 11.5px;
-  padding: 5px 9px;
+  padding: 3px 9px;
   white-space: nowrap;
   cursor: pointer;
 }
 
 .ez-strip-action:hover:not(:disabled) {
-  border-color: var(--ink-ghost);
+  background: oklch(100% 0 0 / 0.24);
 }
 
 .ez-strip-action:disabled {
   opacity: 0.45;
   cursor: default;
+}
+
+/* The page's focus halo is a wash of --ink, which says nothing on a ground this
+   dark. Everything inside the pill needs its own. */
+.ez-strip-chip:focus-visible,
+.ez-strip-action:focus-visible {
+  outline: 2px solid oklch(100% 0 0 / 0.7);
+  outline-offset: 1px;
 }
 
 /* ------------------------------------------------------------------ fork bar */
