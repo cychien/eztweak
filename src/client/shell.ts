@@ -1954,10 +1954,21 @@ const convList = h('div', 'ez-conv')
 const convScroll = h('div', 'ez-fade ez-conv-scroll')
 convScroll.appendChild(convList)
 
-// A slash, which unlike `›` is a character that was always meant to be drawn
-// at text weight - so it needs no icon to carry it, and it reads as punctuation
-// between two names rather than as a control pointing at one of them.
-const forkSep = h('span', 'ez-fork-sep', '/')
+/** The breadcrumb's separator, drawn rather than typed. A slash is punctuation
+ *  between two names rather than a mark pointing at one of them - but the glyph
+ *  comes with the font's own idea of how far to lean, around 20 degrees off
+ *  vertical, and nothing in CSS moves that without skewing the stroke along with
+ *  it. Nine across and thirteen down is about 35 degrees, which reads as a
+ *  deliberate stroke instead of an upright character that happens to be
+ *  diagonal. */
+const SLASH: IconNode = [
+  [
+    'path',
+    { d: 'M16.5 5.5L7.5 18.5', stroke: 'currentColor', strokeLinecap: 'round', strokeWidth: 1.75 },
+  ],
+]
+const forkSep = h('span', 'ez-fork-sep')
+forkSep.append(icon(SLASH, 14))
 forkBar.append(forkRoot, forkSep, forkChip, forkMenu)
 // Above the thread and in the flow, so the conversation starts below it rather
 // than under it: a breadcrumb is where you *are*, which is part of the page
