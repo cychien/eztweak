@@ -368,6 +368,39 @@ body.ez-arranging .ez-frame {
   overflow: hidden;
 }
 
+/* The line that says the page is in a state - an element being picked, or a
+   variant standing in for the real thing.
+
+   Drawn here rather than inside the page, for the two reasons the hairline above
+   is: it follows whatever corner the screen is clipped to, where a square line
+   inside a rounded clip had its corners eaten; and it is a true 2px at every
+   zoom, where a line drawn inside a scaled page thinned with it - and this one
+   has to be noticed. */
+.ez-screen::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  display: none;
+  box-shadow: inset 0 0 0 2px color-mix(in oklab, var(--veil-edge) 62%, transparent);
+}
+
+.ez-stage[data-ez-veil] .ez-screen::after {
+  display: block;
+}
+
+/* A pick wins the colour when both are true, which is any pick made from inside
+   a branch: the pick is the gesture actually in flight, and the branch is the
+   room it is being made in. */
+.ez-stage[data-ez-veil='pick'] {
+  --veil-edge: var(--ref-accent);
+}
+
+.ez-stage[data-ez-veil='explore'] {
+  --veil-edge: var(--explore-accent);
+}
+
 .ez-screen {
   flex-shrink: 0;
   position: relative;

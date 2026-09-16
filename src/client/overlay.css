@@ -505,29 +505,6 @@
   background: var(--ez-ref-accent);
 }
 
-/* The page underneath stays fully usable, so nothing about the page itself says
-   this moment is different. A line at the very edge of the frame does, without
-   taking a single pixel away from the content or intercepting one click.
-
-   A line rather than a wash pulled inward: the wash lay over the colours the
-   user is looking at to judge, and this has to register at the edge of attention
-   and nowhere else. Only the colour changes between the states that use it. */
-.ez-pick-veil {
-  --ez-veil-edge: var(--ez-ref-accent);
-  position: fixed;
-  inset: 0;
-  z-index: 2147483597;
-  pointer-events: none;
-  display: none;
-  box-shadow: inset 0 0 0 2px color-mix(in oklab, var(--ez-veil-edge) 62%, transparent);
-}
-
-/* The same line in explore's own colour, saying the page is standing in a
-   variant rather than showing the real thing. */
-.ez-pick-veil[data-ez-explore] {
-  --ez-veil-edge: var(--ez-explore-accent);
-}
-
 /* The box being dragged. Dashed, where every other frame the overlay draws is
    solid: those outline something the page already has, this one is a shape the
    user is still drawing. Pink, because it answers the same command the pink

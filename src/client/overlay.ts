@@ -182,7 +182,6 @@ const ui = {
   /** Shown only while picking: a wash at the edges of the viewport, and a pill
    *  saying what the modifier does. The page stays clickable underneath, so the
    *  chrome is the only thing telling the user this moment is different. */
-  veil: el('div', 'ez-pick-veil'),
   banner: el('div', 'ez-pick-banner'),
   /** The box being dragged, with its size read out in the corner. */
   region: el('div', 'ez-region'),
@@ -1118,25 +1117,13 @@ function resumePopup(view?: Pick): void {
 }
 
 /** Whether the review is reading an explore branch rather than its main line.
- *  The shell says so, because which conversation is current is its to know. */
+ *  The shell says so, because which conversation is current is its to know. Only
+ *  `/explore` reads it: the line that shows the state is drawn by the shell, on
+ *  the frame's edge, where it can follow the frame's corner. */
 let inExplore = false
-
-/** The wash at the edges of the page, which two states now use: an element being
- *  chosen for a comment, and the page standing in an explore. One element, one
- *  colour apart - the same way the pick reuses the element frame - because they
- *  are the same statement, that what is on screen is not the ordinary page.
- *
- *  A pick wins the colour when both are true, which is any pick made from
- *  inside a branch: the pick is the gesture actually in flight, and the branch
- *  is the room it is being made in. */
-function paintVeil(): void {
-  ui.veil.style.display = pick || inExplore ? 'block' : 'none'
-  ui.veil.toggleAttribute('data-ez-explore', !pick && inExplore)
-}
 
 function paintPickChrome(): void {
   const on = Boolean(pick)
-  paintVeil()
   ui.banner.style.display = on ? 'flex' : 'none'
   if (!pick) return
   const back = pick.returnTo && pick.returnTo !== location.pathname ? pick.returnTo : null
@@ -1913,7 +1900,6 @@ function boot(): void {
     ui.badge,
     ui.pin,
     ui.markers,
-    ui.veil,
     ui.region,
     ui.banner,
   )
@@ -1984,10 +1970,7 @@ function boot(): void {
     }
     if (data?.type === 'ez:variants-clear') swapper.clear()
     if (data?.type === 'ez:can-explore') canExplore = data.on === true
-    if (data?.type === 'ez:in-explore') {
-      inExplore = data.on === true
-      paintVeil()
-    }
+    if (data?.type === 'ez:in-explore') inExplore = data.on === true
     if (data?.type === 'ez:set-mode') setMode(data.mode ?? 'off')
     if (data?.type === 'ez:escape') escape()
     if (data?.type === 'ez:viewport') {

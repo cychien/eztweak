@@ -2354,11 +2354,27 @@ let pickSeq = 0
 /** What the note box shows while the user is off pointing at something. */
 const PICKING_LABEL = '選取中…'
 
+/** Whether the review is reading an explore branch rather than its main line.
+ *  Painted from the snapshot, because which conversation is current is the
+ *  daemon's to say. */
+let onBranch = false
+
+/** The line at the edge of every screen, which two states use: an element being
+ *  chosen for a comment, and the page standing in an explore. One line, one
+ *  colour apart, because they are the same statement - that what is on screen is
+ *  not the ordinary page. */
+function paintVeil(): void {
+  const state = pickState ? 'pick' : onBranch ? 'explore' : ''
+  if (state) stage.dataset.ezVeil = state
+  else delete stage.dataset.ezVeil
+}
+
 function dispatchPick(e: PickEvent): void {
   const was = pickState
   const out = reducePick(pickState, e)
   pickState = out.state
   for (const effect of out.effects) applyPickEffect(effect)
+  paintVeil()
   // One place for every way a pick can end without an answer - aborted, timed
   // out, called off from the page - so none of them can leave a placeholder
   // stranded in the note box. A no-op when there is none, which is every
@@ -3477,8 +3493,11 @@ function render(): void {
   pushThread(s)
   broadcast({ type: 'ez:can-explore', on: s.canExplore === true })
   // The page is standing in an explore rather than showing the review's own
-  // line, which is a fact about the *page* and so belongs in the page.
-  broadcast({ type: 'ez:in-explore', on: !!s.chats?.find((c) => c.current)?.parentChatId })
+  // line. The page is told because it withdraws `/explore` while it is true; the
+  // line that says so is drawn out here, on the frame's own edge.
+  onBranch = !!s.chats?.find((c) => c.current)?.parentChatId
+  paintVeil()
+  broadcast({ type: 'ez:in-explore', on: onBranch })
   agentWrap.hidden = !s.acp
   // The row carries the gap below it, so it has to go when both of its controls
   // do - otherwise a poll-mode review keeps six pixels of nothing.
