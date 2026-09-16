@@ -3148,7 +3148,7 @@ body.ez-arranging .ez-frame {
      from the plate. The plate is asymmetric on purpose: the extra is wanted
      above and below the list, not beside it, where the rows already carry their
      own. Seven rows before it scrolls, as before. */
-  --notice-row: 21px;
+  --notice-row: 22px;
   padding: 7px 4px;
   gap: 0;
   max-height: calc(var(--notice-row) * 7);
