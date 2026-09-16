@@ -1958,13 +1958,13 @@ convScroll.appendChild(convList)
  *  between two names rather than a mark pointing at one of them - but the glyph
  *  comes with the font's own idea of how far to lean, around 20 degrees off
  *  vertical, and nothing in CSS moves that without skewing the stroke along with
- *  it. Nine across and thirteen down is about 35 degrees, which reads as a
- *  deliberate stroke instead of an upright character that happens to be
- *  diagonal. */
+ *  it. Seven across and thirteen down is about 28 degrees: past the glyph's
+ *  upright lean, short of the 35 that started reading as a stroke drawn through
+ *  the line rather than a mark set in it. */
 const SLASH: IconNode = [
   [
     'path',
-    { d: 'M16.5 5.5L7.5 18.5', stroke: 'currentColor', strokeLinecap: 'round', strokeWidth: 1.75 },
+    { d: 'M16 5.5L9 18.5', stroke: 'currentColor', strokeLinecap: 'round', strokeWidth: 1.75 },
   ],
 ]
 const forkSep = h('span', 'ez-fork-sep')
