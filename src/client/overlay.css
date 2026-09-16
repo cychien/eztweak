@@ -522,6 +522,13 @@
   box-shadow: inset 0 0 64px -18px color-mix(in oklab, var(--ez-ref-accent) 62%, transparent);
 }
 
+/* The same wash for the same kind of moment, in explore's own colour: the user
+   has said which element and is describing what to do with it, and until they
+   send, the page is waiting on them rather than on the agent. */
+.ez-pick-veil[data-ez-explore] {
+  box-shadow: inset 0 0 64px -18px color-mix(in oklab, var(--ez-explore-accent) 62%, transparent);
+}
+
 /* The box being dragged. Dashed, where every other frame the overlay draws is
    solid: those outline something the page already has, this one is a shape the
    user is still drawing. Pink, because it answers the same command the pink
@@ -619,13 +626,13 @@
 .ez-pick-banner svg {
   flex-shrink: 0;
   color: var(--ez-ref-accent);
+  transform: translateY(1px);
 }
 
 .ez-pick-text {
   overflow: hidden;
   text-overflow: ellipsis;
   min-width: 0;
-  transform: translateY(1px);
 }
 
 .ez-pick-cancel {

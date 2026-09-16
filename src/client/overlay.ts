@@ -501,6 +501,10 @@ function closePopup(): void {
   ui.popupAttach?.discard()
   ui.popupAttach = null
   ui.popupBack = null
+  // The composer can be dismissed while armed - by Escape, by a send, by the
+  // page going away - and the wash belongs to it, not to the document.
+  exploreArmed = false
+  paintVeil()
   if (ui.popup) post({ type: 'ez:popup', open: false })
   ui.popup?.remove()
   ui.popup = null
@@ -669,6 +673,8 @@ function openPopup(
   function setExploring(on: boolean): void {
     if (on === exploring) return
     exploring = on
+    exploreArmed = on
+    paintVeil()
     const current = document.createDocumentFragment()
     // Appending moves the nodes, so this empties the box in the same breath.
     current.append(...input.childNodes)
@@ -1112,9 +1118,26 @@ function resumePopup(view?: Pick): void {
   ui.popupAttach?.editable.focus()
 }
 
+/** True while a composer is armed for explore. Module level because the veil is
+ *  document chrome while the flag itself lives in one popup's closure. */
+let exploreArmed = false
+
+/** The wash at the edges of the page, which two moments now use: choosing an
+ *  element for a comment, and describing an explore. One element, one colour
+ *  apart - the same way the pick reuses the element frame - because they are the
+ *  same statement, that the next thing the user does is not an ordinary click.
+ *
+ *  A pick wins the colour when both are live, which happens when `/element` is
+ *  used from inside an armed explore: the pick is the gesture actually in
+ *  flight, and the explore is what it will come back to. */
+function paintVeil(): void {
+  ui.veil.style.display = pick || exploreArmed ? 'block' : 'none'
+  ui.veil.toggleAttribute('data-ez-explore', !pick && exploreArmed)
+}
+
 function paintPickChrome(): void {
   const on = Boolean(pick)
-  ui.veil.style.display = on ? 'block' : 'none'
+  paintVeil()
   ui.banner.style.display = on ? 'flex' : 'none'
   if (!pick) return
   const back = pick.returnTo && pick.returnTo !== location.pathname ? pick.returnTo : null
