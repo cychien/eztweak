@@ -3,7 +3,6 @@
 import Cancel01Icon from '@hugeicons/core-free-icons/Cancel01Icon'
 import AlignSelectionIcon from '@hugeicons/core-free-icons/AlignSelectionIcon'
 import ChevronDownIcon from '@hugeicons/core-free-icons/ChevronDownIcon'
-import ChevronRightIcon from '@hugeicons/core-free-icons/ChevronRightIcon'
 import MagicWand01Icon from '@hugeicons/core-free-icons/MagicWand01Icon'
 import ArrowRight02Icon from '@hugeicons/core-free-icons/ArrowRight02Icon'
 import Grid02Icon from '@hugeicons/core-free-icons/Grid02Icon'
@@ -1955,11 +1954,10 @@ const convList = h('div', 'ez-conv')
 const convScroll = h('div', 'ez-fade ez-conv-scroll')
 convScroll.appendChild(convList)
 
-// A drawn chevron rather than the `›` character: at any size the glyph stays a
-// hairline, because it is text being asked to be a mark. The icon keeps the
-// stroke the rest of this UI is drawn with.
-const forkSep = h('span', 'ez-fork-sep')
-forkSep.append(icon(ChevronRightIcon as IconNode, 12))
+// A slash, which unlike `›` is a character that was always meant to be drawn
+// at text weight - so it needs no icon to carry it, and it reads as punctuation
+// between two names rather than as a control pointing at one of them.
+const forkSep = h('span', 'ez-fork-sep', '/')
 forkBar.append(forkRoot, forkSep, forkChip, forkMenu)
 // Above the thread and in the flow, so the conversation starts below it rather
 // than under it: a breadcrumb is where you *are*, which is part of the page

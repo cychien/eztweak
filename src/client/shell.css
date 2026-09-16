@@ -3021,9 +3021,14 @@ body.ez-arranging .ez-frame {
 
    4.89:1 on this ground. A step lighter measured 3.44:1 and two steps 2.01:1,
    which is a word you can see is there and cannot make out. */
-.ez-fork-root,
-.ez-fork-sep {
+.ez-fork-root {
   color: var(--muted-foreground);
+}
+
+/* The separator may go lighter than either crumb: it is punctuation, not a
+   word, and the line still reads if it is only half noticed. */
+.ez-fork-sep {
+  color: var(--ink-faint);
 }
 
 /* A line of text that happens to be clickable, not a button. No padding, no
@@ -3051,10 +3056,6 @@ body.ez-arranging .ez-frame {
 .ez-fork-sep {
   flex-shrink: 0;
   user-select: none;
-  /* Drawn, not typed - see the note where it is built. Inline-flex so the mark
-     centres against the text rather than sitting on its baseline. */
-  display: inline-flex;
-  align-items: center;
 }
 
 /* The last crumb, which is also the way to every other conversation. Drawn as
