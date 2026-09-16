@@ -501,10 +501,6 @@ function closePopup(): void {
   ui.popupAttach?.discard()
   ui.popupAttach = null
   ui.popupBack = null
-  // The composer can be dismissed while armed - by Escape, by a send, by the
-  // page going away - and the wash belongs to it, not to the document.
-  exploreArmed = false
-  paintVeil()
   if (ui.popup) post({ type: 'ez:popup', open: false })
   ui.popup?.remove()
   ui.popup = null
@@ -673,8 +669,6 @@ function openPopup(
   function setExploring(on: boolean): void {
     if (on === exploring) return
     exploring = on
-    exploreArmed = on
-    paintVeil()
     const current = document.createDocumentFragment()
     // Appending moves the nodes, so this empties the box in the same breath.
     current.append(...input.childNodes)
@@ -1118,21 +1112,21 @@ function resumePopup(view?: Pick): void {
   ui.popupAttach?.editable.focus()
 }
 
-/** True while a composer is armed for explore. Module level because the veil is
- *  document chrome while the flag itself lives in one popup's closure. */
-let exploreArmed = false
+/** Whether the review is reading an explore branch rather than its main line.
+ *  The shell says so, because which conversation is current is its to know. */
+let inExplore = false
 
-/** The wash at the edges of the page, which two moments now use: choosing an
- *  element for a comment, and describing an explore. One element, one colour
- *  apart - the same way the pick reuses the element frame - because they are the
- *  same statement, that the next thing the user does is not an ordinary click.
+/** The wash at the edges of the page, which two states now use: an element being
+ *  chosen for a comment, and the page standing in an explore. One element, one
+ *  colour apart - the same way the pick reuses the element frame - because they
+ *  are the same statement, that what is on screen is not the ordinary page.
  *
- *  A pick wins the colour when both are live, which happens when `/element` is
- *  used from inside an armed explore: the pick is the gesture actually in
- *  flight, and the explore is what it will come back to. */
+ *  A pick wins the colour when both are true, which is any pick made from
+ *  inside a branch: the pick is the gesture actually in flight, and the branch
+ *  is the room it is being made in. */
 function paintVeil(): void {
-  ui.veil.style.display = pick || exploreArmed ? 'block' : 'none'
-  ui.veil.toggleAttribute('data-ez-explore', !pick && exploreArmed)
+  ui.veil.style.display = pick || inExplore ? 'block' : 'none'
+  ui.veil.toggleAttribute('data-ez-explore', !pick && inExplore)
 }
 
 function paintPickChrome(): void {
@@ -1985,6 +1979,10 @@ function boot(): void {
     }
     if (data?.type === 'ez:variants-clear') swapper.clear()
     if (data?.type === 'ez:can-explore') canExplore = data.on === true
+    if (data?.type === 'ez:in-explore') {
+      inExplore = data.on === true
+      paintVeil()
+    }
     if (data?.type === 'ez:set-mode') setMode(data.mode ?? 'off')
     if (data?.type === 'ez:escape') escape()
     if (data?.type === 'ez:viewport') {

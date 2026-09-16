@@ -3476,6 +3476,9 @@ function render(): void {
   paintFork(s)
   pushThread(s)
   broadcast({ type: 'ez:can-explore', on: s.canExplore === true })
+  // The page is standing in an explore rather than showing the review's own
+  // line, which is a fact about the *page* and so belongs in the page.
+  broadcast({ type: 'ez:in-explore', on: !!s.chats?.find((c) => c.current)?.parentChatId })
   agentWrap.hidden = !s.acp
   // The row carries the gap below it, so it has to go when both of its controls
   // do - otherwise a poll-mode review keeps six pixels of nothing.
@@ -3974,6 +3977,10 @@ window.addEventListener('message', (e: MessageEvent) => {
     // A fresh page has none of this: whether it may offer the command, and what
     // is meant to be standing in place of what.
     toFrame(from, { type: 'ez:can-explore', on: snapshot?.canExplore === true })
+    toFrame(from, {
+      type: 'ez:in-explore',
+      on: !!snapshot?.chats?.find((c) => c.current)?.parentChatId,
+    })
     seedVariants(from)
     const frame = frames.get(from)
     if (frame) {
