@@ -3,6 +3,7 @@
 import Cancel01Icon from '@hugeicons/core-free-icons/Cancel01Icon'
 import AlignSelectionIcon from '@hugeicons/core-free-icons/AlignSelectionIcon'
 import ChevronDownIcon from '@hugeicons/core-free-icons/ChevronDownIcon'
+import ChevronRightIcon from '@hugeicons/core-free-icons/ChevronRightIcon'
 import MagicWand01Icon from '@hugeicons/core-free-icons/MagicWand01Icon'
 import ArrowRight02Icon from '@hugeicons/core-free-icons/ArrowRight02Icon'
 import Grid02Icon from '@hugeicons/core-free-icons/Grid02Icon'
@@ -1954,21 +1955,8 @@ const convList = h('div', 'ez-conv')
 const convScroll = h('div', 'ez-fade ez-conv-scroll')
 convScroll.appendChild(convList)
 
-/** The breadcrumb's separator, drawn rather than typed. A slash is punctuation
- *  between two names rather than a mark pointing at one of them - but the glyph
- *  comes with the font's own idea of how far to lean, around 20 degrees off
- *  vertical, and nothing in CSS moves that without skewing the stroke along with
- *  it. Seven across and thirteen down is about 28 degrees: past the glyph's
- *  upright lean, short of the 35 that started reading as a stroke drawn through
- *  the line rather than a mark set in it. */
-const SLASH: IconNode = [
-  [
-    'path',
-    { d: 'M16 5.5L9 18.5', stroke: 'currentColor', strokeLinecap: 'round', strokeWidth: 1.75 },
-  ],
-]
 const forkSep = h('span', 'ez-fork-sep')
-forkSep.append(icon(SLASH, 14))
+forkSep.append(icon(ChevronRightIcon as IconNode, 10))
 forkBar.append(forkRoot, forkSep, forkChip, forkMenu)
 // Above the thread and in the flow, so the conversation starts below it rather
 // than under it: a breadcrumb is where you *are*, which is part of the page
