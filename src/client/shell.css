@@ -3091,12 +3091,19 @@ body.ez-arranging .ez-frame {
    none on hover - a breadcrumb that sprouts a button is no longer a breadcrumb -
    so it answers by lifting off the ground instead. Far enough to be felt, and
    measured to stay above 4.5:1 there; the mark beside it goes with it, or half
-   the crumb would answer and half would not. */
-.ez-fork-here:hover {
+   the crumb would answer and half would not.
+
+   It holds that state while its menu is open, keyed off the `aria-expanded` the
+   control already has to carry. A trigger that drops back to rest the moment the
+   pointer moves into the menu it just opened leaves the menu looking like it
+   came from nowhere. */
+.ez-fork-here:hover,
+.ez-fork-here[aria-expanded='true'] {
   color: color-mix(in oklab, var(--explore-ink) 80%, var(--paper));
 }
 
-.ez-fork-here:hover svg {
+.ez-fork-here:hover svg,
+.ez-fork-here[aria-expanded='true'] svg {
   color: color-mix(in oklab, var(--explore-accent) 80%, var(--paper));
 }
 
@@ -3130,13 +3137,12 @@ body.ez-arranging .ez-frame {
   max-width: min(100%, 280px);
   transform-origin: top left;
   animation: ez-menu-in var(--t-menu) var(--ease-out) both;
-  /* Tighter than the resume card's list. That one is a card in the thread with
-     room to breathe; this is a menu hung off a crumb, and a menu that stands
-     taller than the thing it dropped from reads as a panel rather than a list
-     of two or three siblings. Still the same seven-row budget before it
-     scrolls. */
-  --notice-row: 19px;
-  padding: 3px;
+  /* The resume card's list, to the pixel: 20px rows carrying their height as
+     leading rather than as padding, and nothing between them. That list is the
+     one this is a second instance of, so matching it is not a coincidence to be
+     re-derived - it is the point. Seven rows before it scrolls, the same
+     budget, for the same reason. */
+  --notice-row: 20px;
   gap: 0;
   max-height: calc(var(--notice-row) * 7);
   overflow-y: auto;
@@ -3159,7 +3165,9 @@ body.ez-arranging .ez-frame {
 }
 
 /* Every row is a direct branch of the same line, so there is no depth to draw
-   and no indent to draw it with. */
+   and no indent to draw it with. The padding is horizontal only: the row's
+   height is its leading, the way the resume card's rows are built, so a
+   vertical pad here would make it a box around a line of text. */
 .ez-fork-row {
   padding: 0 6px;
 }
