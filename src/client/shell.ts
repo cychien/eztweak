@@ -159,6 +159,10 @@ interface ChatWire {
   current: boolean
   /** The conversation this one branched off, when it did. */
   parentChatId?: string
+  /** The agent's own name for it, when it has one. */
+  title?: string
+  /** What it was opened about, for a branch. */
+  detail?: string
 }
 
 /** A newer daemon on the registry, and how far the update has got once the user
@@ -1759,12 +1763,189 @@ editAttach.wrap.addEventListener(
   true,
 )
 
+// ------------------------------------------------------------------- fork chip
+
+/** Where the review is, when it is not on the main line.
+ *
+ *  A branch and the conversation it came from are the same shape - same thread,
+ *  same composer - and the only thing that told them apart was which messages
+ *  happened to be in view. That is not a signal, it is a coincidence. So a
+ *  branch says so: a breadcrumb held in the top corner of the thread, and a way
+ *  back through it.
+ *
+ *  Absolute rather than a bar of its own. A permanent row would cost the thread
+ *  a strip of height on every review, to say something that is true on almost
+ *  none of them; floating in the corner costs nothing until there is something
+ *  to say. The thread scrolls under it, which is why it carries a ground. */
+const forkChip = h('button', 'ez-fork-chip')
+forkChip.hidden = true
+forkChip.setAttribute('aria-haspopup', 'menu')
+forkChip.setAttribute('aria-expanded', 'false')
+const forkTrail = h('span', 'ez-fork-trail')
+forkChip.append(forkTrail, icon(ArrowDown01Icon as IconNode, 12))
+
+const forkMenu = h('div', 'ez-menu ez-menu-right ez-fork-menu')
+forkMenu.setAttribute('role', 'menu')
+forkMenu.setAttribute('aria-label', '回到某個對話')
+forkMenu.hidden = true
+
+let forkRows: HTMLElement[] = []
+let forkOpen = false
+
+/** Which row the arrow is on. The same single-pointer rule the resume card has:
+ *  hover and the arrow keys write one piece of state between them, so the list
+ *  never shows two answers to "which row is the keyboard about to open". */
+function pointAtForkRow(row: HTMLElement): void {
+  for (const other of forkRows) other.toggleAttribute('data-active', other === row)
+}
+
+function closeFork(focusChip = false): void {
+  forkOpen = false
+  forkMenu.hidden = true
+  forkChip.setAttribute('aria-expanded', 'false')
+  if (focusChip) forkChip.focus()
+}
+
+/** The name a conversation goes by here. The root is the review itself; a branch
+ *  is named by what it was opened to do, because that is what the user will be
+ *  looking for when they come back to it. */
+function chatName(chat: ChatWire, isRoot: boolean): string {
+  if (chat.parentChatId) return chat.title ?? '分支對話'
+  // Only the *first* conversation is the review's main line. `/new` opens more
+  // top-level ones, and calling them all 主對話 would offer a list of rows the
+  // user cannot tell apart - which is exactly what the picker is for.
+  return isRoot ? '主對話' : (chat.title ?? '對話')
+}
+
+/** What the branch was about - the element, for an explore - which is what tells
+ *  two of them apart when both are called 探索樣式. */
+function chatDetail(chat: ChatWire): string {
+  return chat.detail ?? chatTime(chat.startedAt)
+}
+
+function openFork(): void {
+  const s = snapshot
+  if (!s?.chats) return
+  // Oldest first, so the main line is at the top and the branches read as having
+  // come off it in the order they were opened. The picker's own order, not the
+  // header's - this is a tree being read, not a history being scrolled.
+  const chats = [...s.chats].reverse()
+  const rootId = chats[0]?.id
+  forkMenu.textContent = ''
+  forkRows = chats.map((chat) => {
+    const row = h('button', 'ez-notice-row ez-fork-row')
+    row.setAttribute('role', 'menuitemradio')
+    row.setAttribute('aria-checked', String(chat.current))
+    if (chat.current) row.dataset.current = ''
+    if (chat.parentChatId) row.dataset.nested = ''
+    row.append(
+      icon(ArrowRight02Icon as IconNode, 12),
+      h('span', 'ez-notice-row-name', chatName(chat, chat.id === rootId)),
+      h('span', 'ez-notice-row-when', chatDetail(chat)),
+    )
+    row.addEventListener('pointerenter', () => pointAtForkRow(row))
+    row.addEventListener('focus', () => pointAtForkRow(row))
+    row.onclick = () => {
+      closeFork()
+      if (!chat.current) void switchChat(chat.id)
+    }
+    forkMenu.append(row)
+    return row
+  })
+  forkOpen = true
+  forkMenu.hidden = false
+  forkChip.setAttribute('aria-expanded', 'true')
+  // Into the list, which is also what puts the arrow on a row: the keyboard is
+  // the point of this control, the same as the resume card's.
+  ;(forkRows.find((r) => 'current' in r.dataset) ?? forkRows[0])?.focus()
+}
+
+forkChip.onclick = () => (forkOpen ? closeFork() : openFork())
+forkMenu.onkeydown = (e) => {
+  if (walkMenu(e, forkRows)) return
+  if (e.key === 'Escape') {
+    e.stopPropagation()
+    closeFork(true)
+  }
+}
+forkMenu.addEventListener('focusout', () => {
+  // The whole control is one focus scope: leaving it closes it, but moving
+  // between its own rows must not.
+  queueMicrotask(() => {
+    if (
+      forkOpen &&
+      !forkMenu.contains(document.activeElement) &&
+      document.activeElement !== forkChip
+    ) {
+      closeFork()
+    }
+  })
+})
+
+/** Which chat the thread is drawing, so the next render can tell whether the
+ *  review went deeper, came back, or merely got another message. */
+let shownChatId: string | null = null
+
+function paintFork(s: SnapshotWire): void {
+  const chats = s.chats ?? []
+  const current = chats.find((c) => c.current)
+  const onBranch = !!current?.parentChatId
+  forkChip.hidden = !onBranch
+  if (!onBranch) {
+    if (forkOpen) closeFork()
+    shownChatId = current?.id ?? null
+    return
+  }
+  // The crumb always starts at the review itself, not at the immediate parent.
+  // Branches can nest, and "探索樣式 › 探索樣式" says nothing; where the user
+  // came from ultimately is what they are being offered a way back to. The
+  // levels in between are shown as an ellipsis and listed in the popover.
+  let depth = 0
+  let at: ChatWire | undefined = current
+  while (at?.parentChatId) {
+    depth += 1
+    at = chats.find((c) => c.id === at!.parentChatId)
+  }
+  // The oldest chat is the review's main line; `chats` arrives newest first.
+  const here = chatName(current, false)
+  forkTrail.textContent = ''
+  forkTrail.append(h('span', 'ez-fork-from', '主對話'), h('span', 'ez-fork-sep', '›'))
+  if (depth > 1) {
+    forkTrail.append(h('span', 'ez-fork-from', '…'), h('span', 'ez-fork-sep', '›'))
+  }
+  forkTrail.append(h('span', 'ez-fork-here', here))
+  forkChip.title = `主對話 ${'› … '.repeat(depth > 1 ? 1 : 0)}› ${here} · 點一下切換對話`
+}
+
+/** The thread moved between conversations. Push it sideways, in the direction
+ *  the review actually went: into a branch it enters from the right, back out of
+ *  one it enters from the left. Exit the way it entered, which is what makes the
+ *  gesture legible rather than decorative.
+ *
+ *  An animation rather than a transition: this is a view arriving whole, not a
+ *  value being retargeted, and it has to stay smooth across the re-render and
+ *  the round trip that caused it. Retriggered by taking the attribute off and
+ *  putting it back, so two switches in a row both play. */
+function pushThread(s: SnapshotWire): void {
+  const chats = s.chats ?? []
+  const current = chats.find((c) => c.current)
+  if (!current || current.id === shownChatId) return
+  const was = shownChatId
+  shownChatId = current.id
+  if (!was) return
+  const deeper = current.parentChatId === was
+  const back = chats.find((c) => c.id === was)?.parentChatId === current.id
+  convScroll.removeAttribute('data-enter')
+  void convScroll.offsetWidth
+  convScroll.dataset.enter = deeper ? 'deeper' : back ? 'back' : 'swap'
+}
+
 const convSection = h('section', 'ez-section ez-conv-section')
 const convList = h('div', 'ez-conv')
 const convScroll = h('div', 'ez-fade ez-conv-scroll')
 convScroll.appendChild(convList)
 
-convSection.append(convScroll, notices)
+convSection.append(convScroll, forkChip, forkMenu, notices)
 
 const resizer = h('div', 'ez-resizer')
 resizer.tabIndex = 0
@@ -3235,6 +3416,8 @@ function render(): void {
   paintLimit(s.acp)
   paintStrip()
   paintVariants()
+  paintFork(s)
+  pushThread(s)
   broadcast({ type: 'ez:can-explore', on: s.canExplore === true })
   agentWrap.hidden = !s.acp
   // The row carries the gap below it, so it has to go when both of its controls

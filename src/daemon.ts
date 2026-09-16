@@ -148,6 +148,11 @@ interface ChatWire {
   /** The conversation this one branched off, when it did. The picker draws the
    *  indent from it, and 回主線 is a switch to it. */
   parentChatId?: string
+  /** What this conversation is called, when it is not the review itself. */
+  title?: string
+  /** What it was opened about - the element, for an explore - which is what
+   *  tells two rounds with the same name apart. */
+  detail?: string
 }
 
 /** Bind `app` on the loopback at `port`, or reject. Deliberately not
@@ -509,7 +514,17 @@ class SessionRuntime {
    *  entry-belongs-to-chat rule with the thread window, which is the only way the
    *  two can agree. */
   private chatsWire(): ChatWire[] {
-    return this.store.chatSummaries().reverse()
+    // A branch is named by what it was opened to do, and that outlives the round
+    // being dismissed - the conversation is still there to go back to, and a
+    // nameless row in the picker is one the user cannot choose between.
+    const explores = this.store.explores
+    return this.store
+      .chatSummaries()
+      .map((chat) => {
+        const round = explores.find((e) => e.chatId === chat.id)
+        return round ? { ...chat, title: '探索樣式', detail: round.label } : chat
+      })
+      .reverse()
   }
 
   broadcast(): void {

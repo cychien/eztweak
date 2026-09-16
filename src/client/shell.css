@@ -64,6 +64,17 @@
   --ref: #f4d3e2;
   --ref-ink: #7b3a5c;
   --ref-accent: #cf5f92;
+  /* Explore's violet. Mirrors the overlay's - see the note on --ez-explore-ink
+     there for why hue 300 and why these two lightnesses. */
+  --explore-ink: #5e3f8c;
+  --explore-accent: #6b3baa;
+  /* Motion. One strong ease-out for everything that enters or leaves, because
+     the built-in curves are too weak to read as deliberate, and one duration
+     band: a view arriving is the slowest thing here and still under 300ms. */
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --t-pop: 0.16s;
+  --t-menu: 0.18s;
+  --t-view: 0.22s;
 
   /* Inline code in an agent's reply: rust text on a wash of itself, so the two
      can never drift apart. 4.63:1 on --paper through the 9% fill - past the
@@ -2959,4 +2970,191 @@ body.ez-arranging .ez-frame {
 .ez-strip-action:disabled {
   opacity: 0.45;
   cursor: default;
+}
+
+/* ------------------------------------------------------------------ fork chip */
+
+/* Where the review is, when it is not on the main line. Floating in the thread's
+   top corner rather than taking a row of its own: a permanent bar would cost
+   every review a strip of height to say something true on almost none of them. */
+.ez-fork-chip {
+  position: absolute;
+  top: 8px;
+  right: 12px;
+  z-index: 4;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: calc(100% - 24px);
+  padding: 4px 7px 4px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  /* The thread scrolls under this, so it carries a ground of its own rather than
+     letting messages read through it. */
+  background: var(--panel);
+  box-shadow: 0 2px 8px oklch(0% 0 0 / 0.06);
+  color: var(--muted-foreground);
+  font-family: inherit;
+  font-size: 11.5px;
+  line-height: 1.5;
+  cursor: pointer;
+  animation: ez-fork-in var(--t-pop) var(--ease-out) both;
+}
+
+.ez-fork-chip[hidden] {
+  display: none;
+}
+
+.ez-fork-chip:hover {
+  border-color: var(--ink-ghost);
+}
+
+/* Nothing in the real world appears from nothing, so it arrives nearly its own
+   size and settles rather than growing out of a point. */
+@keyframes ez-fork-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.96);
+  }
+}
+
+.ez-fork-trail {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  min-width: 0;
+}
+
+/* The parent recedes and the branch is the colour of the thing that made it, so
+   the crumb reads as "here, under there" at a glance rather than as two names. */
+.ez-fork-from {
+  color: var(--ink-ghost);
+  flex-shrink: 0;
+}
+
+.ez-fork-sep {
+  color: var(--ink-ghost);
+  flex-shrink: 0;
+}
+
+.ez-fork-here {
+  color: var(--explore-ink);
+  font-weight: 550;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ez-fork-chip svg {
+  flex-shrink: 0;
+  color: var(--ink-ghost);
+}
+
+/* Hung off the chip, so it scales from the corner it belongs to rather than from
+   its own middle. */
+.ez-fork-menu {
+  position: absolute;
+  top: 34px;
+  right: 12px;
+  left: auto;
+  z-index: 5;
+  display: flex;
+  min-width: 190px;
+  max-width: calc(100% - 24px);
+  transform-origin: top right;
+  animation: ez-menu-in var(--t-menu) var(--ease-out) both;
+}
+
+/* The same seven-row budget the resume list keeps, for the same reason: a list
+   that grows past the panel is one the user has to hunt in. */
+.ez-fork-menu {
+  --notice-row: 22px;
+  max-height: calc(var(--notice-row) * 7);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.ez-fork-menu[hidden] {
+  display: none;
+}
+
+@keyframes ez-menu-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+}
+
+.ez-fork-row {
+  padding: 2px 6px;
+  border-radius: 6px;
+}
+
+/* A branch sits under the line it came off. One step, not a tree of them: the
+   nesting here is only ever one deep in practice, and an indent per level would
+   be a mechanism with nothing to do. */
+.ez-fork-row[data-nested] {
+  padding-left: 18px;
+}
+
+/* The name is what the row is chosen by, so it keeps its width and the detail
+   gives way. Without this one long element label sets the width of the whole
+   panel and squeezes every other row's name. */
+.ez-fork-row .ez-notice-row-name {
+  flex-shrink: 0;
+}
+
+.ez-fork-row .ez-notice-row-when {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ------------------------------------------------------------- thread push */
+
+/* The thread moved between conversations. It enters from the side the review
+   actually went - right when going into a branch, left when coming back out -
+   so the movement says which way, not merely that something changed. */
+.ez-conv-scroll[data-enter='deeper'] {
+  animation: ez-push-in var(--t-view) var(--ease-out) both;
+}
+
+.ez-conv-scroll[data-enter='back'] {
+  animation: ez-push-out var(--t-view) var(--ease-out) both;
+}
+
+.ez-conv-scroll[data-enter='swap'] {
+  animation: ez-fade-in var(--t-view) var(--ease-out) both;
+}
+
+@keyframes ez-push-in {
+  from {
+    opacity: 0;
+    transform: translateX(14px);
+  }
+}
+
+@keyframes ez-push-out {
+  from {
+    opacity: 0;
+    transform: translateX(-14px);
+  }
+}
+
+@keyframes ez-fade-in {
+  from {
+    opacity: 0;
+  }
+}
+
+/* Fewer and gentler, not none: the fade still says the view changed, and only
+   the travel - the part that is motion for its own sake here - goes. */
+@media (prefers-reduced-motion: reduce) {
+  .ez-fork-chip,
+  .ez-fork-menu,
+  .ez-conv-scroll[data-enter] {
+    animation-name: ez-fade-in;
+    animation-duration: var(--t-pop);
+  }
 }

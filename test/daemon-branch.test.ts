@@ -18,11 +18,16 @@ interface State {
   conversation?: { role: string; text: string; chatId?: string }[]
 }
 
+/** A distinct origin per test, counted rather than drawn at random: the origin
+ *  is half of a session's identity, so two tests that happen to pick the same
+ *  one share a store - and the second then reads the first one's thread. */
+let nextPort = 9980
+
 async function ready(env?: Record<string, string>): Promise<number> {
   world.spawnDaemon()
   const { port: control } = await world.liveDaemon()
   const { port } = await world.openSession(control, {
-    url: `http://localhost:${9980 + Math.floor(Math.random() * 10)}`,
+    url: `http://localhost:${nextPort++}`,
     project: world.dataDir,
     agent: env
       ? `${Object.entries(env)
