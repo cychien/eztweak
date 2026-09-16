@@ -1310,8 +1310,15 @@ class SessionRuntime {
     // opened rather than ridden along on every broadcast: naming them reaches
     // outside this process - a transcript on disk, a call to codex - and a turn
     // streaming chunks must not pay for that a hundred times a second.
+    // The conversations `/resume` offers: the review's own lines, not the
+    // branches off them. A branch is reached from the breadcrumb of the line it
+    // came off, where its siblings are and where the context makes it mean
+    // something; in a flat list of everything the review has ever had, a row
+    // called 探索樣式 says nothing about which conversation it belongs to.
+    // Filtered before the titles are fetched, so nothing is asked of the agent
+    // for rows that will not be drawn.
     api.get('/acp/chats', async (_req, res) => {
-      const summaries = this.store.chatSummaries()
+      const summaries = this.store.chatSummaries().filter((chat) => !chat.parentChatId)
       const command = this.acp?.snapshot().agent ?? ''
       let titles = new Map<string, string>()
       try {
