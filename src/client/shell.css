@@ -2989,7 +2989,14 @@ body.ez-arranging .ez-frame {
   align-items: center;
   gap: 5px;
   min-width: 0;
-  padding: 7px 0 9px;
+  padding: 7px 0 8px;
+  /* Full-bleed, like the section rules above and below it: this separates two
+     regions of the sidebar, and a line inset from both edges reads as belonging
+     to the crumb rather than as the boundary it is. */
+  margin-inline: -14px;
+  padding-inline: 14px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 8px;
   font-size: 12.5px;
   line-height: 1.5;
   animation: ez-fork-in var(--t-pop) var(--ease-out) both;
@@ -3039,17 +3046,6 @@ body.ez-arranging .ez-frame {
   user-select: none;
 }
 
-.ez-fork-gap {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  flex-shrink: 0;
-}
-
-.ez-fork-gap[hidden] {
-  display: none;
-}
-
 /* The last crumb, which is also the way to every other conversation. Drawn as
    text rather than as a control: a breadcrumb that looks like a button stops
    reading as a location. */
@@ -3066,7 +3062,11 @@ body.ez-arranging .ez-frame {
   font-family: inherit;
   font-size: inherit;
   line-height: inherit;
-  font-weight: 550;
+  /* The weight the popover gives the row you are on, and the violet the mark
+     beside it already carries - so the crumb and the list agree about which
+     conversation this is. */
+  font-weight: 500;
+  color: var(--explore-ink);
   cursor: pointer;
 }
 
@@ -3093,7 +3093,7 @@ body.ez-arranging .ez-frame {
 .ez-fork-menu {
   position: absolute;
   top: calc(100% - 2px);
-  left: 0;
+  left: 14px;
   right: auto;
   z-index: 5;
   display: flex;

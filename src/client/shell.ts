@@ -1784,11 +1784,6 @@ forkBar.setAttribute('aria-label', '目前的對話位置')
 /** The way back to the review itself. A branch's most likely exit by far, so it
  *  is a click rather than a click-then-choose. */
 const forkRoot = h('button', 'ez-fork-root', '主對話')
-/** The levels between the review and here, when a branch was opened from a
- *  branch. Carries its own separator, so hiding it leaves a crumb that still
- *  reads as one trail rather than two names run together. */
-const forkEllipsis = h('span', 'ez-fork-gap')
-forkEllipsis.append(h('span', 'ez-fork-sep', '…'), h('span', 'ez-fork-sep', '›'))
 /** The conversation being read, and the trigger for everything else it could
  *  be. The current crumb is the natural place for it: a breadcrumb's last item
  *  is where you are, so opening a list of the others from it needs no second
@@ -1836,6 +1831,13 @@ function chatName(chat: ChatWire, isRoot: boolean): string {
  *  two of them apart when both are called 探索樣式. */
 function chatDetail(chat: ChatWire): string {
   return chat.detail ?? chatTime(chat.startedAt)
+}
+
+/** What one conversation is called where there is room for a single name. What
+ *  it is about beats what kind of thing it is: every branch here is an explore,
+ *  so the element is the only part of the name that identifies it. */
+function chatTitle(chat: ChatWire): string {
+  return chat.detail ?? chat.title ?? chatName(chat, false)
 }
 
 function openFork(): void {
@@ -1915,21 +1917,18 @@ function paintFork(s: SnapshotWire): void {
     shownChatId = current?.id ?? null
     return
   }
-  // The crumb always starts at the review itself, not at the immediate parent.
-  // Branches can nest, and "探索樣式 › 探索樣式" says nothing; where the user
-  // came from ultimately is what they are being offered a way back to. The
-  // levels in between become an ellipsis and are listed in the popover.
-  let depth = 0
-  let at: ChatWire | undefined = current
-  while (at?.parentChatId) {
-    depth += 1
-    at = chats.find((c) => c.id === at!.parentChatId)
-  }
-  // The oldest chat is the review's main line; `chats` arrives newest first.
-  const here = chatName(current, false)
-  forkEllipsis.hidden = depth < 2
+  // The crumb always starts at the review itself, not at the immediate parent:
+  // branches can nest, and "探索樣式 › 探索樣式" says nothing about where the
+  // user is being offered a way back to. Nothing stands for the levels in
+  // between - there is no rung to step onto there, and an ellipsis that opens
+  // nothing is a control that lies. The popover lists them.
+  //
+  // Named by what the session is *about* rather than by what kind of session it
+  // is. Every branch here is an explore, so "探索樣式" tells two of them apart
+  // not at all, while the element does it at a glance.
+  const here = chatTitle(current)
   forkName.textContent = here
-  forkChip.title = `${here}${current.detail ? ` · ${current.detail}` : ''} · 點一下切換對話`
+  forkChip.title = `${here} · 點一下切換對話`
   forkRoot.title = '回到主對話'
 }
 
@@ -1961,7 +1960,7 @@ const convList = h('div', 'ez-conv')
 const convScroll = h('div', 'ez-fade ez-conv-scroll')
 convScroll.appendChild(convList)
 
-forkBar.append(forkRoot, h('span', 'ez-fork-sep', '›'), forkEllipsis, forkChip, forkMenu)
+forkBar.append(forkRoot, h('span', 'ez-fork-sep', '›'), forkChip, forkMenu)
 // Above the thread and in the flow, so the conversation starts below it rather
 // than under it: a breadcrumb is where you *are*, which is part of the page
 // rather than something floating over it.
