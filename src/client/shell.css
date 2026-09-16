@@ -2997,7 +2997,7 @@ body.ez-arranging .ez-frame {
   padding-inline: 14px;
   border-bottom: 1px solid var(--border);
   margin-bottom: 8px;
-  font-size: 12.5px;
+  font-size: 12px;
   line-height: 1.5;
   animation: ez-fork-in var(--t-pop) var(--ease-out) both;
 }
@@ -3020,25 +3020,29 @@ body.ez-arranging .ez-frame {
    glance rather than as two names of equal claim. */
 .ez-fork-root,
 .ez-fork-sep {
-  color: var(--muted-foreground);
+  color: var(--ink-ghost);
 }
 
+/* A line of text that happens to be clickable, not a button. No padding, no
+   plate, no radius: the crumbs sit on the line at the size they read at, and
+   anything drawn around one would make the trail a row of controls. */
 .ez-fork-root {
   flex-shrink: 0;
   border: none;
   background: none;
-  padding: 2px 4px;
-  margin-left: -4px;
-  border-radius: 5px;
+  padding: 0;
   font-family: inherit;
   font-size: inherit;
   line-height: inherit;
   cursor: pointer;
 }
 
+/* The only thing on this line that goes anywhere, so the only one that answers
+   the pointer - and it answers by getting darker rather than by growing a fill.
+   A crumb is a line of text; a plate behind it would make it a button, which is
+   the one thing a breadcrumb's links are not. */
 .ez-fork-root:hover {
   color: var(--foreground);
-  background: var(--muted);
 }
 
 .ez-fork-sep {
@@ -3053,6 +3057,10 @@ body.ez-arranging .ez-frame {
 /* The last crumb, which is also the way to every other conversation. Drawn as
    text rather than as a control: a breadcrumb that looks like a button stops
    reading as a location. */
+/* Where you are. It opens the picker, but it is drawn as the page you are on
+   rather than as a control: no padding, no hover. A breadcrumb's last crumb is
+   a statement of position, and dressing it as a button would make the line read
+   as two buttons and a chevron. */
 .ez-fork-here {
   display: inline-flex;
   align-items: center;
@@ -3060,8 +3068,7 @@ body.ez-arranging .ez-frame {
   min-width: 0;
   border: none;
   background: none;
-  padding: 2px 5px;
-  border-radius: 5px;
+  padding: 0;
   color: var(--foreground);
   font-family: inherit;
   font-size: inherit;
@@ -3072,10 +3079,6 @@ body.ez-arranging .ez-frame {
   font-weight: 500;
   color: var(--explore-ink);
   cursor: pointer;
-}
-
-.ez-fork-here:hover {
-  background: var(--muted);
 }
 
 /* The one violet here. The name is a location and takes the page's ink; the
