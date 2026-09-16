@@ -623,6 +623,9 @@ function openPopup(
       // one, so this is where that copy is refreshed.
       if (pick?.suspended) postDraft()
     },
+    // `enabled` rather than a built-once list, because what this box is for can
+    // change while it is open: arming an explore from inside one is a command
+    // with nothing to do, and the menu should not offer it.
     commands: [
       {
         id: 'element',
@@ -632,18 +635,15 @@ function openPopup(
         icon: AlignSelectionIcon as IconNode,
         run: () => void armPick('popup', newPickId()),
       },
-      ...(canExplore && exploreTarget
-        ? [
-            {
-              id: 'explore',
-              label: 'Explore',
-              hint: '探索樣式',
-              keywords: ['explore', 'variant', 'ui', '探索', '樣式', '版本'],
-              icon: MagicWand01Icon as IconNode,
-              run: () => setExploring(true),
-            },
-          ]
-        : []),
+      {
+        id: 'explore',
+        label: 'Explore',
+        hint: '探索樣式',
+        keywords: ['explore', 'variant', 'ui', '探索', '樣式', '版本'],
+        icon: MagicWand01Icon as IconNode,
+        enabled: () => canExplore && !!exploreTarget && !exploring,
+        run: () => setExploring(true),
+      },
     ],
   })
   const input = attach.editable
