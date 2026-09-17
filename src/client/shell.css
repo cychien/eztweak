@@ -3234,6 +3234,88 @@ body.ez-arranging .ez-frame {
   white-space: nowrap;
 }
 
+/* ------------------------------------------------------- branch corner chip */
+
+/* Where the branches are, when the review is on the line they came off. Out of
+   the flow and in the thread's top corner - see the note in shell.ts for why
+   this is a chip and not a row. */
+.ez-here {
+  position: absolute;
+  top: 8px;
+  /* The section's 14px gutter plus the scroller's own 2px, so the chip's right
+     edge lands on the messages' rather than 2px past them. An absolute child is
+     placed against the padding box, so `right: 0` would sit in the gutter. */
+  right: 16px;
+  z-index: 3;
+  animation: ez-fork-in var(--t-pop) var(--ease-out) both;
+}
+
+.ez-here[hidden] {
+  display: none;
+}
+
+/* A plate, unlike the breadcrumb's crumbs: the thread scrolls underneath this
+   one, so it has to carry its own ground. Quiet with it - what it offers is
+   available rather than urgent, and the conversation is what the eye is here
+   for. It is the only thing in the sidebar allowed to sit on top of a message,
+   which is the whole reason it is this small and this grey. */
+.ez-here-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 200px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--muted);
+  color: var(--muted-foreground);
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.5;
+  padding: 4px 6px 4px 9px;
+  cursor: pointer;
+}
+
+.ez-here-chip:hover {
+  background: var(--paper-edge);
+  color: var(--foreground);
+}
+
+.ez-here-chip > svg {
+  flex-shrink: 0;
+  color: var(--ink-ghost);
+}
+
+.ez-here-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Hung off the right, where its chip is: dropped from the left it would run off
+   the sidebar. The breadcrumb's plate, because it is the same list. */
+.ez-here-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: auto;
+  right: 0;
+  z-index: 5;
+  display: flex;
+  min-width: 170px;
+  max-width: 280px;
+  transform-origin: top right;
+  animation: ez-menu-in var(--t-menu) var(--ease-out) both;
+  --notice-row: 22px;
+  padding: 7px 4px;
+  gap: 0;
+  max-height: calc(var(--notice-row) * 7);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.ez-here-menu[hidden] {
+  display: none;
+}
+
 /* ------------------------------------------------------------- thread push */
 
 /* The thread moved between conversations. It enters from the side the review

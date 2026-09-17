@@ -1772,32 +1772,8 @@ const forkRoot = h('button', 'ez-fork-root')
  *  is where you are, so opening a list of the others from it needs no second
  *  control. */
 const forkChip = h('button', 'ez-fork-here')
-forkChip.setAttribute('aria-haspopup', 'menu')
-forkChip.setAttribute('aria-expanded', 'false')
 const forkName = h('span', 'ez-fork-name')
 forkChip.append(icon(MagicWand01Icon as IconNode, 13), forkName)
-
-const forkMenu = h('div', 'ez-menu ez-fork-menu')
-forkMenu.setAttribute('role', 'menu')
-forkMenu.setAttribute('aria-label', '回到某個對話')
-forkMenu.hidden = true
-
-let forkRows: HTMLElement[] = []
-let forkOpen = false
-
-/** Which row the arrow is on. The same single-pointer rule the resume card has:
- *  hover and the arrow keys write one piece of state between them, so the list
- *  never shows two answers to "which row is the keyboard about to open". */
-function pointAtForkRow(row: HTMLElement): void {
-  for (const other of forkRows) other.toggleAttribute('data-active', other === row)
-}
-
-function closeFork(focusChip = false): void {
-  forkOpen = false
-  forkMenu.hidden = true
-  forkChip.setAttribute('aria-expanded', 'false')
-  if (focusChip) forkChip.focus()
-}
 
 /** The top of the tree this conversation belongs to: walk up until a chat has
  *  no parent. A review can have several - `/new` starts one each time - and a
@@ -1833,62 +1809,138 @@ function chatDetail(chat: ChatWire): string {
   return chat.detail ?? chatTime(chat.startedAt)
 }
 
-function openFork(): void {
-  const s = snapshot
-  if (!s?.chats) return
-  // Oldest first, so the line this branch came off is at the top and the
-  // branches read as having come off it in the order they were opened. The
-  // picker's own order, not the header's - this is a tree being read, not a
-  // history being scrolled.
-  const all = [...s.chats].reverse()
+/** The branches that came off the line being read, and only those. Two
+ *  exclusions.
+ *
+ *  The line itself, because whichever control is showing this list already names
+ *  it, and offering the same destination twice is not a choice.
+ *
+ *  And branches of branches. `/explore` forks from wherever the review is, so
+ *  exploring from inside an explore goes a level deeper - real reviews reach
+ *  five - but those are somewhere the user went *from* a fork rather than
+ *  somewhere to go *to* from here. The breadcrumb still names whichever one is
+ *  current, however deep it sits; this list stays one level so it reads as a set
+ *  of siblings rather than a tree to navigate.
+ *
+ *  One tree only. `/new` starts a separate conversation with branches of its
+ *  own, and stepping into one of those is not going back - it is going somewhere
+ *  else entirely, which `/resume` is for.
+ *
+ *  Oldest first, so the branches read in the order they were opened. The
+ *  picker's own order, not the header's - this is a tree being read, not a
+ *  history being scrolled. */
+function branchesOf(s: SnapshotWire | null): ChatWire[] {
+  const all = [...(s?.chats ?? [])].reverse()
   const current = all.find((c) => c.current)
-  // One tree only. `/new` starts a separate conversation with branches of its
-  // own, and stepping from inside this branch into one of those is not going
-  // back - it is going somewhere else entirely, which `/resume` is for. What
-  // this control offers is where you are and what you came from.
   const here = current ? rootOf(current, all) : undefined
-  // The branches that came off this line, and only those. Two exclusions.
-  //
-  // The line itself, because it already has a crumb a few pixels to the left and
-  // offering the same destination twice is not a choice.
-  //
-  // And branches of branches. `/explore` forks from wherever the review is, so
-  // exploring from inside an explore goes a level deeper - real reviews reach
-  // five - but those are somewhere the user went *from* a fork rather than
-  // somewhere to go *to* from here. The breadcrumb still names whichever one is
-  // current, however deep it sits; this list stays one level so it reads as a
-  // set of siblings rather than a tree to navigate.
-  const chats = all.filter((c) => c.parentChatId && (here ? c.parentChatId === here.id : false))
-  forkMenu.textContent = ''
-  forkRows = chats.map((chat) => {
-    const row = h('button', 'ez-notice-row ez-fork-row')
-    row.setAttribute('role', 'menuitemradio')
-    row.setAttribute('aria-checked', String(chat.current))
-    if (chat.current) row.dataset.current = ''
-
-    row.append(
-      icon(ArrowRight02Icon as IconNode, 12),
-      h('span', 'ez-notice-row-name', chatName(chat, false)),
-      h('span', 'ez-notice-row-when', chatDetail(chat)),
-    )
-    row.addEventListener('pointerenter', () => pointAtForkRow(row))
-    row.addEventListener('focus', () => pointAtForkRow(row))
-    row.onclick = () => {
-      closeFork()
-      if (!chat.current) void switchChat(chat.id)
-    }
-    forkMenu.append(row)
-    return row
-  })
-  forkOpen = true
-  forkMenu.hidden = false
-  forkChip.setAttribute('aria-expanded', 'true')
-  // Into the list, which is also what puts the arrow on a row: the keyboard is
-  // the point of this control, the same as the resume card's.
-  ;(forkRows.find((r) => 'current' in r.dataset) ?? forkRows[0])?.focus()
+  return all.filter((c) => c.parentChatId && (here ? c.parentChatId === here.id : false))
 }
 
-forkChip.onclick = () => (forkOpen ? closeFork() : openFork())
+interface BranchPicker {
+  menu: HTMLElement
+  close: (focusTrigger?: boolean) => void
+  isOpen: () => boolean
+}
+
+/** The list of branches off this line, and the machinery to open one from a
+ *  trigger. Two controls hang it - the breadcrumb, while the review is inside a
+ *  branch, and the corner chip, while it is on the line they came off - and they
+ *  offer exactly the same set, so it is written once and mounted twice. */
+function branchPicker(trigger: HTMLButtonElement, menuClass: string): BranchPicker {
+  const menu = h('div', `ez-menu ${menuClass}`)
+  menu.setAttribute('role', 'menu')
+  menu.setAttribute('aria-label', '切換到某個對話')
+  menu.hidden = true
+
+  let rows: HTMLElement[] = []
+  let open = false
+
+  /** Which row the arrow is on. The same single-pointer rule the resume card
+   *  has: hover and the arrow keys write one piece of state between them, so the
+   *  list never shows two answers to "which row is the keyboard about to open". */
+  function pointAt(row: HTMLElement): void {
+    for (const other of rows) other.toggleAttribute('data-active', other === row)
+  }
+
+  function close(focusTrigger = false): void {
+    open = false
+    menu.hidden = true
+    trigger.setAttribute('aria-expanded', 'false')
+    if (focusTrigger) trigger.focus()
+  }
+
+  function show(): void {
+    menu.textContent = ''
+    rows = branchesOf(snapshot).map((chat) => {
+      const row = h('button', 'ez-notice-row ez-fork-row')
+      row.setAttribute('role', 'menuitemradio')
+      row.setAttribute('aria-checked', String(chat.current))
+      if (chat.current) row.dataset.current = ''
+      row.append(
+        icon(ArrowRight02Icon as IconNode, 12),
+        h('span', 'ez-notice-row-name', chatName(chat, false)),
+        h('span', 'ez-notice-row-when', chatDetail(chat)),
+      )
+      row.addEventListener('pointerenter', () => pointAt(row))
+      row.addEventListener('focus', () => pointAt(row))
+      row.onclick = () => {
+        close()
+        if (!chat.current) void switchChat(chat.id)
+      }
+      menu.append(row)
+      return row
+    })
+    open = true
+    menu.hidden = false
+    trigger.setAttribute('aria-expanded', 'true')
+    // Into the list, which is also what puts the arrow on a row: the keyboard is
+    // the point of this control, the same as the resume card's.
+    ;(rows.find((r) => 'current' in r.dataset) ?? rows[0])?.focus()
+  }
+
+  trigger.setAttribute('aria-haspopup', 'menu')
+  trigger.setAttribute('aria-expanded', 'false')
+  trigger.onclick = () => (open ? close() : show())
+  menu.onkeydown = (e) => {
+    if (walkMenu(e, rows)) return
+    if (e.key === 'Escape') {
+      e.stopPropagation()
+      close(true)
+    }
+  }
+  menu.addEventListener('focusout', () => {
+    // The whole control is one focus scope: leaving it closes it, but moving
+    // between its own rows must not.
+    queueMicrotask(() => {
+      if (open && !menu.contains(document.activeElement) && document.activeElement !== trigger) {
+        close()
+      }
+    })
+  })
+
+  return { menu, close, isOpen: () => open }
+}
+
+const forkPicker = branchPicker(forkChip, 'ez-fork-menu')
+
+/** Where the branches are, when the review is not in one. The breadcrumb only
+ *  exists inside a branch, so on the main line a review that had forked three
+ *  times looked exactly like one that had never forked at all - the work was
+ *  there, with no way back to it but `/resume`.
+ *
+ *  A chip in the thread's top corner rather than a row of its own. What it says
+ *  is true of most reviews but wanted in few of them, and a row would charge the
+ *  conversation a strip of height for it every time; out of the flow it costs
+ *  nothing but the corner it sits in, and the thread scrolls under it - which is
+ *  why it carries a ground. */
+const hereChip = h('button', 'ez-here-chip')
+const hereName = h('span', 'ez-here-name')
+hereChip.append(hereName, icon(ChevronDownIcon as IconNode, 12))
+const herePicker = branchPicker(hereChip, 'ez-here-menu')
+const hereWrap = h('div', 'ez-here')
+hereWrap.hidden = true
+hereWrap.append(hereChip, herePicker.menu)
+
 forkRoot.onclick = () => {
   const chats = [...(snapshot?.chats ?? [])].reverse()
   const current = chats.find((c) => c.current)
@@ -1896,26 +1948,6 @@ forkRoot.onclick = () => {
   const root = rootOf(current, chats)
   if (!root.current) void switchChat(root.id)
 }
-forkMenu.onkeydown = (e) => {
-  if (walkMenu(e, forkRows)) return
-  if (e.key === 'Escape') {
-    e.stopPropagation()
-    closeFork(true)
-  }
-}
-forkMenu.addEventListener('focusout', () => {
-  // The whole control is one focus scope: leaving it closes it, but moving
-  // between its own rows must not.
-  queueMicrotask(() => {
-    if (
-      forkOpen &&
-      !forkMenu.contains(document.activeElement) &&
-      document.activeElement !== forkChip
-    ) {
-      closeFork()
-    }
-  })
-})
 
 /** Which chat the thread is drawing, so the next render can tell whether the
  *  review went deeper, came back, or merely got another message. */
@@ -1926,8 +1958,16 @@ function paintFork(s: SnapshotWire): void {
   const current = chats.find((c) => c.current)
   const onBranch = !!current?.parentChatId
   forkBar.hidden = !onBranch
+  // Only worth a corner when there is somewhere to go from it.
+  hereWrap.hidden = onBranch || !branchesOf(s).length
+  if (hereWrap.hidden && herePicker.isOpen()) herePicker.close()
   if (!onBranch) {
-    if (forkOpen) closeFork()
+    if (forkPicker.isOpen()) forkPicker.close()
+    if (current) {
+      const name = chatName(current, true)
+      hereName.textContent = name
+      hereChip.title = `${name} · 點一下切換到分支對話`
+    }
     shownChatId = current?.id ?? null
     return
   }
@@ -1980,11 +2020,11 @@ convScroll.appendChild(convList)
 
 const forkSep = h('span', 'ez-fork-sep')
 forkSep.append(icon(ChevronRightIcon as IconNode, 10))
-forkBar.append(forkRoot, forkSep, forkChip, forkMenu)
+forkBar.append(forkRoot, forkSep, forkChip, forkPicker.menu)
 // Above the thread and in the flow, so the conversation starts below it rather
 // than under it: a breadcrumb is where you *are*, which is part of the page
 // rather than something floating over it.
-convSection.append(forkBar, convScroll, notices)
+convSection.append(forkBar, hereWrap, convScroll, notices)
 
 const resizer = h('div', 'ez-resizer')
 resizer.tabIndex = 0
