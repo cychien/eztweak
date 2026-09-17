@@ -1411,8 +1411,9 @@ const queueSection = h('section', 'ez-section ez-queue-section')
 const queueList = h('ul', 'ez-queue')
 const queueScroll = h('div', 'ez-fade ez-queue-scroll')
 queueScroll.appendChild(queueList)
+const SEND_LABEL = '送出給 agent'
 const sendBtn = h('button', 'ez-send')
-const sendLabel = h('span', undefined, '送出給 agent')
+const sendLabel = h('span', undefined, SEND_LABEL)
 sendBtn.title = '送出給 agent（⌘/Ctrl + Enter）'
 sendBtn.append(icon(Navigation03Icon as IconNode, 15), sendLabel)
 sendBtn.onclick = () => void sendBatch()
@@ -2530,8 +2531,31 @@ let sending = false
 
 /** The one owner of the button's state: `render()` runs on every snapshot, and
  *  an upload settling has to be able to repaint it between two of them. */
+/** Whether the composer can hand anything over right now.
+ *
+ *  One predicate for the button and for the chord, because they are two ways of
+ *  asking for the same thing and a greyed-out button that ⌘+Enter walks past is
+ *  worse than no button state at all.
+ *
+ *  `starting` is in here because the agent has no session to be asked of yet:
+ *  the review has just moved conversations, or is still opening its first one.
+ *  The badge above says so, which is where a disabled button has to explain
+ *  itself - it has no tooltip of its own once it stops taking the pointer. */
+function canSend(): boolean {
+  if (sending || noteAttach.pending() > 0) return false
+  if (snapshot?.state === 'ended') return false
+  return snapshot?.acp?.state !== 'starting'
+}
+
 function paintSendState(): void {
-  sendBtn.disabled = sending || snapshot?.state === 'ended' || noteAttach.pending() > 0
+  sendBtn.disabled = !canSend()
+  // A button that has gone grey says "not for you"; this one is only "not yet",
+  // and the difference is worth a word. It is the one blocked state with an end
+  // the user can wait out, so it is the one that names itself - the others are
+  // answered by the box they are about, not by the button.
+  const opening = snapshot?.acp?.state === 'starting'
+  sendBtn.toggleAttribute('data-opening', opening)
+  sendLabel.textContent = opening ? '正在開啟對話…' : SEND_LABEL
 }
 
 /** Keep the usage figure honest.
@@ -2561,7 +2585,7 @@ document.addEventListener('visibilitychange', refreshLimit)
 setInterval(refreshLimit, LIMIT_BEAT_MS)
 
 async function sendBatch(): Promise<void> {
-  if (sending || noteAttach.pending() > 0) return
+  if (!canSend()) return
   const count = snapshot?.annotations.length ?? 0
   const attachments = noteAttach.ids()
   const references = noteAttach.refs()
@@ -3544,6 +3568,12 @@ function render(): void {
   } else if (s.agentBusy) {
     agentStatus.className = 'ez-badge ez-working'
     agentStatus.textContent = 'Agent 修改中'
+  } else if (s.acp?.state === 'starting') {
+    // Connected, with no session to ask anything of yet - it is opening one, or
+    // picking an earlier one back up. The composer cannot send while this is
+    // true, and this line is the only thing that says why.
+    agentStatus.className = 'ez-badge ez-working'
+    agentStatus.textContent = 'Agent 準備中'
   } else if (s.agentOnline) {
     agentStatus.className = 'ez-badge ez-online'
     agentStatus.textContent = 'Agent 已連線'

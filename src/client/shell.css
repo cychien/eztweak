@@ -988,6 +988,19 @@ body.ez-arranging .ez-frame {
   cursor: default;
 }
 
+/* Waiting, not off, and it carries the word that says so - which the flat
+   disabled treatment is far too faint to let anyone read. Dimmed just enough to
+   stay out of the primary's register until it is clickable again. The arrow goes
+   with the label it belonged to: nothing is about to be sent anywhere. */
+.ez-send:disabled[data-opening] {
+  opacity: 0.72;
+  cursor: progress;
+}
+
+.ez-send[data-opening] > svg {
+  display: none;
+}
+
 /* ---------------------------------------------------------------- banner */
 
 /* Every notice the review raises, in one place: floating at the foot of the
