@@ -40,12 +40,20 @@ function read(): Remembered {
 /** Whether a window is still worth showing: readable, and not already rolled
  *  over. Every field is checked rather than read, because this shape arrives from
  *  a file that outlives the version that wrote it - and half a window reaches the
- *  shell as a row with no length on it. */
+ *  shell as a row with no length on it.
+ *
+ *  A reset further out than the window is long is not this window's either: a
+ *  window rolls over within its own length of any moment inside it, so a date
+ *  past that says the figure beside it cannot be placed in time at all - and a
+ *  version that wrote one would otherwise have it held for as long as the date
+ *  claims. */
 function live(window: AcpUsageWindow | undefined, now: number): boolean {
   if (!window || typeof window.remaining !== 'number') return false
   if (typeof window.windowMinutes !== 'number' || window.windowMinutes <= 0) return false
   if (window.model !== undefined && typeof window.model !== 'string') return false
-  return window.resetsAt === undefined || window.resetsAt * 1000 > now
+  if (window.resetsAt === undefined) return true
+  const at = window.resetsAt * 1000
+  return at > now && at <= now + window.windowMinutes * 60_000
 }
 
 /** The last figures for this agent, minus any window that has since rolled over -
@@ -199,9 +207,15 @@ const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', '
  *  longer holds, which is a reason to report no time rather than one off by
  *  hours.
  *
- *  The year is not rendered, so it is the one that puts the reset ahead of now -
- *  a reset is by definition still to come, and that is what carries a December
- *  window over into January. */
+ *  The year is not rendered, so it is the one that reads closest to now - which
+ *  is what carries a December window over into January, and, read backwards, a
+ *  January one over from December.
+ *
+ *  A date that still lands behind now is no reset. It is what the CLI prints for
+ *  a window nobody has spent anything in yet: at 0% used there is no live window,
+ *  so the line carries the one that already ended. Reaching for a year that puts
+ *  it ahead would date a spent window twelve months out and show it as a bare
+ *  day - "剩 100% 直到 9/17 19:20", read on the 18th. */
 function resetEpoch(rendered: string | undefined, now: number): number | undefined {
   const parsed = /^(\w{3}) (\d{1,2}) at (\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*\(([^)]+)\)/i.exec(
     rendered?.trim() ?? '',
@@ -214,11 +228,10 @@ function resetEpoch(rendered: string | undefined, now: number): number | undefin
   const day = Number(parsed[2])
   const minute = Number(parsed[4] ?? '0')
   const thisYear = new Date(now).getFullYear()
-  for (const year of [thisYear, thisYear + 1]) {
-    const at = new Date(year, month, day, hour, minute).getTime()
-    if (at > now) return Math.floor(at / 1000)
-  }
-  return undefined
+  const at = [thisYear - 1, thisYear, thisYear + 1]
+    .map((year) => new Date(year, month, day, hour, minute).getTime())
+    .reduce((best, next) => (Math.abs(next - now) < Math.abs(best - now) ? next : best))
+  return at > now ? Math.floor(at / 1000) : undefined
 }
 
 /** Claude's figure, from the one local command that reports it.
