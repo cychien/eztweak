@@ -1901,6 +1901,15 @@ function branchPicker(trigger: HTMLButtonElement, menuClass: string): BranchPick
   trigger.setAttribute('aria-haspopup', 'menu')
   trigger.setAttribute('aria-expanded', 'false')
   trigger.onclick = () => (open ? close() : show())
+  // Pressing inside the control must not move focus. A mousedown on a button
+  // does not focus it on macOS - focus falls to the body - and the focusout
+  // below would then close the menu before the click reached the row, so every
+  // pick landed on whatever the menu had been covering. Holding focus where it
+  // is means the control never sees a focusout of its own making; a press
+  // anywhere else still moves focus off the list and still closes it.
+  const holdFocus = (e: MouseEvent) => e.preventDefault()
+  trigger.addEventListener('mousedown', holdFocus)
+  menu.addEventListener('mousedown', holdFocus)
   menu.onkeydown = (e) => {
     if (walkMenu(e, rows)) return
     if (e.key === 'Escape') {

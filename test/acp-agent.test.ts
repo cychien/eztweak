@@ -271,6 +271,25 @@ test('a new chat mid-turn cancels it and drops its outcome', async () => {
   )
 })
 
+// A review that moves twice in quick succession - into a branch from the corner
+// chip, then straight back out through the breadcrumb - asks for the second move
+// while the first session is still opening. It used to be refused, so the click
+// that asked for it did nothing at all and the review sat in a conversation the
+// user had already left; only a second click, once the session was up, landed.
+test('a move asked for while the session is still opening is honoured', async () => {
+  const h = harness()
+  after(() => h.acp.stop())
+  await h.idle()
+
+  assert.equal(h.acp.reopenSession(), true)
+  assert.equal(h.acp.snapshot().state, 'starting')
+  assert.equal(h.acp.reopenSession(), true, 'the second move was dropped')
+
+  h.queue('after')
+  await h.until('the turn on the newest session to end', () => h.turns.length > 0)
+  assert.equal(h.turns[0]?.reply, 's3:after', 'the review answered on a superseded session')
+})
+
 test('a new chat is refused before the first session is up', () => {
   const h = harness()
   after(() => h.acp.stop())

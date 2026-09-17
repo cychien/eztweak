@@ -517,10 +517,19 @@ export class AcpAgent {
    *  conversation is the whole point of asking - and its end is then dropped on
    *  the epoch. */
   reopenSession(): boolean {
-    if (!this.ctx || !this.session) return false
-    if (this.state !== 'idle' && this.state !== 'working') return false
+    if (!this.ctx) return false
+    if (this.state === 'exited') return false
+    // `starting` is asked for as often as the other two. A review that moves
+    // twice in quick succession - into a branch and straight back out of it -
+    // asks for the second move while the first session is still opening, and
+    // refusing it dropped the move the user had actually made: the click did
+    // nothing at all, and only a second one, once the session was up, landed.
+    //
+    // The epoch is what makes it safe. An open in flight re-reads it at every
+    // step and closes whatever the agent hands back rather than installing it,
+    // so the newest request owns the session however many are outstanding.
     const old = this.session
-    if (this.state === 'working') this.sendCancel(old.sessionId)
+    if (this.state === 'working' && old) this.sendCancel(old.sessionId)
     this.epoch++
     this.session = null
     this.state = 'starting'
@@ -530,8 +539,12 @@ export class AcpAgent {
     // agent is blocked on it, and it has to be released before we let go.
     this.settleAsk()
     this.opts.onChange()
-    old.retire()
-    void this.closeSession(old.sessionId)
+    // Nothing to let go of when the move landed on a session that had not opened
+    // yet. The one in flight is the epoch's to discard.
+    if (old) {
+      old.retire()
+      void this.closeSession(old.sessionId)
+    }
     void this.openSession().catch((err: unknown) => {
       this.fail(err instanceof Error ? err.message : String(err))
     })
