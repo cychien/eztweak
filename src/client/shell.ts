@@ -1411,9 +1411,8 @@ const queueSection = h('section', 'ez-section ez-queue-section')
 const queueList = h('ul', 'ez-queue')
 const queueScroll = h('div', 'ez-fade ez-queue-scroll')
 queueScroll.appendChild(queueList)
-const SEND_LABEL = '送出給 agent'
 const sendBtn = h('button', 'ez-send')
-const sendLabel = h('span', undefined, SEND_LABEL)
+const sendLabel = h('span', undefined, '送出給 agent')
 sendBtn.title = '送出給 agent（⌘/Ctrl + Enter）'
 sendBtn.append(icon(Navigation03Icon as IconNode, 15), sendLabel)
 sendBtn.onclick = () => void sendBatch()
@@ -2577,25 +2576,19 @@ let sending = false
  *  asking for the same thing and a greyed-out button that ⌘+Enter walks past is
  *  worse than no button state at all.
  *
- *  `starting` is in here because the agent has no session to be asked of yet:
- *  the review has just moved conversations, or is still opening its first one.
- *  The badge above says so, which is where a disabled button has to explain
- *  itself - it has no tooltip of its own once it stops taking the pointer. */
+ *  A session still opening is deliberately not in here. The batch waits for it -
+ *  the daemon hands over whatever is queued the moment the agent goes idle - so
+ *  the send lands either way, and blocking it would buy nothing but the button
+ *  going dead and live again on every chat switch. A control that flickers to
+ *  report something the user never had to act on is worse than one that quietly
+ *  takes the work and gets to it when it can. */
 function canSend(): boolean {
   if (sending || noteAttach.pending() > 0) return false
-  if (snapshot?.state === 'ended') return false
-  return snapshot?.acp?.state !== 'starting'
+  return snapshot?.state !== 'ended'
 }
 
 function paintSendState(): void {
   sendBtn.disabled = !canSend()
-  // A button that has gone grey says "not for you"; this one is only "not yet",
-  // and the difference is worth a word. It is the one blocked state with an end
-  // the user can wait out, so it is the one that names itself - the others are
-  // answered by the box they are about, not by the button.
-  const opening = snapshot?.acp?.state === 'starting'
-  sendBtn.toggleAttribute('data-opening', opening)
-  sendLabel.textContent = opening ? '正在開啟對話…' : SEND_LABEL
 }
 
 /** Keep the usage figure honest.
