@@ -1931,7 +1931,33 @@ function branchPicker(trigger: HTMLButtonElement, menuClass: string): BranchPick
   return { menu, close, isOpen: () => open }
 }
 
-const forkPicker = branchPicker(forkChip, 'ez-fork-menu')
+/** Whether a review can step back into a branch it has left.
+ *
+ *  Off, and the reason is the variants rather than the conversation. A branch's
+ *  variants are markup captured when it ran, and between two rounds the agent is
+ *  editing the very code they stand in for - so re-entering an old branch means
+ *  putting yesterday's alternative in the place of an element that has since
+ *  been rewritten, with nothing that can tell you it has. In this tool a stale
+ *  variant is the ordinary case, not the corner one.
+ *
+ *  So a review's shape is one way: explore, choose, come back, and the round is
+ *  over. Exploring again starts a round of its own, on the page as it is now.
+ *
+ *  The machinery is kept whole behind this one flag rather than removed - the
+ *  picker, the list it draws, the rows that switch chat. Set this to true and the
+ *  crumb opens it again and the main line gets its way in back, exactly as
+ *  before. `/resume` is unaffected either way: it has always listed only the
+ *  conversations with no parent. */
+const BRANCHES_REACHABLE: boolean = false
+
+const forkPicker = BRANCHES_REACHABLE ? branchPicker(forkChip, 'ez-fork-menu') : null
+// Where you are, and with the branches one-way that is all it is. Left as a
+// button so the crumb keeps one shape across both settings of the flag, and
+// marked the way a breadcrumb marks its last item so it still reads as a place.
+if (!forkPicker) {
+  forkChip.disabled = true
+  forkChip.setAttribute('aria-current', 'page')
+}
 
 /** The way into the branches, from the line they came off. The breadcrumb only
  *  exists inside a branch, so on the main line a review that had forked five
@@ -1946,7 +1972,7 @@ const forkPicker = branchPicker(forkChip, 'ez-fork-menu')
 const forkMore = h('button', 'ez-fork-more')
 forkMore.append(h('span', undefined, '分支對話'), icon(ChevronDownIcon as IconNode, 12))
 forkMore.title = '這條主線底下的分支對話'
-const morePicker = branchPicker(forkMore, 'ez-fork-more-menu')
+const morePicker = BRANCHES_REACHABLE ? branchPicker(forkMore, 'ez-fork-more-menu') : null
 
 forkRoot.onclick = () => {
   const chats = [...(snapshot?.chats ?? [])].reverse()
@@ -1967,12 +1993,14 @@ function paintFork(s: SnapshotWire): void {
   // One row, two things to say. Inside a branch it is the trail out; on the line
   // the branches came off it is the way into them, and it only earns its height
   // there once there is at least one.
-  const branches = branchesOf(s).length
+  // With the branches one-way there is nothing for the main line's half of this
+  // row to offer, so the row becomes a branch's alone.
+  const branches = morePicker ? branchesOf(s).length : 0
   forkBar.hidden = !onBranch && !branches
   forkMore.hidden = onBranch || !branches
-  if (forkMore.hidden && morePicker.isOpen()) morePicker.close()
+  if (forkMore.hidden && morePicker?.isOpen()) morePicker.close()
   if (!onBranch) {
-    if (forkPicker.isOpen()) forkPicker.close()
+    if (forkPicker?.isOpen()) forkPicker.close()
     forkSep.hidden = true
     forkChip.hidden = true
     if (current) {
@@ -2007,7 +2035,7 @@ function paintFork(s: SnapshotWire): void {
   forkRoot.textContent = rootName
   forkRoot.title = `回到${rootName}`
   forkName.textContent = here
-  forkChip.title = `${here} · 點一下切換對話`
+  forkChip.title = forkPicker ? `${here} · 點一下切換對話` : here
 }
 
 /** The thread moved between conversations. Push it sideways, in the direction
@@ -2040,7 +2068,9 @@ convScroll.appendChild(convList)
 
 const forkSep = h('span', 'ez-fork-sep')
 forkSep.append(icon(ChevronRightIcon as IconNode, 10))
-forkBar.append(forkRoot, forkSep, forkChip, forkPicker.menu, forkMore, morePicker.menu)
+forkBar.append(forkRoot, forkSep, forkChip)
+if (forkPicker) forkBar.append(forkPicker.menu)
+if (morePicker) forkBar.append(forkMore, morePicker.menu)
 // Above the thread and in the flow, so the conversation starts below it rather
 // than under it: a breadcrumb is where you *are*, which is part of the page
 // rather than something floating over it.

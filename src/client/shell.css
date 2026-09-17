@@ -3164,6 +3164,21 @@ body.ez-arranging .ez-frame {
   color: color-mix(in oklab, var(--explore-accent) 80%, var(--paper));
 }
 
+/* With the branches one-way this crumb names where you are and opens nothing,
+   so it stops answering the pointer - see `BRANCHES_REACHABLE`. The rules above
+   come back with the flag; these only outrank them while it is off. */
+.ez-fork-here:disabled {
+  cursor: default;
+}
+
+.ez-fork-here:disabled:hover {
+  color: var(--explore-ink);
+}
+
+.ez-fork-here:disabled:hover svg {
+  color: var(--explore-accent);
+}
+
 /* The one violet here. The name is a location and takes the page's ink; the
    mark says which kind of branch it is, which is the only thing on this line
    that is about explore rather than about position. */
