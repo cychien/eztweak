@@ -3180,11 +3180,10 @@ body.ez-arranging .ez-frame {
 
 /* Hung off the crumb it was opened from, so it scales from there rather than
    from its own middle. */
-.ez-fork-menu {
+.ez-fork-menu,
+.ez-fork-more-menu {
   position: absolute;
   top: calc(100% - 2px);
-  left: 14px;
-  right: auto;
   z-index: 5;
   display: flex;
   /* Bounded on both sides. `.ez-menu` sizes to `max-content`, so without a cap
@@ -3192,7 +3191,6 @@ body.ez-arranging .ez-frame {
      sidebar; with one, the label is what gives way. */
   min-width: 170px;
   max-width: min(100%, 280px);
-  transform-origin: top left;
   animation: ez-menu-in var(--t-menu) var(--ease-out) both;
   /* Looser than the resume card's list, which was tried and read as cramped
      here. That list sits inside a card that already has padding around it; this
@@ -3208,7 +3206,23 @@ body.ez-arranging .ez-frame {
   overscroll-behavior: contain;
 }
 
-.ez-fork-menu[hidden] {
+/* Each drops from under the crumb that opens it, which is why one is anchored
+   left and the other right: dropped from the wrong end, the right-hand one runs
+   off the sidebar. */
+.ez-fork-menu {
+  left: 14px;
+  right: auto;
+  transform-origin: top left;
+}
+
+.ez-fork-more-menu {
+  left: auto;
+  right: 14px;
+  transform-origin: top right;
+}
+
+.ez-fork-menu[hidden],
+.ez-fork-more-menu[hidden] {
   display: none;
 }
 
@@ -3247,85 +3261,51 @@ body.ez-arranging .ez-frame {
   white-space: nowrap;
 }
 
-/* ------------------------------------------------------- branch corner chip */
-
-/* Where the branches are, when the review is on the line they came off. Out of
-   the flow and in the thread's top corner - see the note in shell.ts for why
-   this is a chip and not a row. */
-.ez-here {
-  position: absolute;
-  top: 8px;
-  /* The section's 14px gutter plus the scroller's own 2px, so the chip's right
-     edge lands on the messages' rather than 2px past them. An absolute child is
-     placed against the padding box, so `right: 0` would sit in the gutter. */
-  right: 16px;
-  z-index: 3;
-  animation: ez-fork-in var(--t-pop) var(--ease-out) both;
-}
-
-.ez-here[hidden] {
-  display: none;
-}
-
-/* A plate, unlike the breadcrumb's crumbs: the thread scrolls underneath this
-   one, so it has to carry its own ground. Quiet with it - what it offers is
-   available rather than urgent, and the conversation is what the eye is here
-   for. It is the only thing in the sidebar allowed to sit on top of a message,
-   which is the whole reason it is this small and this grey. */
-.ez-here-chip {
+/* The way into the branches, at the far end of the row the crumbs start. Text
+   and a mark, like everything else on this line - a plate here would make the
+   row read as a toolbar rather than as a statement of where you are. */
+.ez-fork-more {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  max-width: 200px;
-  border: 0;
-  border-radius: 8px;
-  background: var(--muted);
+  gap: 3px;
+  flex-shrink: 0;
+  /* Pushed to the end, which is what puts it opposite the crumb rather than
+     beside it. */
+  margin-left: auto;
+  border: none;
+  background: none;
+  padding: 0;
   color: var(--muted-foreground);
   font-family: inherit;
-  font-size: 12px;
-  line-height: 1.5;
-  padding: 4px 6px 4px 9px;
+  font-size: inherit;
+  line-height: inherit;
+  white-space: nowrap;
   cursor: pointer;
 }
 
-.ez-here-chip:hover {
-  background: var(--paper-edge);
+.ez-fork-more:hover,
+.ez-fork-more[aria-expanded='true'] {
   color: var(--foreground);
 }
 
-.ez-here-chip > svg {
-  flex-shrink: 0;
+.ez-fork-more svg {
   color: var(--ink-ghost);
 }
 
-.ez-here-name {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+/* A trail's last item is where you are, not a way to get anywhere - so on the
+   main line the root crumb stops answering the pointer and takes the weight the
+   current crumb carries inside a branch. */
+.ez-fork-root:disabled {
+  color: var(--foreground);
+  font-weight: 500;
+  cursor: default;
 }
 
-/* Hung off the right, where its chip is: dropped from the left it would run off
-   the sidebar. The breadcrumb's plate, because it is the same list. */
-.ez-here-menu {
-  position: absolute;
-  top: calc(100% + 4px);
-  left: auto;
-  right: 0;
-  z-index: 5;
-  display: flex;
-  min-width: 170px;
-  max-width: 280px;
-  transform-origin: top right;
-  animation: ez-menu-in var(--t-menu) var(--ease-out) both;
-  --notice-row: 22px;
-  padding: 7px 4px;
-  gap: 0;
-  max-height: calc(var(--notice-row) * 7);
-  overflow-y: auto;
-  overscroll-behavior: contain;
-}
-
-.ez-here-menu[hidden] {
+/* `display` in an author rule outranks the UA's `[hidden]`, so every part of the
+   row that sets one has to say this for itself. */
+.ez-fork-sep[hidden],
+.ez-fork-here[hidden],
+.ez-fork-more[hidden] {
   display: none;
 }
 

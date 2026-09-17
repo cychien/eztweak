@@ -1933,23 +1933,20 @@ function branchPicker(trigger: HTMLButtonElement, menuClass: string): BranchPick
 
 const forkPicker = branchPicker(forkChip, 'ez-fork-menu')
 
-/** Where the branches are, when the review is not in one. The breadcrumb only
- *  exists inside a branch, so on the main line a review that had forked three
+/** The way into the branches, from the line they came off. The breadcrumb only
+ *  exists inside a branch, so on the main line a review that had forked five
  *  times looked exactly like one that had never forked at all - the work was
  *  there, with no way back to it but `/resume`.
  *
- *  A chip in the thread's top corner rather than a row of its own. What it says
- *  is true of most reviews but wanted in few of them, and a row would charge the
- *  conversation a strip of height for it every time; out of the flow it costs
- *  nothing but the corner it sits in, and the thread scrolls under it - which is
- *  why it carries a ground. */
-const hereChip = h('button', 'ez-here-chip')
-const hereName = h('span', 'ez-here-name')
-hereChip.append(hereName, icon(ChevronDownIcon as IconNode, 12))
-const herePicker = branchPicker(hereChip, 'ez-here-menu')
-const hereWrap = h('div', 'ez-here')
-hereWrap.hidden = true
-hereWrap.append(hereChip, herePicker.menu)
+ *  At the far end of the same row, because the left of that row is already
+ *  saying where you are and this is the one thing it does not answer: where else
+ *  you could be. Named for what the list holds rather than for where it is
+ *  opened from - `主對話` is the crumb three inches to its left, and a row that
+ *  says it twice reads as two controls for one place. */
+const forkMore = h('button', 'ez-fork-more')
+forkMore.append(h('span', undefined, '分支對話'), icon(ChevronDownIcon as IconNode, 12))
+forkMore.title = '這條主線底下的分支對話'
+const morePicker = branchPicker(forkMore, 'ez-fork-more-menu')
 
 forkRoot.onclick = () => {
   const chats = [...(snapshot?.chats ?? [])].reverse()
@@ -1967,20 +1964,33 @@ function paintFork(s: SnapshotWire): void {
   const chats = s.chats ?? []
   const current = chats.find((c) => c.current)
   const onBranch = !!current?.parentChatId
-  forkBar.hidden = !onBranch
-  // Only worth a corner when there is somewhere to go from it.
-  hereWrap.hidden = onBranch || !branchesOf(s).length
-  if (hereWrap.hidden && herePicker.isOpen()) herePicker.close()
+  // One row, two things to say. Inside a branch it is the trail out; on the line
+  // the branches came off it is the way into them, and it only earns its height
+  // there once there is at least one.
+  const branches = branchesOf(s).length
+  forkBar.hidden = !onBranch && !branches
+  forkMore.hidden = onBranch || !branches
+  if (forkMore.hidden && morePicker.isOpen()) morePicker.close()
   if (!onBranch) {
     if (forkPicker.isOpen()) forkPicker.close()
+    forkSep.hidden = true
+    forkChip.hidden = true
     if (current) {
       const name = chatName(current, true)
-      hereName.textContent = name
-      hereChip.title = `${name} · 點一下切換到分支對話`
+      forkRoot.textContent = name
+      // Where you already are. It keeps the crumb's place in the row and stops
+      // being a way to get anywhere, which is what a trail's last item is.
+      forkRoot.disabled = true
+      forkRoot.setAttribute('aria-current', 'page')
+      forkRoot.removeAttribute('title')
     }
     shownChatId = current?.id ?? null
     return
   }
+  forkSep.hidden = false
+  forkChip.hidden = false
+  forkRoot.disabled = false
+  forkRoot.removeAttribute('aria-current')
   // The crumb always starts at the review itself, not at the immediate parent:
   // branches can nest, and "探索樣式 › 探索樣式" says nothing about where the
   // user is being offered a way back to. Nothing stands for the levels in
@@ -2030,11 +2040,11 @@ convScroll.appendChild(convList)
 
 const forkSep = h('span', 'ez-fork-sep')
 forkSep.append(icon(ChevronRightIcon as IconNode, 10))
-forkBar.append(forkRoot, forkSep, forkChip, forkPicker.menu)
+forkBar.append(forkRoot, forkSep, forkChip, forkPicker.menu, forkMore, morePicker.menu)
 // Above the thread and in the flow, so the conversation starts below it rather
 // than under it: a breadcrumb is where you *are*, which is part of the page
 // rather than something floating over it.
-convSection.append(forkBar, hereWrap, convScroll, notices)
+convSection.append(forkBar, convScroll, notices)
 
 const resizer = h('div', 'ez-resizer')
 resizer.tabIndex = 0
