@@ -3642,9 +3642,16 @@ function render(): void {
       prevRole = 'agent'
     }
   }
-  // Nothing in the thread claimed it: a turn with no batch behind it, or one whose
-  // question is not in the log. It still has to be visible, so it goes last.
-  if (s.agentBusy && !livePlaced) convList.appendChild(liveTurnEl(s, prevRole))
+  // Nothing in the thread claimed it: a turn with no batch behind it, one whose
+  // question is not in the log, or a session still opening - which has no batch
+  // to sit under because the one just sent is waiting for it. It still has to be
+  // visible, so it goes last.
+  //
+  // A session opening counts as something to wait on. The composer takes a batch
+  // through that window and holds it, and a thread that shows nothing meanwhile
+  // is one where the send looks to have gone nowhere.
+  const waiting = s.agentBusy || s.acp?.state === 'starting'
+  if (waiting && !livePlaced) convList.appendChild(liveTurnEl(s, prevRole))
   if (s.acp?.ask) convList.appendChild(acpAskEl(s.acp.ask))
   if (s.acp?.state === 'exited' && s.acp.error) {
     convList.appendChild(
@@ -3665,7 +3672,10 @@ function liveTurnEl(s: SnapshotWire, prevRole: string | null): HTMLElement {
   const row = h('div', `ez-msg ez-msg-agent${prevRole === 'agent' ? ' ez-msg-cont' : ''}`)
   const dots = h('div', 'ez-thinking')
   dots.setAttribute('role', 'status')
-  dots.setAttribute('aria-label', s.agentProgress ?? 'Agent 修改中')
+  // What the pulse is about, which is not always a turn: said the way the badge
+  // says it, so the two never disagree about what the agent is doing.
+  const opening = s.acp?.state === 'starting'
+  dots.setAttribute('aria-label', s.agentProgress ?? (opening ? 'Agent 準備中' : 'Agent 修改中'))
   for (let i = 0; i < 3; i++) dots.appendChild(h('span', 'ez-dot'))
   // The agent's own words on what it is doing, when it sends any - rendered where
   // the reply will land, because it is the reply, mid-formation.
