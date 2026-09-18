@@ -473,6 +473,8 @@ class SessionRuntime {
   port = 0
   private server!: Server
   private sseClients = new Set<Response>()
+  /** Sockets the proxy upgraded to websockets; see `stop`. */
+  private readonly upgraded = new Set<Socket>()
   private pollWaiters = new Set<(r: PollResult | null) => void>()
   /** Set when a batch is handed to the agent, cleared when it polls again.
    *  Acks can't drive this: the agent acks on receipt, before it does the work. */
@@ -521,7 +523,16 @@ class SessionRuntime {
     this.pollWaiters.clear()
     for (const client of this.sseClients) client.end()
     this.sseClients.clear()
-    await new Promise<void>((resolve) => this.server.close(() => resolve()))
+    // `close` only stops accepting. It waits for every connection still open,
+    // and a shell tab keeps two that never end on their own: the app's HMR
+    // websocket, proxied through here, and whatever keep-alive the browser is
+    // holding. An upgraded socket is no longer the http server's to close, so
+    // those are tracked and destroyed here by hand.
+    const closed = new Promise<void>((resolve) => this.server.close(() => resolve()))
+    this.server.closeAllConnections()
+    for (const socket of this.upgraded) socket.destroy()
+    this.upgraded.clear()
+    await closed
   }
 
   /** Someone is attached — keeps the idle reaper off this session. */
@@ -1735,6 +1746,8 @@ class SessionRuntime {
     this.server = await listenOn(app, preferred ? [preferred, 0] : [0])
     this.server.on('upgrade', (req, socket, head) => {
       if (req.url?.startsWith(URL_PREFIX)) return socket.destroy()
+      this.upgraded.add(socket as Socket)
+      socket.once('close', () => this.upgraded.delete(socket as Socket))
       rawProxy.upgrade(req, socket as Socket, head)
     })
     const address = this.server.address()
