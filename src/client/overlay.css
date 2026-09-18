@@ -360,6 +360,16 @@
   color: var(--ez-ref-ink);
 }
 
+/* A reference the user brought back from an explore, rather than off the picker.
+   The plate stays the reference's, because that is what it is - an element the
+   comment points at - and the mark carries the violet instead, the way the branch
+   crumb does: the colour says which *kind* of reference it is without claiming a
+   fourth chip colour, which the palette above deliberately does not have. The
+   word in the chip does the rest. */
+.ez-chip-ref.ez-chip-chosen svg {
+  color: var(--ez-explore-accent);
+}
+
 /* Still uploading. Dimmed rather than spinner'd: it resolves in a blink on a
    local daemon, and a spinner that flashes is louder than the wait it reports. */
 .ez-chip-pending {

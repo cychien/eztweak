@@ -2186,6 +2186,16 @@ body.ez-arranging .ez-frame {
   color: var(--ref-ink);
 }
 
+/* A reference the user brought back from an explore, rather than off the picker.
+   The plate stays the reference's, because that is what it is - an element the
+   comment points at - and the mark carries the violet instead, the way the branch
+   crumb does: the colour says which *kind* of reference it is without claiming a
+   fourth chip colour, which the palette above deliberately does not have. The
+   word in the chip does the rest. */
+.ez-chip-ref.ez-chip-chosen svg {
+  color: var(--explore-accent);
+}
+
 /* The skill the batch runs, written into the sentence the way it would be typed.
 
    Not a chip at all, despite the class it shares: no fill, no padding, no shape -
@@ -2974,12 +2984,118 @@ body.ez-arranging .ez-frame {
 }
 
 .ez-strip-actions {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 4px;
   flex: 0 0 auto;
   padding-left: 8px;
   border-left: 1px solid oklch(100% 0 0 / 0.18);
+}
+
+/* The question, put over the buttons that raised it. The sidebar's notice stack
+   is where the review's other confirmations live, and it is the wrong place for
+   this one: it would be answered from the far side of the screen, away from the
+   thing the pointer is already on and away from the variants it is about.
+
+   The pill's own ground, not the shell's light one. Everything down here belongs
+   to the same object - the card is the pill saying one more thing before it acts -
+   and a white panel hung off a near-black pill reads as a second control arriving
+   from somewhere else. A card rather than a pill, though: this one holds a
+   sentence, and only the radius says so. */
+.ez-strip-ask {
+  position: absolute;
+  bottom: calc(100% + 10px);
+  right: 0;
+  z-index: 6;
+  width: 250px;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding: 11px 12px;
+  border: 0;
+  border-radius: 12px;
+  background: var(--ink);
+  color: #fff;
+  /* The pill's ring, and a deeper drop under it: this sits a layer above the
+     thing it came out of and has to read as being off it. */
+  box-shadow:
+    0 0 0 1px oklch(100% 0 0 / 0.25),
+    0 14px 34px oklch(0% 0 0 / 0.38);
+  font-size: 12px;
+  line-height: 1.6;
+  text-align: left;
+  /* The pill keeps everything on one line; a paragraph in it must not. */
+  white-space: normal;
+  transform-origin: bottom right;
+  animation: ez-menu-in var(--t-menu) var(--ease-out) both;
+}
+
+.ez-strip-ask-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* The strip's own two weights, so the answer to the question is drawn in the same
+   language as the variants it is about: filled white for the one that acts, a
+   wash of white for the one that backs out.
+
+   Cornered rather than rounded off, unlike the chips above them. A pill is what
+   the strip uses for a thing you pick between; these are the two answers to a
+   question, which is what the review's other notice cards ask with, and they are
+   drawn the same way. */
+.ez-strip-ask-go,
+.ez-strip-ask-no {
+  border: 0;
+  border-radius: 6px;
+  font-family: inherit;
+  font-size: 11.5px;
+  line-height: 1.5;
+  padding: 5px 11px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.ez-strip-ask-go {
+  background: #fff;
+  color: var(--ink);
+}
+
+.ez-strip-ask-no {
+  background: oklch(100% 0 0 / 0.14);
+  color: inherit;
+}
+
+.ez-strip-ask-no:hover {
+  background: oklch(100% 0 0 / 0.24);
+}
+
+.ez-strip-ask-go:focus-visible,
+.ez-strip-ask-no:focus-visible {
+  outline: 2px solid oklch(100% 0 0 / 0.7);
+  outline-offset: 1px;
+}
+
+/* Under the buttons rather than beside them, the same way the sidebar's card puts
+   it: a footnote to the whole question, not a third answer to it. */
+.ez-strip-ask-skip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: oklch(100% 0 0 / 0.62);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+/* White box, dark tick - the filled chip's colouring, which is how this card says
+   "on" everywhere else in it. Left to itself the browser ticks in its own blue,
+   which is a colour this palette does not have; the violet was tried and read as
+   a third accent on a card that only has two things to say. */
+.ez-strip-ask-skip input {
+  accent-color: #fff;
+  margin: 0;
+  cursor: pointer;
 }
 
 .ez-strip-action {

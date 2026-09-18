@@ -557,9 +557,16 @@ function escape(): void {
   // everything that was typed before the command, rather than throwing the
   // whole remark away.
   if (ui.popupBack?.()) return
+  // An open popup closes whatever the mode. It can be open with no mode armed:
+  // one rebuilt after an explore comes back whenever the round ends, which may
+  // be long after the mode was let go of - and checking the mode first left
+  // Escape refusing the one thing on screen it has always meant "close" for.
+  if (ui.popup) {
+    dismiss()
+    return
+  }
   if (mode === 'off') return
-  if (ui.popup) dismiss()
-  else exitToIdle()
+  exitToIdle()
 }
 
 /** `anchor` is re-evaluated on every repaint, so the popup tracks its subject
@@ -763,6 +770,24 @@ function openPopup(
     // A dismiss during the request already took this popup down, and whatever is
     // open now is not this submit's to close.
     if (ui.popup !== popup) return
+    // An explore does not end the comment it was armed from - it goes off to
+    // answer a question about it, and what it answers with belongs back in that
+    // sentence. So the comment is handed to the shell as a draft before the popup
+    // goes: the direction it carried is spent, the remark it was holding before
+    // `/explore` is what travels, and the shell rebuilds the popup here, at the
+    // same place and the same scroll, once the user has chosen or left. The route
+    // a pick takes when its popup does not survive a navigation - and this one
+    // does not survive on purpose. A round runs for a minute or more, with the
+    // page's markup swapped under it and the user scrolling through variants;
+    // a popup hidden in place through that comes back positioned against a page
+    // that has moved, and `rebuildPopup` is what finds the element again.
+    if (exploring && exploreTarget) {
+      setExploring(false)
+      const draft = exploreDraft(attach)
+      if (draft) post({ type: 'ez:explore-held', draft })
+      dismiss()
+      return
+    }
     // Stays in the current mode: the next annotation is usually right there.
     dismiss()
   }
@@ -905,7 +930,11 @@ const SETTLE_MS = 800
 function whenSubjectSettles(subject: DraftSubject, done: (target: Element | null) => void): void {
   const deadline = Date.now() + SETTLE_MS
   const attempt = (): void => {
-    const target = resolveSubject(subject)
+    const found = resolveSubject(subject)
+    // An element a variant is standing in for is out of layout: a popup placed
+    // against it lands in the corner. It counts as not here yet, and the swap
+    // being undone is what the wait is usually for.
+    const target = found?.hasAttribute(SWAPPED_ATTR) ? null : found
     if (target || Date.now() >= deadline) {
       done(target)
       return
@@ -960,6 +989,14 @@ function rebuildPopup(draft: DraftWire, subject: DraftSubject, target: Element |
         // looking at when they framed this, which a repaint would overwrite.
         ...(target && !box ? {} : { anchor: subject.anchor }),
       }),
+    null,
+    // The element this comment is about, so `/explore` is on offer again. A
+    // rebuilt popup used to come back without it, and every comment that had
+    // just been through one explore could not start another - which is the one
+    // thing a user with a variant in hand and a note to go with it wants next.
+    // A region has no single element to explore; `openPopup` already refuses a
+    // subject that is not an element, so only the box has to be kept out here.
+    box ? null : target,
   )
   ui.popupAttach?.restore(draft.body)
   showPopupNotice(lines)
@@ -1147,6 +1184,21 @@ function currentDraft(): DraftWire | null {
     // Read now rather than at popup-open: this is the view the user is leaving.
     subject: { ...popupSubject, scroll: { x: window.scrollX, y: window.scrollY } },
     body: normalizeDraft(ui.popupAttach.snapshot()),
+  }
+}
+
+/** The comment an explore was armed from, as data the shell can rebuild it
+ *  from. Not `currentDraft`: that one belongs to a pick, and an explore is not a
+ *  pick - it has no placeholder in the sentence, because what comes back is
+ *  appended rather than filled in. */
+function exploreDraft(attach: AttachController): DraftWire | null {
+  if (!popupSubject) return null
+  return {
+    id: `x${Date.now().toString(36)}`,
+    host: 'popup',
+    createdAt: Date.now(),
+    subject: { ...popupSubject, scroll: { x: window.scrollX, y: window.scrollY } },
+    body: normalizeDraft(attach.snapshot()),
   }
 }
 

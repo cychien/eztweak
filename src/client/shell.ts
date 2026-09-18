@@ -55,10 +55,11 @@ import {
   toggleDevice,
 } from './canvas-layout.js'
 import type { CanvasMetrics, Layout } from './canvas-layout.js'
-import type { DraftWire, NumberedRef, RefWire } from './draft.js'
+import type { AnchorWire, DraftWire, NumberedRef, RefWire } from './draft.js'
 import {
   bodyFromComment,
   fileMarker,
+  nextRefNumber,
   refChipText,
   refMarker,
   skillMarker,
@@ -125,7 +126,7 @@ interface ExploreWire {
   id: string
   chatId: string
   label: string
-  anchor: unknown
+  anchor: AnchorWire
   direction?: string
   status: 'generating' | 'done' | 'cancelled' | 'dismissed'
   variants: { id: string; name: string; html: string; note?: string }[]
@@ -145,6 +146,9 @@ interface SnapshotWire {
   conversation: ConversationWire[]
   agentOnline: boolean
   agentBusy: boolean
+  /** Something is waiting to go to the agent, with no turn started yet - a batch
+   *  behind a session still opening, or a branch's explore. */
+  agentQueued?: true
   agentProgress?: string
   acp?: AcpWire
   /** The conversations this review has had, newest first. ACP mode only. */
@@ -961,10 +965,236 @@ function select(round: ExploreWire, variantId: string | null): void {
   })
 }
 
+/** Signature of what the strip currently draws, on the same rule the queue uses:
+ *  an ACP turn broadcasts a snapshot per streamed chunk, and rebuilding the pills
+ *  on every one of them swaps a chip out from under the pointer between mousedown
+ *  and mouseup - and takes any card the strip has open with it. What the pills
+ *  draw is a handful of small objects, so stringifying them is cheaper than the
+ *  DOM work it saves. */
+let stripDrawn: string | null = null
+
 function paintStrip(): void {
   const rounds = liveExplores()
   strip.hidden = rounds.length === 0
+  const signature = JSON.stringify([currentChatId(), snapshot?.agentBusy ?? false, rounds])
+  if (signature === stripDrawn) return
+  stripDrawn = signature
   strip.replaceChildren(...rounds.map((round) => roundPill(round)))
+}
+
+/** Which conversation the review is reading, for the pills - a round's actions
+ *  depend on whether you are standing in the branch it belongs to. */
+function currentChatId(): string | null {
+  return snapshot?.chats?.find((c) => c.current)?.id ?? null
+}
+
+/** The user settled on one.
+ *
+ *  The round ends and the review comes out of the branch - `/explore/exit` does
+ *  both - and the markup rides back to the main line in the composer, as a
+ *  reference to the element carrying the answer attached to it. That is what the
+ *  round was for: what it produced is a picture of the thing, and building the
+ *  real one, in the project's own components and tokens, is the main line's work.
+ *
+ *  The page goes back to the real element on the way out. A stand-in left
+ *  standing would make it impossible to see whether the agent's work had landed. */
+async function adoptVariant(
+  round: ExploreWire,
+  variant: { id: string; name: string; html: string },
+): Promise<void> {
+  const ref: RefWire = {
+    anchor: round.anchor,
+    label: round.label,
+    variant: { name: variant.name, html: variant.html },
+  }
+  // Only the round the held comment is waiting on answers into it. A pick from
+  // some other round that happens to be live belongs to nobody's sentence, and
+  // goes to the sidebar the way a pick with no popup behind it does.
+  const held = exploreHold?.round === round.id ? exploreHold : null
+  if (held) held.leaving = true
+  const res = await api('/explore/exit', {
+    method: 'POST',
+    body: JSON.stringify({ id: round.id, variantId: variant.id }),
+  })
+  if (!res.ok) {
+    if (held) held.leaving = false
+    return
+  }
+  if (held) held.answer = ref
+  else {
+    noteAttach.insertRef(ref)
+    noteAttach.editable.focus()
+  }
+}
+
+/** The comment an explore was armed from, held as data while the round runs.
+ *
+ *  The overlay closes that popup when the explore is sent and hands its draft
+ *  here - the route a pick takes when its popup will not survive a navigation.
+ *  `frame` is where to rebuild it, and `round` is what it is waiting on, so a
+ *  round that ends by any route at all can give it back. Kept across the frame
+ *  reloading: the draft is data, and rebuilding it is the whole point. */
+let exploreHold: {
+  frame: string
+  draft: DraftWire
+  /** The annotate mode the comment was written in. The popup is that mode's
+   *  doing, so it comes back with it: a round runs long enough for the user to
+   *  have put the mode away meanwhile, and a popup standing with no mode armed
+   *  is half of the state they left, not the state they left. */
+  mode: Mode
+  /** What it is waiting on, once the start request has said. */
+  round?: string
+  /** The round has been on a snapshot at least once, so "gone" can mean gone. */
+  seen?: boolean
+  /** The strip's own way out of the round is in flight. */
+  leaving?: boolean
+  /** What that way out answered with: a pick, or `null` for none. */
+  answer?: RefWire | null
+} | null = null
+
+/** Give the round's ending back to the comment that asked for it.
+ *
+ *  The popup is rebuilt where it was - same element, same scroll - with the
+ *  chosen variant appended to the sentence as a reference, exactly the way a
+ *  picked element arrives. Left with nothing, it comes back as it was. A round
+ *  started with no comment behind it, or one whose frame has since gone, has
+ *  nowhere to rebuild, and then the sidebar's own composer is where a pick lands. */
+function endExploreIn(ref?: RefWire): void {
+  const held = exploreHold
+  // Let go here rather than later: the round can end while nothing is listening,
+  // and a hold nobody ever clears is a comment the user never sees again.
+  exploreHold = null
+  if (held && frames.has(held.frame)) {
+    // The mode first, the popup second - the same order `ez:ready` replays them
+    // in. `setMode` takes an open popup down with it, so a popup rebuilt before
+    // its mode arrived would be dismissed by the very message meant to restore
+    // the state around it. A mode that was off is left off: the overlay's echo
+    // then keeps the sidebar honest either way.
+    if (held.mode !== 'off') toFrame(held.frame, { type: 'ez:set-mode', mode: held.mode })
+    const body = ref
+      ? [...held.draft.body, { t: 'ref' as const, n: nextRefNumber(held.draft.body), ...ref }]
+      : held.draft.body
+    toFrame(held.frame, { type: 'ez:restore', draft: { ...held.draft, body } })
+    return
+  }
+  if (!ref) return
+  noteAttach.insertRef(ref)
+  noteAttach.editable.focus()
+}
+
+/** The one place the held comment is given back, run on every snapshot after the
+ *  page has been told what stands where.
+ *
+ *  A round can end without anyone pressing anything on the strip - one that
+ *  produced nothing is dismissed where it stands, a daemon restart settles every
+ *  round it finds - and it can end because the strip's own buttons asked. Both
+ *  reach here the same way: the round is gone from the snapshot. Delivering from
+ *  here, rather than from the button's own response, is what gets three
+ *  orderings right at once. The rebuild goes out after `paintVariants` has put
+ *  the real element back, so the popup is placed against something visible
+ *  rather than the zero-sized box a swapped-out element has. The snapshot saying
+ *  the round is gone can beat the button's response, so a pick in flight is
+ *  waited for instead of the comment coming back empty a beat early. And the id
+ *  arrives on the start request's response while the round arrives on a
+ *  snapshot, with nothing ordering the two - so "gone" only counts once the
+ *  round has been seen here at all. */
+function settleHold(): void {
+  const held = exploreHold
+  if (!held?.round) return
+  if (liveExplores().some((e) => e.id === held.round)) {
+    held.seen = true
+    return
+  }
+  if (!held.seen) return
+  if (held.leaving && held.answer === undefined) return
+  endExploreIn(held.answer ?? undefined)
+}
+
+/** Left with nothing. The round ends the same way it would with a pick, and the
+ *  comment it was armed from still comes back: a round that produced nothing
+ *  useful is no reason to lose what the user had already written. */
+async function leaveRound(round: ExploreWire): Promise<void> {
+  const held = exploreHold?.round === round.id ? exploreHold : null
+  if (held) held.leaving = true
+  const res = await api('/explore/exit', {
+    method: 'POST',
+    body: JSON.stringify({ id: round.id }),
+  })
+  if (!held) return
+  if (res.ok) held.answer = null
+  else held.leaving = false
+}
+
+/** The card the strip puts over its own buttons before an act that ends the
+ *  explore. One at a time, because there is one pointer and one decision. */
+let stripAsk: (() => void) | null = null
+
+function closeStripAsk(): void {
+  const close = stripAsk
+  stripAsk = null
+  close?.()
+}
+
+/** Ask on the strip, and run the act on a yes. Both of these leave the explore
+ *  behind, which is not something to discover afterwards - so the question is
+ *  put where the button is, and the answer can be put away for good. */
+function askOnStrip(
+  actions: HTMLElement,
+  offer: { key: string; body: string; go: string },
+  run: () => void,
+): void {
+  if (confirmSkipped(localStorage, offer.key)) {
+    run()
+    return
+  }
+  closeStripAsk()
+  const card = h('div', 'ez-strip-ask')
+  card.setAttribute('role', 'dialog')
+  card.setAttribute('aria-label', offer.go)
+  const skip = h('input') as HTMLInputElement
+  skip.type = 'checkbox'
+  const skipLabel = h('label', 'ez-strip-ask-skip')
+  skipLabel.append(skip, h('span', undefined, '不要再提示'))
+  const go = h('button', 'ez-strip-ask-go', offer.go)
+  const no = h('button', 'ez-strip-ask-no', '取消')
+  const row = h('div', 'ez-strip-ask-actions')
+  row.append(go, no)
+  card.append(h('div', undefined, offer.body), row, skipLabel)
+
+  // Closed by a press anywhere outside it, never by where focus went. Focus is
+  // the wrong signal for this card on macOS: a mousedown on a control does not
+  // focus it there, and a click on the checkbox's label blurs whatever had focus
+  // *as part of* forwarding the click to the box - so a focusout-based close shut
+  // the card in the instant before the tick landed, twice over, for two different
+  // reasons. Where the pointer went down is the question actually being asked.
+  const outside = (e: PointerEvent) => {
+    if (e.target instanceof Node && !card.contains(e.target)) done(false)
+  }
+  const done = (ok: boolean) => {
+    document.removeEventListener('pointerdown', outside, true)
+    card.remove()
+    stripAsk = null
+    // Only a yes is ever remembered - see `confirm-skip.ts`.
+    rememberConfirm(localStorage, offer.key, { ok, skip: skip.checked })
+    if (ok) run()
+  }
+  go.onclick = () => done(true)
+  no.onclick = () => done(false)
+  card.onkeydown = (e) => {
+    if (e.key !== 'Escape') return
+    e.stopPropagation()
+    done(false)
+  }
+  // Ticking the box leaves focus on the body - see above - which is where Escape
+  // would then go. Back onto the button that answers, so it still means "no".
+  skip.addEventListener('change', () => go.focus())
+  stripAsk = () => {
+    document.removeEventListener('pointerdown', outside, true)
+    card.remove()
+  }
+  document.addEventListener('pointerdown', outside, true)
+  actions.append(card)
+  go.focus()
 }
 
 function roundPill(round: ExploreWire): HTMLElement {
@@ -994,24 +1224,41 @@ function roundPill(round: ExploreWire): HTMLElement {
   }
   pill.append(chips)
 
+  // Two ways out, and they are the only two: take the one on the page with you,
+  // or leave with nothing. Both end the round - what a round is for is over once
+  // you have decided - so both ask first.
   const actions = h('div', 'ez-strip-actions')
-  const onBranch = snapshot?.chats?.find((c) => c.current)?.id === round.chatId
-  const parent = onBranch ? snapshot?.chats?.find((c) => c.id === round.chatId)?.parentChatId : null
-  if (parent) {
-    const back = h('button', 'ez-strip-action', '回主線')
-    back.title = '回到開始探索前的對話'
-    // Mid-turn the agent is still on this branch, and moving would abandon a
-    // turn the user can see running. The cancel chord is the way out of that.
-    back.disabled = !!snapshot?.agentBusy
-    back.onclick = () =>
-      void api('/acp/chat', { method: 'POST', body: JSON.stringify({ id: parent }) })
-    actions.append(back)
-  }
-  const close = h('button', 'ez-strip-action', '關閉')
-  close.title = '結束這一輪探索，頁面回到原本的樣子'
-  close.onclick = () =>
-    void api('/explore/dismiss', { method: 'POST', body: JSON.stringify({ id: round.id }) })
-  actions.append(close)
+  const chosen = round.variants.find((v) => v.id === round.selected)
+  const adopt = h('button', 'ez-strip-action', '選擇')
+  adopt.disabled = !chosen
+  adopt.title = chosen
+    ? `帶「${chosen.name}」回主對話，交給 agent 實作進專案`
+    : '先挑一個變體，才有東西可以帶回去'
+  adopt.onclick = () =>
+    askOnStrip(
+      actions,
+      {
+        key: 'explore-adopt',
+        body: '離開這一輪探索回到主對話。你選的版本會附在訊息上，交給 agent 實作進專案。',
+        go: '選擇',
+      },
+      () => void adoptVariant(round, chosen!),
+    )
+  actions.append(adopt)
+
+  const quit = h('button', 'ez-strip-action', '退出探索')
+  quit.title = '結束這一輪探索，回到主對話'
+  quit.onclick = () =>
+    askOnStrip(
+      actions,
+      {
+        key: 'explore-exit',
+        body: '離開這一輪探索回到主對話，頁面回到原本的樣子，這些變體不會留下。',
+        go: '退出探索',
+      },
+      () => void leaveRound(round),
+    )
+  actions.append(quit)
   pill.append(actions)
   return pill
 }
@@ -1973,12 +2220,35 @@ forkMore.append(h('span', undefined, '分支對話'), icon(ChevronDownIcon as Ic
 forkMore.title = '這條主線底下的分支對話'
 const morePicker = BRANCHES_REACHABLE ? branchPicker(forkMore, 'ez-fork-more-menu') : null
 
+/** Leaving a branch, which the review cannot come back into - see
+ *  `BRANCHES_REACHABLE`. Both ways out ask first, because both end the same two
+ *  things: the conversation, and whatever the agent is part-way through in it.
+ *
+ *  Asked rather than refused. The strip's way back used to grey itself out while
+ *  a turn ran, which answered the question by taking the choice away - and the
+ *  choice is the user's: they can see the turn running, and leaving it is a
+ *  perfectly ordinary thing to decide. */
+async function leaveBranch(toChatId: string): Promise<void> {
+  const ok = await askConfirm({
+    // Keyed on the act. The body says one clause more when a turn is running,
+    // but it is the same decision either way, so answering it once answers it.
+    key: 'leave-branch',
+    title: '確定要回主對話？',
+    body: snapshot?.agentBusy
+      ? '回去會立刻停下 agent，這一輪探索就此結束，之後無法再回到這個對話。'
+      : '這一輪探索就此結束，之後無法再回到這個對話。',
+    go: '回主對話',
+  })
+  if (!ok) return
+  await switchChat(toChatId)
+}
+
 forkRoot.onclick = () => {
   const chats = [...(snapshot?.chats ?? [])].reverse()
   const current = chats.find((c) => c.current)
   if (!current) return
   const root = rootOf(current, chats)
-  if (!root.current) void switchChat(root.id)
+  if (!root.current) void leaveBranch(root.id)
 }
 
 /** Which chat the thread is drawing, so the next render can tell whether the
@@ -3577,6 +3847,7 @@ function render(): void {
   paintLimit(s.acp)
   paintStrip()
   paintVariants()
+  settleHold()
   paintFork(s)
   pushThread(s)
   broadcast({ type: 'ez:can-explore', on: s.canExplore === true })
@@ -3650,7 +3921,14 @@ function render(): void {
   // A session opening counts as something to wait on. The composer takes a batch
   // through that window and holds it, and a thread that shows nothing meanwhile
   // is one where the send looks to have gone nowhere.
-  const waiting = s.agentBusy || s.acp?.state === 'starting'
+  //
+  // Only when something is actually waiting on it, though. Switching to another
+  // conversation opens a session too, and there the wait buys nothing: nobody
+  // asked for anything, so a pulse would be reporting the tool's own plumbing.
+  // `agentQueued` is the difference, and it is what makes an explore pulse - the
+  // branch is made with its prompt already waiting on the session.
+  const opening = s.acp?.state === 'starting' && !!s.agentQueued
+  const waiting = s.agentBusy || opening
   if (waiting && !livePlaced) convList.appendChild(liveTurnEl(s, prevRole))
   if (s.acp?.ask) convList.appendChild(acpAskEl(s.acp.ask))
   if (s.acp?.state === 'exited' && s.acp.error) {
@@ -4092,7 +4370,16 @@ window.addEventListener('message', (e: MessageEvent) => {
           references: data.references ?? [],
         }),
       })
-      if (!res.ok) stripNotice('這個 agent 現在無法執行探索')
+      if (!res.ok) {
+        // Nothing to wait for, so the comment comes straight back rather than
+        // staying hidden behind a round that never started.
+        stripNotice('這個 agent 現在無法執行探索')
+        endExploreIn()
+        return
+      }
+      // What the held comment is waiting on, so any ending at all can release it.
+      const { exploreId } = (await res.json()) as { exploreId?: string }
+      if (exploreHold && exploreId) exploreHold = { ...exploreHold, round: exploreId }
     })()
   }
   if (data?.type === 'ez:ready') {
@@ -4128,6 +4415,12 @@ window.addEventListener('message', (e: MessageEvent) => {
       now: Date.now(),
       frame: from,
     })
+  }
+  // The comment `/explore` was armed from, handed over before its popup closed.
+  // Which frame sent it matters: that is where it is rebuilt when the round ends,
+  // and the sidebar's own composer is the fallback for a frame that has gone.
+  if (data?.type === 'ez:explore-held' && from && data.draft) {
+    exploreHold = { frame: from, draft: data.draft, mode: annotateMode }
   }
   if (data?.type === 'ez:pick-armed' && data.pickId) {
     dispatchPick({
