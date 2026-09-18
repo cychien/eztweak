@@ -388,3 +388,185 @@ test('a file dropped by an edit is left for the sweep, not deleted', () => {
   assert.equal(existsSync(store.attachmentPath(saved)), true)
   assert.equal(saved.id in store.attachmentIndex, true)
 })
+
+// ------------------------------------------------------------------- chats
+
+test('a store with no chats grows one, and everything logged belongs to it', () => {
+  const store = new SessionStore('http://localhost:7001', PROJECT)
+  store.appendConversation({ role: 'user', text: 'first', ts: 1 })
+  store.appendConversation({ role: 'agent', text: 'reply', ts: 2 })
+
+  const chats = store.chats
+  assert.equal(chats.length, 1)
+  assert.equal(store.currentChat.id, chats[0]!.id)
+  assert.deepEqual(
+    store.visibleConversation.map((e) => e.text),
+    ['first', 'reply'],
+  )
+  // Written down, not recomputed on every read.
+  assert.equal(store.session.chats?.length, 1)
+})
+
+test('a new chat hides the old thread without deleting a word of it', () => {
+  const store = new SessionStore('http://localhost:7002', PROJECT)
+  store.appendConversation({ role: 'user', text: 'old', ts: 1 })
+  const before = store.currentChat.id
+
+  const fresh = store.startChat()
+  assert.notEqual(fresh.id, before)
+  assert.deepEqual(
+    store.visibleConversation.map((e) => e.text),
+    [],
+    'the window moved',
+  )
+  assert.equal(store.conversation.length, 1, 'the log did not')
+
+  store.appendConversation({ role: 'user', text: 'new', ts: 2 })
+  assert.deepEqual(
+    store.visibleConversation.map((e) => e.text),
+    ['new'],
+  )
+})
+
+// The reason the window is a filter on chat rather than a time range: go back to
+// an earlier conversation and its new entries are stamped later than the chat
+// that followed it, so any date-based window would leak one into the other.
+test('an earlier chat picked back up collects entries stamped after the next one', () => {
+  const store = new SessionStore('http://localhost:7003', PROJECT)
+  const first = store.currentChat.id
+  store.appendConversation({ role: 'user', text: 'in first', ts: 1 })
+  const second = store.startChat().id
+  store.appendConversation({ role: 'user', text: 'in second', ts: 2 })
+
+  assert.equal(store.switchChat(first)?.id, first)
+  store.appendConversation({ role: 'user', text: 'back in first', ts: 3 })
+  assert.deepEqual(
+    store.visibleConversation.map((e) => e.text),
+    ['in first', 'back in first'],
+  )
+
+  assert.equal(store.switchChat(second)?.id, second)
+  assert.deepEqual(
+    store.visibleConversation.map((e) => e.text),
+    ['in second'],
+  )
+  assert.equal(store.switchChat('nonesuch'), null)
+})
+
+// A session recorded before chats existed. Its `conversationClear` was the whole
+// window, so the chat built from it has to draw exactly what it drew before -
+// including hiding what the /new of the day hid.
+test('a pre-chats session migrates its conversationClear into the first chat', () => {
+  const store = new SessionStore('http://localhost:7004', PROJECT)
+  const dir = store.dir
+
+  // Rewind the store to what a pre-chats daemon would have written: a clear
+  // point, no chats, and entries with no chat stamped on them.
+  const session = JSON.parse(readFileSync(join(dir, 'session.json'), 'utf8'))
+  delete session.chats
+  delete session.currentChatId
+  session.conversationClear = { at: 200 }
+  writeFileSync(join(dir, 'session.json'), JSON.stringify(session))
+  writeFileSync(
+    join(dir, 'conversation.json'),
+    JSON.stringify([
+      { role: 'user', text: 'before the clear', ts: 100 },
+      { role: 'user', text: 'after the clear', ts: 300 },
+    ]),
+  )
+
+  const reopened = new SessionStore('http://localhost:7004', PROJECT)
+  assert.equal(reopened.chats.length, 1)
+  assert.equal(reopened.chats[0]!.startedAt, 200, 'the clear point became the chat')
+  assert.deepEqual(
+    reopened.visibleConversation.map((e) => e.text),
+    ['after the clear'],
+    'an unstamped entry before the clear stays hidden',
+  )
+
+  // And a second chat must not adopt the unstamped entries.
+  reopened.startChat()
+  assert.deepEqual(
+    reopened.visibleConversation.map((e) => e.text),
+    [],
+  )
+})
+
+test('the chat remembers the agent session backing it', () => {
+  const store = new SessionStore('http://localhost:7005', PROJECT)
+  assert.equal(store.currentChat.acpSessionId, undefined)
+  store.setChatSession('acp-1', 'claude')
+  assert.equal(store.currentChat.acpSessionId, 'acp-1')
+
+  // A resume the agent could not honour lands the chat on a different session.
+  store.setChatSession('acp-2', 'claude')
+  assert.equal(store.currentChat.acpSessionId, 'acp-2')
+
+  // A fresh chat starts with none, and the old one keeps its own.
+  const old = store.currentChat.id
+  store.startChat()
+  assert.equal(store.currentChat.acpSessionId, undefined)
+  assert.equal(store.chats.find((c) => c.id === old)?.acpSessionId, 'acp-2')
+})
+
+// A session id is only meaningful to the agent that issued it. Handing Codex a
+// Claude id gets "no rollout found for thread id ..." - so it is never offered.
+test('a session is only offered back to the agent that made it', () => {
+  const store = new SessionStore('http://localhost:7008', PROJECT)
+  store.setChatSession('claude-session', 'claude')
+
+  assert.equal(store.resumableSessionId('claude'), 'claude-session')
+  assert.equal(store.resumableSessionId('codex'), undefined, "another agent's id is not offered")
+
+  // Switching to that agent and back finds the original conversation again.
+  store.setChatSession('codex-session', 'codex')
+  assert.equal(store.resumableSessionId('codex'), 'codex-session')
+  assert.equal(store.resumableSessionId('claude'), undefined)
+})
+
+test('a chat that never reached an agent has nothing to resume', () => {
+  const store = new SessionStore('http://localhost:7009', PROJECT)
+  assert.equal(store.resumableSessionId('claude'), undefined)
+})
+
+// The regression this pins: an empty chat used to be dropped from the list, so a
+// `/new` followed by a look at an older conversation made that older one the
+// newest entry - and the shell, which reads "an earlier conversation is showing"
+// off exactly that, stopped saying so in the one state it exists to report.
+test('an empty chat still appears in the list, so position keeps its meaning', () => {
+  const store = new SessionStore('http://localhost:7006', PROJECT)
+  const first = store.currentChat.id
+  store.appendConversation({ role: 'user', text: 'said something', ts: 1 })
+  const fresh = store.startChat().id
+
+  assert.deepEqual(
+    store.chatSummaries().map((c) => [c.id, c.entries, c.current]),
+    [
+      [first, 1, false],
+      [fresh, 0, true],
+    ],
+  )
+
+  store.switchChat(first)
+  const onOld = store.chatSummaries()
+  assert.equal(onOld.length, 2, 'the empty chat must not vanish when it stops being current')
+  assert.equal(onOld.at(-1)!.current, false, 'so an earlier chat showing is still visible as that')
+})
+
+test('asking for a fresh chat while already on an empty one has nothing to do', () => {
+  const store = new SessionStore('http://localhost:7007', PROJECT)
+  assert.equal(store.onEmptyNewestChat, true, 'a brand new review is already fresh')
+
+  store.appendConversation({ role: 'user', text: 'x', ts: 1 })
+  assert.equal(store.onEmptyNewestChat, false)
+
+  const fresh = store.startChat().id
+  assert.equal(store.onEmptyNewestChat, true)
+
+  // Showing an earlier chat is not "on a fresh one", even though the newest is
+  // still empty - starting over from here has somewhere to go.
+  store.switchChat(store.chats[0]!.id)
+  assert.equal(store.onEmptyNewestChat, false)
+  assert.equal(store.switchChat(fresh)?.id, fresh)
+  assert.equal(store.onEmptyNewestChat, true)
+})

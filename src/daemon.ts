@@ -1,9 +1,10 @@
 import { EventEmitter } from 'node:events'
-import { readFileSync } from 'node:fs'
+import { accessSync, constants, readFileSync } from 'node:fs'
 import { type Server, createServer } from 'node:http'
-import { dirname, join } from 'node:path'
+import { delimiter, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { Socket } from 'node:net'
+import type { SessionConfigOption } from '@agentclientprotocol/sdk'
 import express, { type ErrorRequestHandler, type Response, Router } from 'express'
 import { createProxyMiddleware, responseInterceptor } from 'http-proxy-middleware'
 import {
@@ -17,17 +18,42 @@ import {
   controlPortRange,
 } from './constants.js'
 import { AcpAgent } from './acp-agent.js'
+import { chatTitles, worthListing } from './chat-titles.js'
+import { readLimit, rememberedLimit, rememberLimit } from './usage-limit.js'
 import type { AcpSnapshot } from './acp-agent.js'
+import { type AcpConfigValue, configLabel, configValueName } from './acp-config.js'
+import { AGENT_PROFILES, type AgentProfile, agentBrandFor, agentProfileFor } from './agents.js'
+import { clearAgentRecord, reapOrphanedAgents } from './agent-children.js'
 import { attachmentIds, parseReferences } from './anchor.js'
 import { injectOverlay, wantsHtml } from './inject.js'
 import { toAgentAttachments, toAgentItem, toConversationItem } from './label.js'
 import type { Annotation, PollResult, SessionEndedBy } from './protocol.js'
+import { listSkills, skillPrefix, spendSkillMarkers } from './skills.js'
 import { SessionStore, listRestorableSessions, newId } from './store.js'
 import { clearRegistry, launchDaemon, probeDaemon, readRegistry, writeRegistry } from './registry.js'
 import { installVersion, pruneInstalledVersions } from './installer.js'
 import { latestVersion, updateChecksDisabled } from './update-check.js'
 import { Updater, type UpdateWire } from './updater.js'
 import { versionGate } from './version.js'
+
+/** Whether a profile's CLI is on the PATH.
+ *
+ *  Advisory only, and lives here rather than beside the profiles because the
+ *  shell imports those too - and a `node:fs` call reached through that import
+ *  would end up in the browser bundle. */
+function agentInstalled(profile: AgentProfile, env = process.env): boolean {
+  return (env.PATH ?? '')
+    .split(delimiter)
+    .filter(Boolean)
+    .some((dir) => {
+      try {
+        accessSync(join(dir, profile.binary), constants.X_OK)
+        return true
+      } catch {
+        return false
+      }
+    })
+}
 
 const distDir = dirname(fileURLToPath(import.meta.url))
 const asset = (name: string) => readFileSync(join(distDir, name))
@@ -79,9 +105,23 @@ interface SnapshotWire {
   activeBatchId?: string
   /** SPIKE: present when this session drives its agent over ACP. */
   acp?: AcpSnapshot
+  /** The conversations this review has had, newest first, and which one is shown.
+   *  Only ever sent in ACP mode: a poll-mode agent owns its own context and
+   *  nothing here can move it. */
+  chats?: ChatWire[]
   /** A newer version or a stale skill to offer, and the update's progress once
    *  taken up. Daemon-wide: every session's shell shows the same one. */
   update?: UpdateWire
+}
+
+/** One conversation as the picker draws it. The count is what tells two of them
+ *  apart when neither has anything else to go on - a chat is not named, it is
+ *  when it happened and how much was said. */
+interface ChatWire {
+  id: string
+  startedAt: number
+  entries: number
+  current: boolean
 }
 
 /** Bind `app` on the loopback at `port`, or reject. Deliberately not
@@ -121,8 +161,31 @@ async function listenOn(app: express.Express, candidates: number[]): Promise<Ser
 /** The batch as one prompt turn. The JSON is exactly what `poll` prints, so an
  *  agent that knows the skill reads it unchanged; the preamble covers one that
  *  has never seen eztweak. */
-function acpPrompt(feedback: Extract<PollResult, { type: 'feedback' }>): string {
+function acpPrompt(
+  feedback: Extract<PollResult, { type: 'feedback' }>,
+  skills: string[],
+  agent: string,
+): string {
+  // The markers the composer left behind, spent now that the agent is known. The
+  // record keeps `[skill n]`, which belongs to nobody; what goes over the wire is
+  // the name in the language this agent reads.
+  const named = (text: string | null): string | null =>
+    text === null ? null : spendSkillMarkers(text, skills, agent)
+  const spoken: typeof feedback = {
+    ...feedback,
+    note: named(feedback.note),
+    items: feedback.items.map((item) => ({ ...item, comment: named(item.comment) ?? item.comment })),
+  }
   return [
+    // The first one, hoisted. The agent expands a leading slash command itself,
+    // so this is an invocation rather than a request to consider one - and its
+    // own line, because the expansion takes the rest of the first line as the
+    // command's argument. Only the first: a second leading command is swallowed
+    // as that argument, measured against the real agent, which read two as
+    // "invoke alpha-probe with a `/beta-probe` argument" and ran neither. The
+    // rest still reach the agent, named in the user's own sentence below, where
+    // they read as what they are - something the user asked for.
+    ...(skills.length ? [`${skillPrefix(agent)}${skills[0]}`, ''] : []),
     'The user reviewed the running app in their browser and sent this feedback batch.',
     'Each item resolves to source: trust `anchor.source` (file:line) when present, else',
     'use `anchor.components` / `anchor.section` / `anchor.selector` / `anchor.text`.',
@@ -130,13 +193,18 @@ function acpPrompt(feedback: Extract<PollResult, { type: 'feedback' }>): string 
     '`[ref n]` names the entry in `references` whose `n` matches.',
     'Apply every item, then reply with what you changed, item by item, one short line each.',
     '',
-    JSON.stringify(feedback, null, 2),
+    JSON.stringify(spoken, null, 2),
   ].join('\n')
 }
 
 /** Why the turn stopped, for the thread. Only ever shown for a stop the user did
  *  not get a reply out of - `end_turn` is the normal one and says nothing. The
  *  raw reason is kept in the fallback: an unmapped stop is still worth naming. */
+/** A turn that ran to its own end without a word. Not an error - an agent that
+ *  only ran tools, or whose skill did its work silently, has finished properly -
+ *  so this states what happened rather than reporting a fault. */
+const SAID_NOTHING_NOTE = '這一輪結束了，agent 沒有回覆內容'
+
 function turnEndNote(stopReason: string): string {
   switch (stopReason) {
     case 'cancelled':
@@ -157,6 +225,34 @@ function turnEndNote(stopReason: string): string {
  *  words, because it is the same event seen from either side of it. */
 const AGENT_RESTARTED_NOTE = '已開啟新 session，之前的對話不會延續'
 
+/** What the thread is told when the review changes agent. Names the one it moved
+ *  to, because the thread above belongs to a different one and the reader needs
+ *  to know which. */
+function agentSwitchNote(command: string): string {
+  return `已改用 ${agentProfileFor(command)?.name ?? command}，這是新的對話`
+}
+
+/** A pick the user made, for the thread.
+ *
+ *  Recorded because a reply's worth is not separable from which model wrote it:
+ *  a thread read back a month later without the switches in it says three
+ *  answers came from one agent when they came from three. It also happens to be
+ *  the only place a mode change becomes visible, and selecting some models
+ *  changes the mode as a side effect.
+ *
+ *  Every switch gets a line, including a run of them. Collapsing a run was the
+ *  first instinct and it is wrong here: the log is append-only and stamped in
+ *  real time - that is what makes it the record - and rewriting the last entry
+ *  to tidy the display would trade the property for the tidying. A deliberate
+ *  keystroke is also not the kind of thing that arrives in floods; the note this
+ *  sits beside is de-duplicated because a dev daemon restarts on every file save,
+ *  which is a machine repeating itself, not a person changing their mind. */
+function configChangeNote(option: SessionConfigOption, value: AcpConfigValue): string {
+  const label = configLabel(option)
+  if (typeof value === 'boolean') return `${label}已${value ? '開啟' : '關閉'}`
+  return `已切換${label}：${configValueName(option, value)}`
+}
+
 class SessionRuntime {
   readonly store: SessionStore
   readonly bus = new EventEmitter()
@@ -174,6 +270,14 @@ class SessionRuntime {
    *  agent comes back - it tracks `agentBusy`, except that `/agent/progress` can
    *  raise that flag with no batch behind it at all. */
   private activeBatch: string | null = null
+  /** The skill the batch being delivered asked for. Read out of the outbox at
+   *  delivery time rather than carried on the poll payload: `PollResult` is the
+   *  portable CLI contract, and a slash command is meaningless to an agent that
+   *  is not the one expanding it. */
+  private activeSkills: string[] = []
+  /** The agent-side session this review is on right now, recorded against the
+   *  chat only once it has taken a turn. */
+  private liveSession: string | null = null
   private agentProgress: string | null = null
   /** SPIKE: the ACP-driven agent, when this session owns one. */
   private acp: AcpAgent | null = null
@@ -228,9 +332,17 @@ class SessionRuntime {
       agentBusy: this.agentBusy,
       ...(this.agentProgress ? { agentProgress: this.agentProgress } : {}),
       ...(this.agentBusy && this.activeBatch ? { activeBatchId: this.activeBatch } : {}),
-      ...(this.acp ? { acp: this.acp.snapshot() } : {}),
+      ...(this.acp ? { acp: this.acp.snapshot(), chats: this.chatsWire() } : {}),
       ...(update ? { update } : {}),
     }
+  }
+
+  /** The chat list as the shell draws it: newest first, because that is the one
+   *  a review is normally on. The projection itself is the store's - it shares the
+   *  entry-belongs-to-chat rule with the thread window, which is the only way the
+   *  two can agree. */
+  private chatsWire(): ChatWire[] {
+    return this.store.chatSummaries().reverse()
   }
 
   broadcast(): void {
@@ -238,16 +350,23 @@ class SessionRuntime {
     for (const res of this.sseClients) res.write(data)
   }
 
-  /** Bring back the agent a previous daemon was driving. Its context died with
-   *  that daemon, and the batch it was on comes round again unacked, so the one
-   *  thing owed here is telling the thread that the reply will not remember -
-   *  which is what the update card said would happen, in the same words. */
+  /** Bring back the agent a previous daemon was driving.
+   *
+   *  Nothing is said to the thread here any more. The agent is asked to resume the
+   *  conversation this review was already having, and whether it can is its answer
+   *  to give - so the note about a lost context is written from `onSessionOpen`,
+   *  by what actually happened, rather than from here by assuming the worst. */
   restoreAcpAgent(command: string): void {
     this.attachAcpAgent(command)
-    // Only when there is context to have lost, and only once per loss: an empty
-    // thread had none, and a restart that follows another with nothing said in
-    // between is the same loss reported twice. A dev daemon restarts on every
-    // save, which is what makes both cases the common ones.
+  }
+
+  /** The thread is told its agent no longer remembers what came before.
+   *
+   *  Only when there is context to have lost, and only once per loss: an empty
+   *  thread had none, and a restart that follows another with nothing said in
+   *  between is the same loss reported twice. A dev daemon restarts on every save,
+   *  which is what makes both cases the common ones. */
+  private noteContextLost(): void {
     const thread = this.store.visibleConversation
     const last = thread.at(-1)
     if (thread.length === 0 || last?.text === AGENT_RESTARTED_NOTE) return
@@ -256,6 +375,44 @@ class SessionRuntime {
       text: AGENT_RESTARTED_NOTE,
       ts: Date.now(),
     })
+  }
+
+  /** Drive this review with a different agent.
+   *
+   *  Always into a fresh conversation, because a session id belongs to the agent
+   *  that issued it: Claude keeps its conversations in one store and Codex in
+   *  another, and neither can resolve the other's. There is no protocol for
+   *  handing a conversation over, so the new agent starts knowing nothing - and
+   *  a chat is what a *conversation* is here, so it gets its own.
+   *
+   *  Nothing is lost that eztweak owns. Every earlier chat stays in the picker
+   *  with the agent that had it, and switching back finds that conversation
+   *  again, resumable by the agent that remembers it. */
+  switchAcpAgent(command: string): boolean {
+    if (!command.trim()) return false
+    if (this.acp?.snapshot().agent === command && this.acp.snapshot().state !== 'exited') {
+      return true
+    }
+    this.acp?.stop()
+    this.acp = null
+    this.agentBusy = false
+    this.activeBatch = null
+    this.activeSkills = []
+    this.agentProgress = null
+    // Anything the old agent had not finished with. It is not coming back to
+    // them, and the new agent was never asked.
+    for (const id of this.store.pendingBatchIds()) this.store.ack(id)
+    // Before the agent starts, so the session it opens is recorded against the
+    // new chat rather than against the one the old agent was on.
+    if (!this.store.onEmptyNewestChat) this.store.startChat()
+    this.store.appendConversation({
+      role: 'system',
+      text: agentSwitchNote(command),
+      ts: Date.now(),
+    })
+    this.attachAcpAgent(command)
+    this.broadcast()
+    return true
   }
 
   /** SPIKE: attach an ACP-driven agent to this session. Replaces a dead one;
@@ -268,6 +425,11 @@ class SessionRuntime {
     this.acp = new AcpAgent({
       command,
       cwd: this.project,
+      // The figure outlives the process that was told it: it only ever arrives
+      // pushed, so a daemon that forgot it would show nothing until the review's
+      // next turn.
+      rememberedLimit: () => rememberedLimit(command),
+      onLimitChange: (limit) => rememberLimit(command, limit),
       // Delivery rides on every state change: the moment the agent first goes
       // idle - or comes back idle - whatever is queued goes out.
       onChange: () => {
@@ -275,8 +437,19 @@ class SessionRuntime {
         this.broadcast()
       },
       onTurnEnd: (text, stopReason) => {
+        // Now, and not when the session opened. A session with no turns has no
+        // transcript, so it cannot be resumed - recording one at open time meant
+        // that two restarts with nothing said in between replaced a resumable
+        // session with an unresumable one and lost the conversation that had the
+        // content. A dev daemon restarts on every file save, which is exactly
+        // where that happened.
+        if (this.liveSession) this.store.setChatSession(this.liveSession, command)
+        // A turn is the only thing that moves the account's usage, so it is the
+        // cue to ask again. Free on both agents, and throttled anyway.
+        this.refreshLimit(command)
         this.agentBusy = false
         this.agentProgress = null
+        this.activeSkills = []
         // The batch this turn answered, read before it is cleared. Stamping it is
         // what lets the thread draw the reply under its own question rather than
         // under whatever the user typed while the turn was running.
@@ -288,10 +461,16 @@ class SessionRuntime {
         if (text) {
           this.store.appendConversation({ role: 'agent', text, ts: Date.now(), ...answers })
         }
-        if (stopReason !== 'end_turn') {
+        // Every turn leaves something behind. A turn that ends well and says
+        // nothing used to leave nothing at all: the user's message sat there with
+        // no reply and no explanation, which reads as a turn still running long
+        // after it stopped - the one thing the thread must never do, because
+        // there is no other way to tell waiting from finished.
+        const note = stopReason === 'end_turn' ? (text ? null : SAID_NOTHING_NOTE) : turnEndNote(stopReason)
+        if (note) {
           this.store.appendConversation({
             role: 'system',
-            text: turnEndNote(stopReason),
+            text: note,
             ts: Date.now(),
             ...answers,
           })
@@ -306,14 +485,80 @@ class SessionRuntime {
       onExit: () => {
         this.agentBusy = false
         this.activeBatch = null
+        this.activeSkills = []
         this.broadcast()
       },
+      resumeSessionId: () => this.store.resumableSessionId(command),
+      onSessionOpen: (sessionId, how) => {
+        const wanted = this.store.resumableSessionId(command)
+        // Held, not recorded. A session is only worth remembering once it has
+        // said something - see `onTurnEnd`.
+        this.liveSession = sessionId
+        // The conversation was there to be picked up and the agent could not do
+        // it: a transcript that has been deleted, or an agent that does not do
+        // resume at all. That is the one case the thread has to hear about, and
+        // the only one - a chat that never had a session had nothing to lose.
+        if (wanted && how === 'new') this.noteContextLost()
+        this.broadcast()
+      },
+      onModeChange: (name) => {
+        this.store.appendConversation({
+          role: 'system',
+          text: `agent 把權限模式改成了「${name}」`,
+          ts: Date.now(),
+        })
+        this.broadcast()
+      },
+      pinnedConfig: () => this.store.session.agentConfig ?? {},
+      onConfigChange: (configId, value, option) => {
+        this.store.setAgentConfig(configId, value)
+        this.store.appendConversation({
+          role: 'system',
+          text: configChangeNote(option, value),
+          ts: Date.now(),
+        })
+      },
     })
+    this.refreshLimit(command)
     return true
+  }
+
+  /** The figure, asked for rather than waited on.
+   *
+   *  Both agents answer this for free - a local command on one, a local RPC on
+   *  the other - so it is simply asked whenever the answer could have changed:
+   *  when the agent starts, and at the end of every turn, a turn being the only
+   *  thing that moves an account's usage. `readLimit` throttles it.
+   *
+   *  Fired and forgotten: it is a line of text arriving late, and nothing waits
+   *  on it. */
+  private refreshLimit(command: string): void {
+    const agent = this.acp
+    void readLimit(command)
+      .then((limit) => {
+        // The agent may have been swapped out while this was in flight, and the
+        // figure would then describe an account nobody is looking at.
+        if (!limit || !agent || this.acp !== agent) return
+        rememberLimit(command, limit)
+        agent.seedLimit(limit)
+      })
+      .catch(() => {
+        /* best effort - the line keeps whatever it last had */
+      })
   }
 
   answerAcp(id: string, answers: Record<string, string>): boolean {
     return this.acp?.answer(id, answers) ?? false
+  }
+
+  /** The user picked a model, an effort level, a mode - whatever this agent
+   *  offers. Awaited, because the answer carries the reshaped option set and the
+   *  broadcast that follows is what the picker redraws from. */
+  async setAcpConfig(configId: string, value: AcpConfigValue): Promise<boolean> {
+    if (!this.acp) return false
+    if (!(await this.acp.setConfigOption(configId, value))) return false
+    this.broadcast()
+    return true
   }
 
   /** SPIKE: stop the turn the agent is in the middle of. The turn's own end does
@@ -323,7 +568,7 @@ class SessionRuntime {
     return this.acp?.cancelTurn() ?? false
   }
 
-  /** SPIKE: drop the agent's context and carry on in a fresh ACP session.
+  /** Carry on in a fresh conversation.
    *
    *  The shell shows an empty thread afterwards, because that is what "new chat"
    *  means to the person who asked for one - a notice explaining that the history
@@ -331,16 +576,50 @@ class SessionRuntime {
    *  either way: it is the record of the review, and windowing it costs nothing
    *  while deleting it would cost the only copy. */
   newAcpChat(): boolean {
-    if (!this.acp?.newChat()) return false
+    // Already on a fresh one. Asking again is asking for what is already there,
+    // and honouring it literally would pile up empty conversations in the picker
+    // and throw away a session that has nothing to throw away.
+    if (this.store.onEmptyNewestChat) return !!this.acp
+    return this.moveToChat(() => this.store.startChat().id)
+  }
+
+
+
+  /** Show an earlier conversation and put the agent back on it. */
+  switchAcpChat(id: string): boolean {
+    if (!this.store.chats.some((c) => c.id === id)) return false
+    if (id === this.store.currentChat.id) return true
+    return this.moveToChat(() => this.store.switchChat(id)?.id)
+  }
+
+  /** Move the review onto another conversation and the agent with it.
+   *
+   *  The store moves first and the agent second, because what the agent opens is
+   *  read back off the store: a chat with a session id is resumed, one without
+   *  starts fresh. Ordered the other way it would reopen the conversation it was
+   *  already on.
+   *
+   *  A failure to move the store leaves the agent alone; a refusal from the agent
+   *  puts the store back, because a thread showing one conversation while the
+   *  agent is on another is the one state nothing downstream can make sense of. */
+  private moveToChat(move: () => string | undefined): boolean {
+    if (!this.acp) return false
+    const from = this.store.currentChat.id
+    const to = move()
+    if (!to) return false
+    if (!this.acp.reopenSession()) {
+      this.store.switchChat(from)
+      return false
+    }
     this.agentBusy = false
     this.activeBatch = null
+    this.activeSkills = []
     this.agentProgress = null
     // Everything the agent had not finished with, not just the turn it was on: the
-    // one in flight died with its session, and the ones queued behind it were
-    // asked of a context the user has just said to start over from. Acking is what
-    // stops the fresh session being handed them the moment it goes idle.
+    // one in flight went with the session it was asked of, and the ones queued
+    // behind it were asked of a conversation the review has just moved off.
+    // Acking is what stops the session that opens next being handed them.
     for (const id of this.store.pendingBatchIds()) this.store.ack(id)
-    this.store.clearConversation()
     this.broadcast()
     return true
   }
@@ -356,7 +635,7 @@ class SessionRuntime {
       this.acp = null
       return
     }
-    this.acp.prompt(acpPrompt(outcome))
+    this.acp.prompt(acpPrompt(outcome, this.activeSkills, this.acp.snapshot().agent))
   }
 
   private wakePollers(): void {
@@ -377,6 +656,7 @@ class SessionRuntime {
     this.store.markDelivered(batch.batchId)
     this.agentBusy = true
     this.activeBatch = batch.batchId
+    this.activeSkills = batch.skills ?? []
     const attachments = toAgentAttachments(batch.attachments, this.store)
     return {
       type: 'feedback',
@@ -557,7 +837,18 @@ class SessionRuntime {
       if (!files) return res.status(400).json({ error: 'unknown attachment id' })
       const refs = parseReferences(req.body?.references)
       if (!refs) return res.status(400).json({ error: 'references must be an array of anchors' })
-      const batch = this.store.sendBatch(req.body?.note ?? null, files, refs)
+      const skills = Array.isArray(req.body?.skills)
+        ? (req.body.skills as unknown[]).filter((v): v is string => typeof v === 'string')
+        : []
+      // Every one checked against what is actually on disk: a name becomes a
+      // command in a prompt, and a name nobody vetted is a line of the user's
+      // text being handed to the agent as an instruction. Checked as a set, so a
+      // batch naming the same skill twice costs one read rather than two.
+      const known = new Set(listSkills(this.project).map((s) => s.name))
+      if (skills.some((name) => !known.has(name))) {
+        return res.status(400).json({ error: 'unknown skill' })
+      }
+      const batch = this.store.sendBatch(req.body?.note ?? null, files, refs, skills)
       if (!batch) return res.status(400).json({ error: 'nothing to send' })
       this.store.appendConversation({
         role: 'user',
@@ -571,6 +862,7 @@ class SessionRuntime {
         ...(batch.references?.length
           ? { references: batch.references.map((r) => ({ n: r.n, label: r.label })) }
           : {}),
+        ...(batch.skills?.length ? { skills: batch.skills } : {}),
       })
       if (this.acp) this.deliverToAcp()
       this.wakePollers()
@@ -596,6 +888,116 @@ class SessionRuntime {
         return res.status(409).json({ error: 'the agent is not in the middle of a turn' })
       }
       this.broadcast()
+      res.json({ ok: true })
+    })
+
+    // The user set one of the agent's config options - which model to carry on
+    // with, how hard to think, which mode to be in.
+    api.post('/acp/config', (req, res) => {
+      const configId = String(req.body?.configId ?? '')
+      const value = req.body?.value
+      if (!configId || (typeof value !== 'string' && typeof value !== 'boolean')) {
+        return res
+          .status(400)
+          .json({ error: 'configId and a string or boolean value are required' })
+      }
+      // The agent can refuse - a value it no longer offers, or a hook that blocks
+      // the switch - and its refusal is not this daemon's fault, so it travels as
+      // the conflict it is rather than as a 500.
+      this.setAcpConfig(configId, value).then(
+        (ok) =>
+          ok
+            ? res.json({ ok: true })
+            : res.status(409).json({ error: 'that option cannot be set right now' }),
+        (err: unknown) =>
+          res
+            .status(409)
+            .json({ error: err instanceof Error ? err.message : 'the agent refused the change' }),
+      )
+    })
+
+    // The agents this review can be driven by, and which one is on.
+    api.get('/acp/agents', (_req, res) => {
+      const running = this.acp?.snapshot().agent
+      res.json({
+        agents: AGENT_PROFILES.map((profile) => ({
+          id: profile.id,
+          name: profile.name,
+          installed: agentInstalled(profile),
+          current: profile.command === running,
+        })),
+      })
+    })
+
+    // Drive the review with a different agent. Always a new conversation - the
+    // shell says so before it asks for this.
+    api.post('/acp/agent', (req, res) => {
+      const id = String(req.body?.id ?? '')
+      const profile = AGENT_PROFILES.find((p) => p.id === id)
+      // By id, never by a command from the wire: this starts a process.
+      if (!profile) return res.status(400).json({ error: 'unknown agent' })
+      if (!this.acp) {
+        return res.status(409).json({ error: 'this review is not driving an agent' })
+      }
+      if (!this.switchAcpAgent(profile.command)) {
+        return res.status(409).json({ error: 'that agent cannot be started right now' })
+      }
+      res.json({ ok: true })
+    })
+
+    // The skills this project can ask the agent to run. Read on request rather
+    // than carried in the snapshot: the snapshot goes out on every streamed
+    // chunk, and this reads the disk.
+    api.get('/acp/skills', (_req, res) => {
+      res.json({ skills: listSkills(this.project) })
+    })
+
+    // Show an earlier conversation and put the agent back on it.
+    // The conversations this review has had, named. Fetched when the picker is
+    // opened rather than ridden along on every broadcast: naming them reaches
+    // outside this process - a transcript on disk, a call to codex - and a turn
+    // streaming chunks must not pay for that a hundred times a second.
+    api.get('/acp/chats', async (_req, res) => {
+      const summaries = this.store.chatSummaries()
+      const command = this.acp?.snapshot().agent ?? ''
+      let titles = new Map<string, string>()
+      try {
+        titles = await chatTitles(summaries, command, this.project)
+      } catch {
+        /* a picker of timestamps still works */
+      }
+      res.json({
+        chats: summaries
+          .map((chat) => ({
+            id: chat.id,
+            startedAt: chat.startedAt,
+            entries: chat.entries,
+            current: chat.current,
+            ...(titles.get(chat.id) ? { title: titles.get(chat.id) } : {}),
+          }))
+          // Not every conversation is one - see `worthListing`.
+          .filter(worthListing)
+          .reverse(),
+      })
+    })
+
+    // The figure, asked for because the user is looking at it. Usage moves in
+    // whatever else is running on this machine - a terminal session, another
+    // review - and a turn here is only one of the things that spends it, so the
+    // end of a turn cannot be the only time this is asked. `readLimit` throttles,
+    // so a shell that asks on every focus costs nothing it should not.
+    api.post('/acp/limit', (_req, res) => {
+      const command = this.acp?.snapshot().agent
+      if (command) this.refreshLimit(command)
+      res.json({ ok: true })
+    })
+
+    api.post('/acp/chat', (req, res) => {
+      const id = String(req.body?.id ?? '')
+      if (!id) return res.status(400).json({ error: 'id is required' })
+      if (!this.switchAcpChat(id)) {
+        return res.status(409).json({ error: 'that conversation cannot be opened right now' })
+      }
       res.json({ ok: true })
     })
 
@@ -967,11 +1369,14 @@ export async function daemonMain(version: string, opts: DaemonOptions = {}): Pro
     runtime.touch()
     // SPIKE: ACP mode - this session spawns and drives its own agent.
     if (typeof agent === 'string' && agent) {
-      if (!runtime.attachAcpAgent(agent)) {
-        return res.status(409).json({
-          error: 'a different agent is already attached to this session',
-          hint: 'end the session (or stop the daemon) before switching agents',
-        })
+      // A different agent already on this session is a switch, not a conflict.
+      // It was a conflict when there was no safe way to change one; there is now
+      // - the shell's own picker does it - and `--agent X` has only ever meant
+      // "this session runs X". Refusing it while the shell allows it would make
+      // the CLI the odd one out, and the advice it used to give (end the session)
+      // was destructive for something that costs a new conversation.
+      if (!runtime.attachAcpAgent(agent) && !runtime.switchAcpAgent(agent)) {
+        return res.status(409).json({ error: 'that agent cannot be started right now' })
       }
       runtime.broadcast()
     }
@@ -1002,8 +1407,17 @@ export async function daemonMain(version: string, opts: DaemonOptions = {}): Pro
   const port = typeof controlAddress === 'object' && controlAddress ? controlAddress.port : 0
 
   writeRegistry({ port, pid: process.pid, startedAt: Date.now() })
+  // Whatever a killed predecessor could not kill for itself. Before any session
+  // is restored, so a review that is about to start its agent again is not
+  // sharing the machine with the one it left behind.
+  const reaped = reapOrphanedAgents()
+  if (reaped > 0) {
+    // eslint-disable-next-line no-console
+    console.error(`reaped ${reaped} agent process group(s) left by a killed daemon`)
+  }
   const cleanup = () => {
     clearRegistry(process.pid)
+    clearAgentRecord()
     process.exit(0)
   }
   process.on('SIGTERM', cleanup)

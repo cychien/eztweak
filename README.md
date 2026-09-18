@@ -61,9 +61,9 @@ successor: the successor binds and registers first, and only once it is up does 
 go - so a version that fails to start leaves you on the one you had, with the error in the card.
 Your sessions come back on the ports they held and the shell reloads itself.
 
-An ACP agent is restarted along with the daemon and comes back in a fresh session, so the review's
-conversation does not carry across - the same as `/new`. The card says so before you click, and the
-thread says so afterwards.
+An ACP agent is restarted along with the daemon and asked to resume the conversation it was having,
+so an update no longer costs the review its context. An agent that cannot resume comes back in a
+fresh session, the same as `/new`, and the thread says so when it happens.
 
 The close button in the card's corner puts the offer away; the version beside the name in the
 header turns into a pill you can click to bring it back. Nothing is installed or restarted without
@@ -124,6 +124,22 @@ mid-word stays a slash, so urls and paths are left alone. The commands:
   to start over from, and a fresh session answering it would be answering something else. The 待送
   清單 is left alone: those you have not sent yet, so they were never the old context's to begin
   with. A note you were part-way through typing survives, so `/new` and then send is one move.
+- **`$`** opens a second menu, of the skills this machine can run, and picking one
+  asks the agent to run it over the batch you are about to send. The skill shows as a pill above
+  the box until the batch goes, and on the sent bubble afterwards - which is the only place it
+  appears, because an explicitly invoked skill is expanded into the agent's prompt rather than
+  loaded through its skill tool, so nothing in the turn's activity would otherwise say it ran.
+  A skill on its own is a batch: "run this over what you can see" needs no annotation and no note.
+
+  Its own symbol rather than more rows under `/`, because the two are different kinds of thing:
+  `/file` and `/element` act on the box you are typing in, and a skill is handed to the agent.
+  Only offered in [ACP mode](#acp-mode-experimental), and only in the note box.
+
+  The list is read off disk - `.claude/skills` and `.agents/skills`, in the project and in your
+  home directory, plus `.claude/plugins/*/skills`. Skills bundled inside the Claude Code binary
+  are **not** listed: they have no file to find, and the protocol's own command list cannot tell a
+  skill from `/doctor`, so including it would mean a menu of "skills" that offers things that are
+  not skills.
 - **`/element`** points the comment at a *second* element - "make this match that one". The page
   stays live while you choose, so a plain click still follows links and opens menus and only
   ⌘/Ctrl+click picks; the comment box steps aside and comes back when you are done. You can cross to
@@ -256,7 +272,10 @@ Sessions outlive the daemon that served them. On start, the daemon picks each se
 from disk and re-binds it to the port it last held, so a review shell tab you already have open
 only needs a reload, and feedback you queued before the restart is still waiting. If that port has
 since been taken, the session moves to a free one and the CLI re-resolves it. A session that was
-driving an ACP agent starts that agent again, in a fresh context; the thread says so.
+driving an ACP agent starts that agent again **and asks it to resume the conversation they were
+having**, so the review carries on where it stopped. Whether that works is the agent's answer to
+give - a transcript it no longer has, or an agent that cannot resume at all, leaves the review in a
+fresh context, and only then does the thread say so.
 
 A session belongs to one project on one origin, not to the origin alone. Dev servers all default
 to the same port, so reviewing a second project on `localhost:5173` would otherwise inherit the
@@ -283,7 +302,7 @@ shell. The completed reply is saved in the conversation, and the next queued bat
 automatically. No second terminal or `poll` loop is needed. This is also the mode used by the
 bundled eztweak skill.
 
-Two controls come with owning the agent:
+Three controls come with owning the agent:
 
 - **⌘/Ctrl+.** stops the turn in flight, from anywhere including mid-sentence in the composer -
   which is when you usually want it, since watching the agent head the wrong way is what prompts it.
@@ -292,6 +311,47 @@ Two controls come with owning the agent:
   silent. Whatever it had already said stays in the thread, and the batch is not handed back: you
   stopped it on purpose.
 - **`/new`** in the note box clears the agent's context. See [The comment box](#the-comment-box).
+  Every conversation a review has had stays reachable: once there is more than one, a control at the
+  head of the thread lists them by time and by how much was said, and picking one shows its thread
+  and puts the agent back on it. While an earlier conversation is showing the control says so in
+  colour, because feedback sent then joins *that* conversation and nothing else on screen would
+  mention it.
+- **The pill above the note box** names the model the next batch will be answered by, and opens
+  everything else the agent lets the session be set to - reasoning effort, permission mode, and any
+  toggle it offers. It is a permanent slot because unlike a cancel it is *state*: it says what you
+  are about to send your feedback to.
+
+  What it offers is the model and, where the agent has one, the reasoning effort. Not the permission
+  mode and not the fast-mode toggle: those are the agent's own configuration, and a review is not
+  where they should be decided. A mode the *agent* changes is still reported in the thread - some
+  models do not support every mode, and selecting one moves it as a side effect that outlives the
+  model that caused it, so the problem worth solving there was the silence rather than the missing
+  control.
+
+  A switch keeps the conversation. The model changes on the running session, so nothing is replayed
+  and nothing is forgotten - which is what makes it worth reaching for mid-review: point at the easy
+  half on a cheap model, move up for the layout problem that needs it. Sending mid-turn is allowed
+  and applies from the next turn.
+
+  What the menu holds is whatever the agent reports, not a list eztweak keeps. That matters because
+  the list changes with the choice: pick a model with no reasoning levels and no fast mode and both
+  options leave the menu, and the agent can move a value on its own - a refusal falling back to
+  another model - which arrives here and redraws. Some models do not support every permission mode,
+  and picking one **downgrades the mode** as a side effect; showing the mode is what keeps that from
+  happening silently.
+
+  Your pick is remembered for the session and re-asserted on the next one, so `/new` and a daemon
+  restart do not hand the review back to the agent's default. Every switch goes into the thread, so
+  a review read back later says which model answered which batch.
+
+The agent itself can be changed from the pill left of the model, which is where it belongs: the two
+answer one question between them - what is about to read this feedback - and the model is a choice
+*within* the agent, so changing the agent replaces the list the model was chosen from. That always
+starts a new conversation, and the shell says so before it does it: a session id belongs to the agent that issued
+it - Claude keeps its conversations in one store and Codex in another, and neither can resolve the
+other's - so there is no way to hand a conversation over. Nothing eztweak owns is lost. Every earlier
+conversation stays in the thread's own picker with the agent that had it, and switching back finds it
+again, resumable by the agent that remembers it.
 
 Three built-in profiles map short names to ACP server commands:
 

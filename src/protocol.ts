@@ -93,6 +93,20 @@ export interface FeedbackBatch {
   attachments?: Attachment[]
   /** elements picked into the note box, i.e. pointed at by the batch, not an item */
   references?: Reference[]
+  /** Skills the user named in this batch, in the order they wrote them.
+   *
+   *  A list, not one. The composer keeps every `$name` the user writes, because
+   *  which of them an agent will actually act on is the agent's business to
+   *  report - and it differs: only a leading `/name` is expanded by Claude, and
+   *  a second is swallowed as the first one's argument. Deleting one on the
+   *  user's behalf to make the rule tidy would be this tool answering a question
+   *  it was not asked.
+   *
+   *  `[skill n]` in a comment is `skills[n-1]`, the same positional contract
+   *  `[file n]` has - and for a sharper reason: the prefix a skill is invoked
+   *  with belongs to the agent, so the stored text carries the marker and
+   *  `acpPrompt` spends it once the agent is known. */
+  skills?: string[]
   sentAt: number
   deliveredAt?: number
   ackedAt?: number
@@ -118,9 +132,17 @@ export interface ConversationEntry {
    *  own question when the two are not adjacent in the log. Absent on anything
    *  that belongs to no batch. */
   batchId?: string
+  /** Which conversation this was written during. The thread is drawn by filtering
+   *  on it. Absent on entries logged before chats existed - those belong to the
+   *  first one, by date; see `SessionStore.visibleConversation`. */
+  chatId?: string
   items?: ConversationItem[]
   attachments?: string[]
   references?: ReferenceEcho[]
+  /** The skills this batch named. Worth recording because an explicitly invoked
+   *  skill leaves no other trace: the agent expands it into the prompt rather
+   *  than calling its Skill tool, so nothing in the turn's activity says it ran. */
+  skills?: string[]
 }
 
 export type SessionEndedBy = 'user' | 'agent'

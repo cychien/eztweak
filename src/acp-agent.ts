@@ -15,19 +15,22 @@
 import { type ChildProcess, spawn } from 'node:child_process'
 import { Readable, Writable } from 'node:stream'
 import {
-  type ActiveSession,
-  type ActiveSessionMessage,
   type ClientContext,
   type CreateElicitationRequest,
   type CreateElicitationResponse,
   type RequestPermissionRequest,
   type RequestPermissionResponse,
+  type SessionConfigOption,
   type SessionNotification,
   PROTOCOL_VERSION,
   client,
   methods,
   ndJsonStream,
 } from '@agentclientprotocol/sdk'
+import { type AcpConfigValue, configValues } from './acp-config.js'
+import { limitFrom, mergeLimit } from './usage-limit.js'
+import { killGroup, killTrackedAgents, trackAgent, untrackAgent } from './agent-children.js'
+import { type AttachedSession, SessionRouter } from './acp-session.js'
 
 export type AcpState = 'starting' | 'idle' | 'working' | 'exited'
 
@@ -65,11 +68,57 @@ export interface AcpAsk {
   questions: AcpAskQuestion[]
 }
 
+/** One subscription window, as last reported.
+ *
+ *  The window is its length rather than a name, because the two vendors describe
+ *  theirs differently - Claude names them (`five_hour`, `seven_day`), codex gives
+ *  a duration in minutes - and a length is what both mean. */
+export interface AcpUsageWindow {
+  /** How long the window is, in minutes. */
+  windowMinutes: number
+  /** Share of the window still unused, 0-1. */
+  remaining: number
+  /** When the window rolls over, in unix seconds. */
+  resetsAt?: number
+  /** Whose allowance this is, when it is not the whole account's: Claude reports
+   *  a weekly window per model beside the account's own, and a model's figure
+   *  presented as the account's would be a wrong number shown confidently. */
+  model?: string
+}
+
+/** Everything an agent will say about the account's allowance.
+ *
+ *  Every window, not the tightest one: the row above the composer has space for
+ *  one figure, but the question behind it - "what exactly is running out" - is
+ *  answered by the whole set, so the whole set is carried and the shell decides
+ *  what to put on the line and what to keep for the card. */
+export interface AcpLimit {
+  /** Account-wide windows first, each set shortest-first. Never empty. */
+  windows: AcpUsageWindow[]
+  /** The subscription behind the figures, in the vendor's own word - "plus",
+   *  "pro" - when it says. Only codex does. */
+  plan?: string
+}
+
 export interface AcpSnapshot {
   agent: string
   state: AcpState
   feed: AcpFeedItem[]
   ask?: AcpAsk
+  /** Everything the agent lets this session be configured with - model, mode,
+   *  effort, and whatever else it offers - in the agent's own order.
+   *
+   *  Passed through as the protocol's `SessionConfigOption` rather than reduced
+   *  to a model field: the set is not fixed. It changes *with* the choice, and
+   *  not only in its values - selecting a model that supports neither effort
+   *  levels nor Fast mode drops both options from the list. A client that names
+   *  the options it knows would have to be taught each new one; this one only
+   *  has to be taught how to *draw* a select and a boolean. */
+  configOptions?: SessionConfigOption[]
+  /** What the agent has said about the account's allowance, when it has said
+   *  anything. Absent until it does, which can be the whole of a short session -
+   *  see `onUpdate`. */
+  limit?: AcpLimit
   /** A cancel is out and the agent has not yet said the turn is over. The button
    *  that sent it has to stop offering to send it again. */
   cancelling?: true
@@ -86,9 +135,44 @@ export interface AcpAgentOptions {
    *  which a cancelled turn can still have part of - and why it stopped. */
   onTurnEnd: (reply: string, stopReason: string) => void
   onExit: (error: string | null) => void
+  /** The picks to re-assert on every session this agent opens. Read at open
+   *  time rather than taken once: `/new` and a daemon restart both open a fresh
+   *  session, and by then the user may have changed the pick. */
+  pinnedConfig?: () => Record<string, AcpConfigValue>
+  /** The user set an option. Only ever called for a pick *they* made - an option
+   *  the agent moved on its own is reported, not remembered, because carrying it
+   *  forward would propagate a change nobody asked for into every later session.
+   *  The clearest case is a model without Auto-mode support: selecting it
+   *  downgrades the permission mode, and pinning that would keep the session
+   *  downgraded long after the model that caused it was switched away from. */
+  onConfigChange?: (configId: string, value: AcpConfigValue, option: SessionConfigOption) => void
+  /** The permission mode moved without anyone here asking it to - which is the
+   *  only way it moves, since the shell does not offer it. Selecting a model the
+   *  current mode is not available on is what does it, and the change outlives
+   *  the model that caused it, so it is reported rather than left silent. */
+  onModeChange?: (name: string) => void
+  /** The ACP session this review already had, if any. Read at open time, not
+   *  taken once: every session this agent opens asks again, and the answer
+   *  changes as the review moves between its own conversations. */
+  resumeSessionId?: () => string | undefined
+  /** The last figure this agent reported, from before the daemon restarted. The
+   *  line is permanent once it has a number, and nothing here can ask for one -
+   *  see `usage-limit.ts`. */
+  rememberedLimit?: () => AcpLimit | undefined
+  /** The agent reported a new figure, for the next daemon to start with. */
+  onLimitChange?: (limit: AcpLimit) => void
+  /** A session is up, and how. The two mean different things to the thread - one
+   *  conversation continued, the other started over - so the caller is told
+   *  which rather than left to assume the pessimistic one. */
+  onSessionOpen?: (sessionId: string, how: AcpSessionStart) => void
 }
 
+/** Whether the session on the other end remembers this review or is meeting it
+ *  for the first time. */
+export type AcpSessionStart = 'new' | 'resumed'
+
 const FEED_CAP = 100
+
 
 /** Tool titles quote absolute paths, and the sidebar is 340px wide: the project
  *  prefix is the part every one of them shares and says nothing. */
@@ -96,25 +180,31 @@ function trimTitle(title: string, cwd: string): string {
   return title.replaceAll(`${cwd}/`, '')
 }
 
-/** Every live agent child, killed when the daemon goes down whichever way it
- *  goes down - an orphaned agent would keep burning the user's quota. */
-const liveChildren = new Set<ChildProcess>()
-process.on('exit', () => {
-  for (const child of liveChildren) child.kill('SIGKILL')
-})
+/** Every live agent, killed when the daemon goes down whichever way it can be
+ *  seen to go down - an orphaned agent would keep burning the user's quota. The
+ *  ways it cannot be seen to go down are `agent-children.ts`'s problem. */
+process.on('exit', () => killTrackedAgents())
 
 export class AcpAgent {
   private child: ChildProcess
   private ctx: ClientContext | null = null
-  /** The live session. Held as the SDK's `ActiveSession` for one reason: it funnels
-   *  this session's updates *and* its turn's `stop` into a single queue, in stream
-   *  order. That ordering is load-bearing - see `pump`. */
-  private session: ActiveSession | null = null
-  /** Retires the pump on the session being replaced, so it stops waiting on a
-   *  `nextUpdate` that will never come. */
-  private retire: (() => void) | null = null
+  /** Routes this connection's session updates into whichever session is live. */
+  private readonly router = new SessionRouter()
+  /** The live session. One ordered queue carrying its updates *and* its turn's
+   *  `stop` - see `acp-session.ts`, which is where that matters. */
+  private session: AttachedSession | null = null
   private state: AcpState = 'starting'
   private feed: AcpFeedItem[] = []
+  /** The live session's options. Kept across a session swap rather than cleared:
+   *  the next session is about to be pinned back to the same picks, and a control
+   *  that vanishes and returns reads as a failure where a stale label for the
+   *  moment the swap takes does not. `state` already says it cannot be used. */
+  private configOptions: SessionConfigOption[] = []
+  /** The mode as it stood when this session's options were last installed. Null
+   *  until a session has one, so opening a session establishes a baseline rather
+   *  than reporting a change against the session before it. */
+  private modeValue: string | null = null
+  private limit: AcpLimit | null
   private ask: AcpAsk | null = null
   private askResolve: ((answers: Record<string, string> | null) => void) | null = null
   private askSeq = 0
@@ -126,6 +216,9 @@ export class AcpAgent {
   /** Set when the agent advertises `session/close`, which is the only way to
    *  tell it a session it is still holding is finished with. */
   private canClose = false
+  /** Set when the agent advertises `session/resume`, which is what lets a review
+   *  pick its own conversation back up after the daemon that held it went away. */
+  private canResume = false
   /** Resolved when the agent is done, and nothing else: it is what holds the
    *  connection open, so a session swap must not disturb it. */
   private finish: (() => void) | null = null
@@ -133,29 +226,33 @@ export class AcpAgent {
   private stderrTail: string[] = []
 
   constructor(private readonly opts: AcpAgentOptions) {
-    // Through a shell, because a profile is a command line ("npx -y ...") and
-    // quoting rules belong to the shell the user would have typed it into.
+    this.limit = opts.rememberedLimit?.() ?? null
+    // Through a shell, and into a process group of its own. The shell is because
+    // a profile is a command line; the group is because that shell is not the
+    // agent - `npx` and the runtime it fetches sit below it, and signalling the
+    // shell alone leaves them running. A group can be killed whole.
     this.child = spawn(opts.command, {
       shell: true,
+      detached: true,
       cwd: opts.cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
       env: process.env,
     })
+    if (this.child.pid) trackAgent(this.child.pid, opts.command)
     this.child.stderr?.on('data', (chunk: Buffer) => {
       this.stderrTail = [...this.stderrTail, chunk.toString()].slice(-20)
     })
-    liveChildren.add(this.child)
     // A spawn that never got off the ground reports asynchronously and emits no
     // `exit`, so without this it is an uncaught exception rather than an agent
     // that failed to start. Reachable whenever `cwd` is gone - a restored session
     // whose project has since been deleted, moved, or is on an unmounted volume -
     // and there it would take the daemon, and every other session, down with it.
     this.child.on('error', (err: Error) => {
-      liveChildren.delete(this.child)
+      this.untrack()
       this.fail(`agent could not start: ${err.message}`)
     })
     this.child.on('exit', (code) => {
-      liveChildren.delete(this.child)
+      this.untrack()
       if (this.state === 'exited') return
       this.fail(`agent exited (${code ?? 'signal'})`)
     })
@@ -164,14 +261,114 @@ export class AcpAgent {
     })
   }
 
+  /** Install a fresh option set and report a mode that moved with it. */
+  private setConfigOptions(options: SessionConfigOption[]): void {
+    this.configOptions = options
+    const mode = options.find((o) => o.category === 'mode')
+    const value = mode && mode.type === 'select' ? String(mode.currentValue) : null
+    if (value && this.modeValue && value !== this.modeValue) {
+      const name = configValues(mode!).find((o) => o.value === value)?.name ?? value
+      this.opts.onModeChange?.(name)
+    }
+    this.modeValue = value
+  }
+
+  /** A figure read outside the protocol - see `readLimit`. Always the newer of
+   *  the two, since it was asked for just now and a pushed one may be a turn old,
+   *  but never the whole picture on its own: see `mergeLimit`. */
+  seedLimit(limit: AcpLimit): void {
+    this.limit = mergeLimit(this.limit, limit)
+    this.opts.onChange()
+  }
+
   snapshot(): AcpSnapshot {
     return {
       agent: this.opts.command,
       state: this.state,
       feed: this.feed,
       ...(this.ask ? { ask: this.ask } : {}),
+      ...(this.configOptions.length ? { configOptions: this.configOptions } : {}),
+      ...(this.limit ? { limit: this.limit } : {}),
       ...(this.cancelling ? { cancelling: true as const } : {}),
       ...(this.error ? { error: this.error } : {}),
+    }
+  }
+
+  /** The user picked a value for one of the agent's config options.
+   *
+   *  The answer carries the whole option set back, because one pick reshapes the
+   *  others: switching to a model with no effort levels removes that option
+   *  outright. So the response replaces the list rather than patching a value
+   *  into it, and the caller's own idea of what the options are never has to be
+   *  reconciled with the agent's.
+   *
+   *  Allowed mid-turn. The agent accepts it and the turn in flight still ends
+   *  normally; the change applies from the next one. Refusing it would take the
+   *  control away at the one moment it is most wanted - watching a turn go wrong
+   *  is what prompts a switch. */
+  async setConfigOption(configId: string, value: AcpConfigValue): Promise<boolean> {
+    const session = this.session
+    if (!session || !this.ctx) return false
+    if (this.state !== 'idle' && this.state !== 'working') return false
+    const option = this.configOptions.find((o) => o.id === configId)
+    if (!option) return false
+    const epoch = this.epoch
+    const answer = await this.ctx.request(methods.agent.session.setConfigOption, {
+      sessionId: session.sessionId,
+      configId,
+      ...(typeof value === 'boolean' ? { type: 'boolean' as const, value } : { value }),
+    })
+    // The session this was asked of is gone - `/new`, or the agent died while the
+    // request was out. Installing its answer would describe a session nobody is
+    // on any more.
+    if (epoch !== this.epoch) return false
+    if (answer?.configOptions) this.setConfigOptions(answer.configOptions)
+    // Only what actually took is remembered, and the answer is what says so - a
+    // request can succeed without the change landing, which is what a
+    // `PreModelSwitch` hook refusing a model does. Pinning a value the agent
+    // declined would re-offer it to every later session and be declined again
+    // each time, and the thread would carry a switch that never happened.
+    const applied = this.configOptions.find((o) => o.id === configId)
+    if (applied?.currentValue !== value) {
+      this.opts.onChange()
+      return false
+    }
+    this.opts.onConfigChange?.(configId, value, applied)
+    this.opts.onChange()
+    return true
+  }
+
+  /** Re-assert the user's picks on a session that has just opened.
+   *
+   *  Sequential rather than parallel, because the options are interdependent: a
+   *  pinned effort level is only offered once the pinned model is in place, and
+   *  the agent's answer to each request is what says whether the next one is
+   *  still on the list.
+   *
+   *  Every failure is survivable and none of them is the session's fault - a
+   *  model that has since left the account's list, an effort level the new
+   *  default model does not have. The pick is skipped and the session opens on
+   *  whatever the agent chose; refusing to open would cost the user their review
+   *  over a preference. */
+  private async applyPinnedConfig(epoch: number): Promise<void> {
+    const pinned = this.opts.pinnedConfig?.() ?? {}
+    for (const [configId, value] of Object.entries(pinned)) {
+      if (epoch !== this.epoch) return
+      const option = this.configOptions.find((o) => o.id === configId)
+      // Already where the user wanted it, or not on offer for this model. Asking
+      // anyway would spend a round trip to be told what we can already see.
+      if (!option || option.currentValue === value) continue
+      try {
+        const answer = await this.ctx?.request(methods.agent.session.setConfigOption, {
+          sessionId: this.session?.sessionId ?? '',
+          configId,
+          ...(typeof value === 'boolean' ? { type: 'boolean' as const, value } : { value }),
+        })
+        if (epoch !== this.epoch) return
+        if (answer?.configOptions) this.setConfigOptions(answer.configOptions)
+      } catch {
+        /* the pick is no longer available - the agent's own choice stands */
+      }
     }
   }
 
@@ -218,14 +415,19 @@ export class AcpAgent {
     return true
   }
 
-  /** Throw away the agent's memory of this review and carry on in a fresh
-   *  session. The child process and the connection both stay: what costs tokens
+  /** Let go of the session this agent is on and open whichever one it should be
+   *  on now - which `resumeSessionId` answers, so the caller decides by moving
+   *  the review before calling this. A fresh conversation is that answer being
+   *  nothing; going back to an earlier one is it being that one's id.
+   *
+   *  The child process and the connection both stay either way. What costs tokens
    *  is the history the agent replays on every turn, and that belongs to the
    *  session, not to the process.
    *
-   *  A turn in flight is cancelled rather than waited on - starting over is the
-   *  whole point of asking - and its end is then dropped on the epoch. */
-  newChat(): boolean {
+   *  A turn in flight is cancelled rather than waited on - moving off this
+   *  conversation is the whole point of asking - and its end is then dropped on
+   *  the epoch. */
+  reopenSession(): boolean {
     if (!this.ctx || !this.session) return false
     if (this.state !== 'idle' && this.state !== 'working') return false
     const old = this.session
@@ -239,8 +441,7 @@ export class AcpAgent {
     // agent is blocked on it, and it has to be released before we let go.
     this.settleAsk()
     this.opts.onChange()
-    this.retire?.()
-    old.dispose()
+    old.retire()
     void this.closeSession(old.sessionId)
     void this.openSession().catch((err: unknown) => {
       this.fail(err instanceof Error ? err.message : String(err))
@@ -261,22 +462,77 @@ export class AcpAgent {
     } catch {}
   }
 
-  /** Starts the session this agent is currently meant to be on, and installs it
-   *  only if it is still the one wanted by the time the agent answers. */
+  /** The session this agent should be on: the one the review already had, picked
+   *  back up, or a fresh one.
+   *
+   *  Resume is tried first, because a review that still has a session id wants
+   *  *that* conversation rather than a copy of it, and resume is cheap - the
+   *  agent replays nothing. Its failure is ordinary rather than fatal: the
+   *  transcript can be gone, the project can have moved, the agent may not do
+   *  resume at all. A fresh session is the fallback, and the caller is told which
+   *  of the two it got.
+   *
+   *  The session is only installed if it is still the one wanted by the time the
+   *  agent answers. */
   private async openSession(): Promise<void> {
     const ctx = this.ctx
     if (!ctx) return
     const epoch = this.epoch
-    const session = await ctx.buildSession(this.opts.cwd).start()
-    // A newer `/new` landed while the agent was answering this one: that request
+    const wanted = this.opts.resumeSessionId?.()
+    let sessionId: string | null = null
+    let configOptions: SessionConfigOption[] = []
+    let how: AcpSessionStart = 'new'
+    if (wanted && this.canResume) {
+      try {
+        const resumed = await ctx.request(methods.agent.session.resume, {
+          sessionId: wanted,
+          cwd: this.opts.cwd,
+          mcpServers: [],
+        })
+        sessionId = wanted
+        configOptions = resumed?.configOptions ?? []
+        how = 'resumed'
+      } catch {
+        /* the agent does not have it any more - a fresh session it is */
+      }
+    }
+    if (epoch !== this.epoch) return
+    if (!sessionId) {
+      const created = await ctx.request(methods.agent.session.new, {
+        cwd: this.opts.cwd,
+        mcpServers: [],
+      })
+      sessionId = created.sessionId
+      configOptions = created.configOptions ?? []
+    }
+    // A newer request landed while the agent was answering this one: that request
     // owns the session now, so this one is closed rather than installed.
     if (epoch !== this.epoch) {
-      session.dispose()
-      void this.closeSession(session.sessionId)
+      void this.closeSession(sessionId)
       return
     }
+    const session = this.router.attach(ctx, sessionId)
     this.session = session
+    // Baseline, not a change: this is a different conversation's options.
+    this.modeValue = null
+    this.setConfigOptions(configOptions)
+    // Before `idle`, and this is load-bearing. Going idle is what `onChange`
+    // turns into a delivery, so a queued batch leaves the moment the flag flips -
+    // and a pick re-asserted after that point would arrive one turn too late,
+    // every time. A reopened session with feedback already waiting is the common
+    // path, not the corner case: its first turn is the one the model was chosen
+    // for. A resumed session needs it too - resume comes back on the agent's
+    // default, not on what the review was last running.
+    await this.applyPinnedConfig(epoch)
+    if (epoch !== this.epoch) {
+      session.retire()
+      return
+    }
     this.state = 'idle'
+    // Before `onChange`, which is what turns going idle into a delivery: the
+    // caller records the session id here, and a batch must not go out against a
+    // session nothing has written down yet.
+    this.opts.onSessionOpen?.(sessionId, how)
     this.opts.onChange()
     void this.pump(session, epoch).catch((err: unknown) => {
       if (epoch !== this.epoch) return
@@ -284,42 +540,36 @@ export class AcpAgent {
     })
   }
 
-  /** Drains one session's messages in the order the agent wrote them.
-   *
-   *  This is the whole reason the session is held as an `ActiveSession`: its
-   *  queue carries the streamed updates *and* the turn's own `stop`, and a reply
-   *  chunk written before the prompt response is therefore *seen* before it.
-   *  Reading the two off separate promises loses that - they are independent
-   *  microtask chains, and the response can settle first, ending the turn before
-   *  the words it was made of have arrived. That produced an empty reply about
-   *  one turn in ten.
-   *
-   *  Retired rather than abandoned: a pump parked on a session `/new` replaced
-   *  would hold that session's queue - and everything the agent still sends to it
-   *  - for the life of the process. */
-  private async pump(session: ActiveSession, epoch: number): Promise<void> {
-    const retired = new Promise<'retired'>((resolve) => {
-      this.retire = () => resolve('retired')
-    })
+  /** Drains one session's messages in the order the agent wrote them. The
+   *  ordering that makes this correct belongs to the queue - see
+   *  `acp-session.ts`. This only has to stop when the session is retired, which
+   *  the queue answers rather than leaving it parked forever. */
+  private async pump(session: AttachedSession, epoch: number): Promise<void> {
     for (;;) {
-      const msg: ActiveSessionMessage | 'retired' = await Promise.race([
-        session.nextUpdate(),
-        retired,
-      ])
-      if (msg === 'retired' || epoch !== this.epoch) return
-      if (msg.kind === 'session_update') this.onUpdate(msg.notification)
-      else if (msg.kind === 'stop') this.turnEnded(msg.stopReason, epoch)
+      const message = await session.next()
+      if (message.kind === 'retired' || epoch !== this.epoch) return
+      if (message.kind === 'update') this.onUpdate(message.notification)
+      else this.turnEnded(message.stopReason, epoch)
     }
   }
 
   stop(): void {
     this.state = 'exited'
     this.settleAsk()
-    this.retire?.()
+    this.session?.retire()
     this.finish?.()
-    this.child.kill('SIGTERM')
-    const child = this.child
-    setTimeout(() => child.kill('SIGKILL'), 3000).unref()
+    const pid = this.child.pid
+    if (pid === undefined) return
+    // The group, not the child: the agent is below the shell this holds.
+    killGroup(pid, 'SIGTERM')
+    setTimeout(() => {
+      killGroup(pid)
+      untrackAgent(pid)
+    }, 3000).unref()
+  }
+
+  private untrack(): void {
+    if (this.child.pid !== undefined) untrackAgent(this.child.pid)
   }
 
   private fail(message: string): void {
@@ -328,7 +578,7 @@ export class AcpAgent {
     const tail = this.stderrTail.join('').trim().split('\n').slice(-3).join('\n')
     this.error = tail ? `${message}\n${tail}` : message
     this.settleAsk()
-    this.retire?.()
+    this.session?.retire()
     this.finish?.()
     this.opts.onExit(this.error)
     this.opts.onChange()
@@ -474,6 +724,44 @@ export class AcpAgent {
         else this.feed.push({ kind: 'plan', entries })
         break
       }
+      // The only place a subscription limit reaches a client. It rides on a
+      // `usage_update`, and only on one the agent chose to send: the CLI emits
+      // its rate-limit event when the numbers change, throttled, and a normal
+      // turn can pass without one. So this takes what it is given and the shell
+      // shows nothing until something arrives - there is no way to ask.
+      case 'usage_update': {
+        const bag = update._meta as { '_claude/rateLimit'?: unknown } | undefined
+        const pushed = limitFrom(bag?.['_claude/rateLimit'])
+        if (!pushed) return
+        const limit = mergeLimit(this.limit, pushed)
+        this.limit = limit
+        this.opts.onLimitChange?.(limit)
+        this.opts.onChange()
+        return
+      }
+      // Not the feed's business, and not the turn's: these describe the session,
+      // so they must not be capped away with the turn's activity or cleared when
+      // it ends. Both arrive unprompted - the agent can change its own mind about
+      // the model, and does.
+      case 'config_option_update':
+        this.setConfigOptions(update.configOptions)
+        this.opts.onChange()
+        return
+      // The mode has its own notification as well as its place in the option
+      // list, and an agent is free to send only this one. Matched on the category
+      // rather than on an id, because `mode` is what the *spec* names the concept
+      // and the id holding it is the agent's to choose.
+      case 'current_mode_update': {
+        const mode = this.configOptions.find((o) => o.category === 'mode')
+        if (!mode || mode.type !== 'select' || mode.currentValue === update.currentModeId) return
+        this.setConfigOptions(
+          this.configOptions.map((o) =>
+            o === mode ? { ...o, currentValue: update.currentModeId } : o,
+          ),
+        )
+        this.opts.onChange()
+        return
+      }
       default:
         return
     }
@@ -488,6 +776,9 @@ export class AcpAgent {
       Readable.toWeb(this.child.stdout) as ReadableStream<Uint8Array>,
     )
     await client({ name: 'eztweak' })
+      // Every session update this connection carries, sorted to whichever session
+      // is live. The SDK's own router leaves these unconsumed, so both can watch.
+      .onNotification(methods.client.session.update, (ctx) => this.router.route(ctx.params))
       .onRequest(methods.client.session.requestPermission, (ctx) =>
         this.requestPermission(ctx.params),
       )
@@ -497,9 +788,28 @@ export class AcpAgent {
           protocolVersion: PROTOCOL_VERSION,
           // Form elicitation is what unlocks the agent's own question tool -
           // claude-agent-acp disallows AskUserQuestion without it.
-          clientCapabilities: { elicitation: { form: {} } },
+          //
+          // A boolean config option is only sent to a client that says it can
+          // draw one; without this an on/off toggle arrives as a two-value
+          // select, which is the same question asked in more clicks.
+          clientCapabilities: {
+            elicitation: { form: {} },
+            session: { configOptions: { boolean: {} } },
+            // `recommendedValue` is what turns a synthetic "Default" row into the
+            // level it actually resolves to. Without it the agent offers
+            // `default` alongside low/medium/high and ticks that - which tells
+            // the reader nothing, since the whole question they have is what
+            // "default" means here. With it, the row is gone and the real level
+            // is the one ticked.
+            //
+            // A vendor extension, and named after another editor - but the cost
+            // of it going away is this reverting to the row we have today, not
+            // anything being reported wrongly.
+            _meta: { jetbrains: { air: { version: 1, capabilities: ['recommendedValue'] } } },
+          },
         })
         this.canClose = !!init.agentCapabilities?.sessionCapabilities?.close
+        this.canResume = !!init.agentCapabilities?.sessionCapabilities?.resume
         this.ctx = ctx
         await this.openSession()
         // `connectWith` closes the stream when this returns, so this is the

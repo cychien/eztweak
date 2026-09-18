@@ -50,6 +50,11 @@ export type DraftNode =
    *  slash was typed, in this document or in the one after the navigation. `n` is
    *  meaningless until the anchor arrives. */
   | { t: 'ref'; n: number; anchor: AnchorWire | null; label: string }
+  /** The skill this batch runs. In the sentence because that is where the user
+   *  put it, but never *part* of the sentence: it travels as the batch's own
+   *  field and the daemon turns it into the leading `/name` the agent expands,
+   *  so emitting it into the text too would name it twice. */
+  | { t: 'skill'; name: string }
 
 /** What the popup was anchored to, captured as data rather than as a live node,
  *  so a save is still machine-precise when the node itself is gone. */
@@ -111,12 +116,23 @@ export const refChipText = (n: number): string => `選取元素 ${n}`
  *  watch renumber; the markers and the id list come out of one walk at send time,
  *  so they cannot disagree. `[file n]` is therefore the id at index n-1. */
 export const fileMarker = (n: number): string => `[file ${n}]`
-const MARKER = /\[(ref|file) (\d+)\]/g
+
+/** How a named skill appears in the comment text.
+ *
+ *  Positional like a file's, and for a stronger reason: the prefix a skill is
+ *  invoked with is the *agent's*, not ours - Claude reads `/name`, codex reads
+ *  `$name` - so the stored comment cannot carry either one without being a
+ *  record of who happened to be running at the time. The marker keeps it
+ *  agent-neutral and `acpPrompt` spends it at the one moment the agent is known.
+ *  `[skill n]` is the name at index n-1. */
+export const skillMarker = (n: number): string => `[skill ${n}]`
+const MARKER = /\[(ref|file|skill) (\d+)\]/g
 
 export type CommentPart =
   | { t: 'text'; v: string }
   | { t: 'ref'; n: number }
   | { t: 'file'; n: number }
+  | { t: 'skill'; n: number }
 
 /** A comment split at its markers, so a reader can render the reference inline
  *  rather than leaving `[ref 1]` showing. */
@@ -125,7 +141,7 @@ export function splitComment(text: string): CommentPart[] {
   let at = 0
   for (const match of text.matchAll(MARKER)) {
     if (match.index > at) out.push({ t: 'text', v: text.slice(at, match.index) })
-    out.push({ t: match[1] === 'file' ? 'file' : 'ref', n: Number(match[2]) })
+    out.push({ t: match[1] as 'ref' | 'file' | 'skill', n: Number(match[2]) })
     at = match.index + match[0].length
   }
   if (at < text.length) out.push({ t: 'text', v: text.slice(at) })
@@ -145,10 +161,12 @@ export function draftText(body: DraftNode[]): string {
   const out: string[] = []
   // Counted in this pass, so the numbering matches `draftFileIds` by construction.
   let file = 0
+  let skill = 0
   for (const node of body) {
     if (node.t === 'text') out.push(node.v)
     else if (node.t === 'ref' && node.anchor) out.push(refMarker(node.n))
     else if (node.t === 'file' && node.id) out.push(fileMarker(++file))
+    else if (node.t === 'skill') out.push(skillMarker(++skill))
   }
   return out.join('').replaceAll(NBSP, ' ').trim()
 }
@@ -170,6 +188,7 @@ export function bodyFromComment(
   text: string,
   refs: NumberedRef[],
   files: { id: string; name: string }[],
+  skills: string[] = [],
 ): DraftNode[] {
   const byNumber = new Map(refs.map((r) => [r.n, r]))
   const placedRefs = new Set<number>()
@@ -188,6 +207,14 @@ export function bodyFromComment(
       }
       placedRefs.add(part.n)
       body.push({ t: 'ref', n: ref.n, anchor: ref.anchor, label: ref.label })
+      continue
+    }
+    if (part.t === 'skill') {
+      const name = skills[part.n - 1]
+      // A marker naming a skill that is no longer listed stays as literal text,
+      // the same as an unresolvable file or reference: visible, and the user's to
+      // delete, rather than a silent disappearance they cannot account for.
+      body.push(name ? { t: 'skill', name } : { t: 'text', v: skillMarker(part.n) })
       continue
     }
     const file = files[part.n - 1]
@@ -215,6 +242,12 @@ export function bodyFromComment(
 /** Resolved references in document order, each carrying the number the comment
  *  refers to it by. Order and numbering are independent: the array is positional,
  *  `n` is an identity. */
+/** Every skill the user named, in the order they wrote them - which is the order
+ *  `[skill n]` counts in, so the two cannot disagree. */
+export function draftSkills(body: DraftNode[]): string[] {
+  return body.flatMap((node) => (node.t === 'skill' ? [node.name] : []))
+}
+
 export function draftRefs(body: DraftNode[]): NumberedRef[] {
   const out: NumberedRef[] = []
   for (const node of body) {

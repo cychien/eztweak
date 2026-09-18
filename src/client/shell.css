@@ -80,10 +80,25 @@
      chroma, not depth: a navy at this weight recedes, so saturation is pushed
      to 80% of the gamut while the luminance stays put. Held short of full
      saturation on purpose - a standing note that something is available, not a
-     warning that something is wrong. Blue because every other accent here is
+     warning that something is wrong. Blue because every other accent here was
      taken: --mark is the thing annotated, --attach a file, --ref a picked
-     element, and none of them mean "newer". */
+     element, and none of them mean "newer". It is no longer the only blue - see
+     --skill-ink - but the two never share a surface: this one lives in the
+     header and that one inside the conversation. */
   --update-ink: #2566ba;
+
+  /* A skill the user named, written into their message. Blue rather than the
+     rust it started out as: --code-ink is what the agent's own inline code is
+     drawn in, so a skill and a code span sat in the same thread reading as the
+     same thing - which is exactly the collision the one-meaning-per-accent rule
+     exists to stop.
+
+     Weighted, not picked by eye. It runs 5.02:1 on the bubble it usually sits in
+     against --ink-muted's 4.96:1 and --update-ink's 4.99:1, so it carries the
+     same as the other accents here rather than shouting across the thread; on
+     the composer's white it reaches 5.72:1. Held a step cyan-ward of
+     --update-ink so the two are not one value under two names. */
+  --skill-ink: #1a6aa8;
 }
 
 * {
@@ -725,8 +740,13 @@ body.ez-arranging .ez-frame {
     0 2px 8px oklch(0% 0 0 / 0.06);
 }
 
+/* Open. Every control that hangs a menu marks itself `data-open`, and this is the
+   one rule that shows one - so a selector lost from this list is that control
+   silently ceasing to open at all. */
 .ez-seg-device[data-open] .ez-menu,
 .ez-shown[data-open] .ez-menu,
+.ez-config[data-open] .ez-menu,
+.ez-agent[data-open] .ez-menu,
 .ez-update-hint[data-open] .ez-menu {
   display: flex;
 }
@@ -737,6 +757,49 @@ body.ez-arranging .ez-frame {
   left: auto;
   right: 0;
 }
+
+/* Opens upward. Its control sits at the foot of the sidebar with the composer
+   and the send button below it, so downward there is nothing to open into. The
+   cap keeps a long option list - five models, six effort levels and a mode each
+   with a row - from running off the top of the window; the header is what it
+   would run into, and that is a control, not chrome it may cover. */
+.ez-menu-up {
+  top: auto;
+  bottom: calc(100% + 6px);
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+/* One option's rows. A group rather than a run of siblings because the rule
+   between two of them belongs to the boundary, not to whichever row happens to
+   sit at the top of the next one - a boolean option is a single row with no
+   heading, and without this "Fast mode" under six effort levels reads as a
+   seventh. */
+.ez-menu-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ez-menu-group + .ez-menu-group {
+  margin-top: 4px;
+  border-top: 1px solid var(--border);
+  padding-top: 4px;
+}
+
+/* Names the group of rows under it. Not a row itself: it takes no click, so it
+   is set apart by weight and size rather than by looking like a target that
+   refuses one. */
+.ez-menu-label {
+  padding: 4px 8px 2px;
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ink-ghost);
+}
+
+
 
 /* Holds the column whether or not there is a tick in it, so the names do not
    step sideways as boxes are checked. The green is the shell's own - the one it
@@ -793,20 +856,26 @@ body.ez-arranging .ez-frame {
   background: var(--muted);
 }
 
-/* Against the row's own highlight, which is the same colour the key sits on when
-   the row is plain: on a highlighted row it would read as a hole rather than a
-   key. */
-.ez-menu-item:hover .ez-kbd,
-.ez-menu-item:focus-visible .ez-kbd {
-  background: var(--panel);
-  color: var(--foreground);
+/* The chosen row carries the mark on its right and nothing else. No fill: the
+   surface is the hover's, and a row that is both chosen and hovered would
+   otherwise have to say two things with one colour. */
+/* Right, not left, and always in the layout: reserving the width means the
+   names do not step sideways as the choice moves between rows. */
+.ez-menu-check {
+  display: flex;
+  flex-shrink: 0;
+  margin-left: 12px;
+  color: var(--muted-foreground);
+  visibility: hidden;
+}
+
+.ez-menu-item[data-current] .ez-menu-check {
+  visibility: visible;
 }
 
 .ez-menu-name {
   flex: 1;
 }
-
-
 
 /* ---------------------------------------------------------------- buttons */
 
@@ -876,10 +945,101 @@ body.ez-arranging .ez-frame {
 
 /* ---------------------------------------------------------------- banner */
 
+/* Every notice the review raises, in one place: floating at the foot of the
+   thread, sitting on the rule that divides it from the composer.
+
+   Floating, not in flow. A notice is momentary and the conversation is not, so
+   it lies over the last message rather than shoving the whole sidebar around
+   each time one arrives or goes - and the composer under it never moves.
+
+   Full bleed, and it costs nothing: an absolutely positioned box is laid out
+   against its containing block's *padding* box, whose left and right edges are
+   the section's own - the 14px of side padding is the thread's, not this. A
+   layer that stopped short of the edges would read as a card sitting in the
+   thread rather than over it.
+
+   `bottom: 0` is that same padding box, and this section has no block padding,
+   so the stack lands exactly on the rule with nothing showing beneath it. */
+.ez-notices {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 2;
+}
+
+/* Just enough to say this is a layer and not part of the thread. Lighter than
+   the shadow the menus float on, deliberately: they hang free in the middle of
+   the page, this one is a strip pinned flush against an edge, and the card it is
+   modelled on - `.ez-update` - carries no shadow at all. An opaque ground and a
+   rule do most of the work; this only softens the seam.
+
+   On the card, not on the stack. The stack does not animate and the cards do, so
+   a shadow belonging to the stack was painted in full while the card inside it
+   was still at `opacity: 0` - an empty lit box for a sixth of a second, with the
+   ground and the words arriving afterwards. Anything that is part of the card
+   has to fade in as the card.
+
+   Only the topmost visible card carries it, the same way the rules between them
+   are drawn: a shadow under each would cast onto the card above it and draw a
+   seam inside the stack. */
+.ez-notices > *:not([hidden]) {
+  box-shadow: 0 -2px 6px oklch(0% 0 0 / 0.035);
+}
+
+.ez-notices > *:not([hidden]) ~ *:not([hidden]) {
+  box-shadow: none;
+}
+
+/* Each card rises into place. Short, and only on the way in: something arriving
+   under the eye should say so, and something leaving should just be gone.
+
+   It replays whenever a card is shown because both toggles here take it out of
+   `display: none`, which restarts the animation. */
+.ez-notices > * {
+  animation: ez-rise 0.16s ease-out;
+}
+
+/* Except these two. The others arrive on their own and a movement is what says
+   so; these arrive because the user just asked for them, and a card that slides
+   in under a pointer already heading for a row or a button is in the way. */
+.ez-resume,
+.ez-confirm {
+  animation: none;
+}
+
+/* The fade is over well before the movement is. A card is an opaque strip laid
+   over the conversation, and fading one in across its whole travel means the
+   thread reads through it the entire way - which does not look like a card
+   arriving, it looks like the ground turning up late. Opaque by 45%, and what
+   is left is a slide. */
+@keyframes ez-rise {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  45% {
+    opacity: 1;
+  }
+  to {
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ez-notices > * {
+    animation: none;
+  }
+}
+
+.ez-notices > *:not([hidden]) ~ *:not([hidden]) {
+  border-top: 1px solid var(--border);
+}
+
 .ez-banner {
   background: oklch(97% 0.04 85);
   color: oklch(45% 0.1 70);
-  border-bottom: 1px solid oklch(90% 0.06 85);
+  border-top: 1px solid oklch(90% 0.06 85);
   font-size: 12.5px;
   line-height: 1.6;
   padding: 10px 14px;
@@ -891,7 +1051,7 @@ body.ez-arranging .ez-frame {
 .ez-update {
   position: relative;
   padding: 12px 14px;
-  border-bottom: 1px solid var(--border);
+  border-top: 1px solid var(--border);
   background: var(--muted);
   font-size: 12.5px;
   line-height: 1.5;
@@ -1012,7 +1172,13 @@ body.ez-arranging .ez-frame {
   text-underline-offset: 2px;
 }
 
+/* An author `display` outranks the UA's `[hidden] { display: none }`, so every
+   element here that is both flagged hidden and given a display of its own has to
+   say so again - otherwise `hidden` leaves the box laid out and only looks empty,
+   which in the config row's case was 6px of dead space above the composer for
+   every review that has no ACP agent. */
 .ez-update-hint[hidden],
+.ez-config[hidden],
 .ez-update[hidden] {
   display: none;
 }
@@ -1034,6 +1200,8 @@ body.ez-arranging .ez-frame {
   flex: 1;
   padding-block: 0;
   border-bottom: 1px solid var(--border);
+  /* The containing block for the notice stack, which floats at its foot. */
+  position: relative;
 }
 
 /* ---------------------------------------------------------------- conversation (shadcn Message anatomy) */
@@ -1536,6 +1704,356 @@ body.ez-arranging .ez-frame {
   background: var(--paper-sunken);
 }
 
+/* ------------------------------------------------------------ control row */
+
+/* The agent and its model, side by side above the composer. Tight together:
+   they are one statement about what is about to read the feedback, and a gap
+   between them would read as two unrelated controls. */
+/* The gap between the two carries the separation now that neither has padding
+   of its own to do it. Tight to the composer below: what they say is about the
+   box they sit on, so they belong to it rather than floating above it. */
+/* `relative` is load-bearing, not decoration: the two menus below are absolute
+   and measure `bottom` from here. Without it their containing block is the
+   sidebar, and `bottom: calc(100% + 6px)` puts them a sidebar's height above the
+   window - open, laid out, and entirely off screen. */
+.ez-control-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  padding-left: 2px;
+}
+
+.ez-control-row[hidden] {
+  display: none;
+}
+
+/* Sized to their rows, and never past the sidebar. `max-width` is the bound the
+   static positioning on the two controls exists to make statable; `min-width: 0`
+   undoes the base menu's "at least as wide as the control it hangs from", which
+   now resolves to the whole row. */
+.ez-agent .ez-menu,
+.ez-config .ez-menu {
+  left: 0;
+  right: auto;
+  min-width: 0;
+  max-width: 100%;
+}
+
+/* Long enough to need room it cannot have: truncate rather than push the menu
+   wider than the sidebar. */
+.ez-agent .ez-menu-name,
+.ez-config .ez-menu-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ----------------------------------------------------------- agent picker */
+
+/* In the header beside the status badge, which is already the agent's corner.
+   Quiet: it names a thing that rarely changes, and the badge next to it is the
+   one carrying live state. */
+/* Static on purpose: the control row is what these menus hang from. Anchored to
+   its own control, a menu starts wherever that control happens to sit - the
+   model's is offset by the width of the agent beside it - and `width:
+   max-content` then carries it off the edge of the sidebar as soon as a row gets
+   long. Measured from the row instead, the sidebar is the bound. */
+.ez-agent {
+  position: static;
+  display: flex;
+  min-width: 0;
+}
+
+.ez-agent[hidden] {
+  display: none;
+}
+
+/* Text, not a filled control. What they say - which agent, which model - is a
+   note about the batch below them, and a fill would put two more solid shapes
+   above a composer that already has the send button for weight. The hover fill
+   is the whole of the affordance. */
+.ez-agent-pill,
+.ez-config-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  border: none;
+  background: none;
+  /* One step up the scale from the quietest ink, not two. These sit below the
+     composer and are meant to be findable without being read; --ink-ghost put
+     them under that. Hover still has somewhere to go - the step above this. */
+  color: var(--ink-faint);
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 0;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: color 0.12s ease;
+}
+
+/* Whose model it is. Inherits its colour like the chevron does, so the whole
+   control lightens and darkens as one thing. */
+/* The nudge is per-context, and defaults to none.
+ *
+ *  Flex centring already lines the icon's *box* up with the text's - both sit on
+ *  the same midline, and both icons are drawn centred in their own viewBox, so
+ *  there is nothing geometric left to fix. What is left is optical, and optical
+ *  corrections do not travel: the correction that settles a 14px mark beside
+ *  11px text is not the one a 15px mark beside 12px text wants, which is why a
+ *  value set on the shared class landed in the menu as well and looked wrong
+ *  there. Each place that needs one states its own. */
+.ez-brand-mark {
+  display: flex;
+  flex-shrink: 0;
+  transform: translateY(var(--brand-nudge, 0));
+}
+
+.ez-agent-pill {
+  --brand-nudge: 1px;
+}
+
+/* The chevron, and only it - matched as a direct child so the brand mark, which
+   is an svg inside a span of its own, keeps its own treatment.
+
+   No colour of its own: at rest it would otherwise sit darker than the label it
+   belongs to, which is the one thing a chevron should never do. The offsets are
+   optical, like the brand mark's: this glyph is drawn high and tight in its box
+   beside text that is neither. */
+.ez-agent-pill > svg,
+.ez-config-pill > svg {
+  flex-shrink: 0;
+  margin-left: -2px;
+  margin-top: 3px;
+}
+
+/* Ink, not a fill. These are text, and text answers a pointer by getting darker;
+   a panel appearing behind them would be the control they are not.
+   Two steps up the scale rather than all the way to the darkest: enough that the
+   answer is unmistakable against a resting state this faint, and short of the
+   weight that would make a pointer passing over turn the quietest thing in the
+   sidebar into the loudest. */
+.ez-agent-pill:hover:not(:disabled),
+.ez-config-pill:hover:not(:disabled),
+.ez-agent[data-open] .ez-agent-pill,
+.ez-config[data-open] .ez-config-pill {
+  color: var(--ink-muted);
+}
+
+/* Pushed to the end of the row, and the containing block its card hangs from. */
+.ez-usage {
+  position: relative;
+  margin-left: auto;
+  flex-shrink: 0;
+  display: flex;
+}
+
+.ez-usage[hidden] {
+  display: none;
+}
+
+/* Deliberately the quietest thing on the row: a figure to glance at. It is a
+   button because it can be reached and read by keyboard, not because it does
+   anything - so it is styled as the text it was, and only the cursor and the ink
+   lifting under the pointer say there is more behind it. Tabular digits so a
+   number ticking down does not shift the words beside it. */
+.ez-limit {
+  appearance: none;
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+  color: var(--ink-faint);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  transform: translateY(1px);
+  transition: color 0.12s ease;
+}
+
+.ez-usage:hover .ez-limit,
+.ez-limit:focus-visible {
+  color: var(--ink-muted);
+}
+
+/* Everything the agent said, the way `/usage` and `/status` print it: one row per
+   window, each with what is left of it and when it comes back.
+
+   Hung off the right, above the line. Right, because the pill sits in the corner
+   and a card dropped from its left edge would hang off the sidebar; above,
+   because below is the composer.
+
+   Held open by the pointer being anywhere over the pill *or* the card - both are
+   inside `.ez-usage`, so one `:hover` covers the gap between them - and by focus,
+   which is what makes it reachable without a pointer at all. */
+.ez-usage-card {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  right: 0;
+  z-index: 5;
+  width: max-content;
+  min-width: 208px;
+  padding: 10px 12px 11px;
+  border-radius: 10px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  box-shadow:
+    0 12px 32px oklch(0% 0 0 / 0.12),
+    0 2px 8px oklch(0% 0 0 / 0.06);
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(3px);
+  transition:
+    opacity 0.12s ease,
+    transform 0.12s ease,
+    visibility 0s linear 0.12s;
+}
+
+/* The delay on the way in is the whole reason this is bearable: the pill sits on
+   the path from the thread to the composer, and a card that opened the instant a
+   pointer crossed it would be in the way of every third thing the user does. On
+   the way out there is no delay at all - a card nobody is pointing at has nothing
+   to wait for. */
+.ez-usage:hover .ez-usage-card,
+.ez-usage:focus-within .ez-usage-card {
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(0);
+  transition:
+    opacity 0.12s ease 0.22s,
+    transform 0.12s ease 0.22s,
+    visibility 0s linear 0.22s;
+}
+
+.ez-usage-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 9px;
+}
+
+.ez-usage-title {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--ink);
+}
+
+/* The subscription the figures are of. Only codex says which, so this is often
+   simply not there. */
+.ez-usage-plan {
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--ink-faint);
+}
+
+.ez-usage-row + .ez-usage-row {
+  margin-top: 9px;
+}
+
+.ez-usage-line {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+
+.ez-usage-label {
+  color: var(--ink-muted);
+}
+
+.ez-usage-left {
+  color: var(--ink);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The bar fills with what has been *spent*. That is the way every other meter on
+   a screen reads and the way both vendors draw this one - a bar that emptied as
+   the allowance drained would be this one control disagreeing with all of them.
+   The words beside it say what is left; between them the row answers both. */
+.ez-usage-bar {
+  margin-top: 5px;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+/* Muted, not ink: at four pixels tall and, on a spent account, nearly the width
+   of the card, a bar in full ink stops reading as a measure and starts reading as
+   a rule drawn across the row. */
+.ez-usage-bar i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--ink-muted);
+}
+
+/* Little enough left that the row should say so without being read. */
+.ez-usage-row[data-low] .ez-usage-bar i {
+  background: var(--mark);
+}
+
+.ez-usage-row[data-low] .ez-usage-left {
+  color: var(--mark);
+}
+
+.ez-usage-when {
+  margin-top: 3px;
+  font-size: 10.5px;
+  color: var(--ink-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ez-usage-card {
+    transform: none;
+  }
+}
+
+.ez-agent-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ------------------------------------------------------- agent config pill */
+
+/* The positioning context its menu hangs from, and a row of its own above the
+   composer. `flex` with the pill as the only child so the pill takes its content
+   width instead of the sidebar's - a full-width target for a three-word label
+   would read as a second send button. */
+.ez-config {
+  display: flex;
+  position: static;
+}
+
+/* Between sessions there is nothing to set. Faded rather than removed: it is
+   about to come back holding the same label, and a control that vanishes for a
+   moment reads as one that broke. */
+.ez-agent-pill:disabled,
+.ez-config-pill:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+/* The label is the agent's own name for the value and there is no bound on its
+   length, so it truncates rather than widening the row past the sidebar. The
+   part it drops is in the pill's tooltip. */
+.ez-config-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* A contenteditable, not a textarea: attachment chips are elements, and they
    sit in the run of the text itself. Growing with its content is the natural
    behaviour here - the cap is what keeps it from pushing the queue off screen. */
@@ -1621,6 +2139,33 @@ body.ez-arranging .ez-frame {
 .ez-chip-ref {
   background: var(--ref);
   color: var(--ref-ink);
+}
+
+/* The skill the batch runs, written into the sentence the way it would be typed.
+
+   Not a chip at all, despite the class it shares: no fill, no padding, no shape -
+   just the words in a different ink. A file and a picked element are *objects*
+   dropped into a sentence, and a badge is the right shape for those; a skill is
+   something the sentence says, so it stays type.
+
+   Its own ink, and it has to be its own: it was the inline-code rust to begin
+   with, on the reasoning that `$review` in a message is a code token - but the
+   agent's replies draw their own inline code in that same rust, so the two sat
+   in one thread looking like one thing.
+
+   The monospace is what makes it read as a token rather than as a word someone
+   typed a dollar sign in front of. `nowrap` comes from `.ez-chip` and is worth
+   keeping: a skill name broken across two lines stops being a name. */
+.ez-chip-skill {
+  display: inline;
+  max-width: none;
+  padding: 0;
+  border-radius: 0;
+  background: none;
+  color: var(--skill-ink);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.92em;
+  font-weight: 400;
 }
 
 /* Still uploading. Dimmed rather than spinner'd: it resolves in a blink on a
@@ -1995,4 +2540,221 @@ body.ez-arranging .ez-frame {
   flex-direction: column;
   width: 100%;
   min-width: 0;
+}
+
+/* ------------------------------------------------------- confirm notice */
+
+/* Modelled on the update card, because it is the same kind of thing: a card in
+   the stack that states something and offers a way to act on it. */
+.ez-notice {
+  position: relative;
+  padding: 12px 14px;
+  border-top: 1px solid var(--border);
+  background: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.5;
+  flex-shrink: 0;
+}
+
+.ez-notice[hidden] {
+  display: none;
+}
+
+.ez-notice-title {
+  font-weight: 600;
+  font-size: 13px;
+  /* Clear of the close glyph in the corner. */
+  padding-right: 22px;
+}
+
+/* A list needs a label, not a headline: the rows are what is being read. The
+   same treatment as the slash menu's own heading, which is the same thing in the
+   same situation - a quiet caption over a list you pick from. */
+.ez-resume .ez-notice-title {
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.4;
+  color: var(--ink);
+}
+
+/* In the corner, like the update card's. A bare glyph: hover deepens the ink and
+   nothing else, because a fill under it would read as a second control on a card
+   whose only controls are its rows. The padding is hit area. */
+.ez-notice-x {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px;
+  border: none;
+  background: none;
+  color: var(--ink-ghost);
+  cursor: pointer;
+}
+
+.ez-notice-x:hover {
+  color: var(--foreground);
+}
+
+.ez-notice-body {
+  margin-top: 4px;
+  color: var(--muted-foreground);
+}
+
+.ez-notice-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.ez-notice-go {
+  border: 1px solid var(--primary);
+  background: var(--primary);
+  color: var(--primary-foreground);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 5px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  box-shadow: inset 0 1px 0 0 oklch(100% 0 0 / 0.14);
+}
+
+.ez-notice-go:hover {
+  opacity: 0.88;
+}
+
+/* Declining is not the opposite action, it is the absence of one, so it is drawn
+   as text beside the button rather than as a second button competing with it. */
+.ez-notice-no {
+  border: none;
+  background: none;
+  color: var(--muted-foreground);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 5px 2px;
+  cursor: pointer;
+}
+
+.ez-notice-no:hover {
+  color: var(--foreground);
+}
+
+/* Under the buttons and the quietest thing on the card: it changes what happens
+   after this question, not the answer to it. */
+.ez-notice-skip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 9px;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.ez-notice-skip:hover {
+  color: var(--foreground);
+}
+
+.ez-notice-skip input {
+  margin: 0;
+  width: 12px;
+  height: 12px;
+  accent-color: var(--primary);
+  cursor: pointer;
+}
+
+/* ---------------------------------------------------- resume notice list */
+
+/* Seven lines, then it scrolls. The rows are plain lines rather than padded
+   blocks, so this fits more conversations into rather less height than five
+   padded ones took - which is the point: the picker exists to find something in
+   a history, and a history you can only see five of is barely one.
+
+   `--notice-row` is only the scroll budget now, not the row: the rows take the
+   height their text gives them, and seven of those is what this makes room for.
+   Stated in rows so it stays seven when the type is touched. */
+.ez-notice-list {
+  --notice-row: 20px;
+  display: flex;
+  flex-direction: column;
+  max-height: calc(var(--notice-row) * 7);
+  overflow-y: auto;
+  margin-top: 10px;
+  overscroll-behavior: contain;
+}
+
+/* A line of text, and nothing else. No fill, no padding, no shape: a column of
+   blocks reads as a stack of objects, and these are lines in a list. */
+.ez-notice-row {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  width: 100%;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--ink-faint);
+  font-family: inherit;
+  font-size: 12px;
+  /* The row is a line of text, so its height is its leading - not a box drawn
+     around it. Shared with the list's scroll budget so the two cannot disagree:
+     the budget says seven rows, and this is what a row is. */
+  line-height: var(--notice-row);
+  text-align: left;
+  cursor: pointer;
+}
+
+.ez-notice-row:focus-visible {
+  outline: none;
+}
+
+/* Pointed at. Ink, not a fill - the row is text, and text answers by getting
+   darker. Set from a `data-` attribute rather than from `:hover`, so the pointer
+   and the arrow keys cannot each light up a row of their own. */
+.ez-notice-row[data-active] {
+  color: var(--foreground);
+}
+
+/* The arrow belongs to the pointed row, not to the list. Held in every row and
+   shown on one: reserving the space stops the text stepping sideways as the
+   selection moves down it. */
+.ez-notice-row svg {
+  flex-shrink: 0;
+  visibility: hidden;
+  color: var(--ink-faint);
+  transform: translateY(2px);
+}
+
+.ez-notice-row[data-active] svg {
+  visibility: visible;
+}
+
+/* The one being viewed, whether or not it is the one pointed at. */
+.ez-notice-row[data-current] .ez-notice-row-name {
+  font-weight: 500;
+}
+
+.ez-notice-row-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ez-notice-row-when {
+  flex-shrink: 0;
+  color: var(--ink-ghost);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.ez-notice-row[data-active] .ez-notice-row-when {
+  color: var(--ink-faint);
 }
