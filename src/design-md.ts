@@ -43,8 +43,8 @@ export function designMdBrief(state: DesignMdState): string[] {
     case 'present':
       return [
         "`DESIGN.md` at the project root is the design system's source of truth. Read it before any",
-        'visual change and keep to its tokens and rules. When a change needs something it does not',
-        'cover, extend `DESIGN.md` as well as the code.',
+        'visual change and keep to it, the prose as much as the tokens. When a change needs something',
+        'it does not cover, extend `DESIGN.md` as well as the code.',
       ]
     case 'missing':
       return [
@@ -52,23 +52,31 @@ export function designMdBrief(state: DesignMdState): string[] {
         'tokens and the reasons behind them (the format: https://github.com/google-labs-code/design.md).',
         'Before you act on the batch below, ask the user this, word for word:',
         '',
-        '  這個專案還沒有 DESIGN.md。要先建立一份，作為設計的 single source of truth 嗎？',
+        '  這個專案還沒有 DESIGN.md。要先建立一份，作為設計統一標準嗎？',
         '',
         'with two options, in this order: 「建立 DESIGN.md（推薦）」 and 「這次先不要」. Ask before you',
         'look at anything. Use your question tool if you have one; otherwise ask in your reply and end',
         'the turn - the answer arrives as the next message.',
         '',
-        `If they choose to create it: read the format with \`${CLI} spec\`. Then find what the project`,
-        'already says about its design, preferring the deliberate source over the incidental one:',
-        "design or style guideline documents; a Tailwind config or `@theme` block; shadcn's",
-        '`components.json` and the CSS variables it declares; `:root` custom properties; a',
-        '`tokens.json`; and where those are thin or absent, the components themselves - the colours,',
-        'families, sizes, radii and gaps they actually use. Write `DESIGN.md` with YAML frontmatter for',
-        "the tokens and prose for the reasons, in the spec's section order. Declare a section the",
-        'product genuinely has no answer for in `omitted` rather than inventing one. Run',
-        `\`${CLI} lint DESIGN.md\` and fix what it reports. Tell the user in a short paragraph what the`,
-        'document captured and where each part came from. Then handle the batch, to the document you',
-        'just wrote.',
+        `If they choose to create it: read the format with \`${CLI} spec\` - it says what the document`,
+        'has to contain, so none of that is repeated here. What the format cannot know is that the',
+        'page is running, at the `url` in the batch below.',
+        '',
+        'Open it, and read it the way a design-token extractor does: computed styles off the rendered',
+        'DOM, counted. Frequency is what the stylesheet cannot tell you - the colour on three hundred',
+        'elements is the surface, the one on two is the accent, a rule that matches nothing is not in',
+        'the system at all, and the sizes the page keeps landing on are the scale. Then look at the',
+        'whole for what no measurement gives you: what dominates, how much air there is, what the page',
+        'does without.',
+        '',
+        "For the intent behind it, read the project's own deliberate sources: a design or style",
+        "guideline document, a Tailwind config or `@theme` block, shadcn's `components.json` and the",
+        'CSS variables it declares, `:root` custom properties, a `tokens.json`.',
+        '',
+        'Declare a section the product genuinely has no answer for in `omitted` rather than inventing',
+        `one. Run \`${CLI} lint DESIGN.md\` and fix what it reports. Tell the user in a short paragraph`,
+        'what the document captured and where each part came from. Then handle the batch, to the',
+        'document you just wrote.',
         '',
         'If they decline: handle the batch as usual, and do not raise it again.',
       ]
@@ -83,7 +91,7 @@ export function designMdExploreRule(state: DesignMdState): string[] {
   return state === 'present'
     ? [
         "- You may read the file in the element's anchor for context, and `DESIGN.md` at the project",
-        "  root - the design system's source of truth. Keep every variant within its tokens and rules;",
+        "  root - the design system's source of truth. Keep every variant within its tokens and prose;",
         '  one that steps outside them is proposing a change to the system, so say so in its note.',
         '  Nothing else needs reading.',
       ]

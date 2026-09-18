@@ -182,5 +182,5 @@ test('an explore is never offered the file, and is bound by it when there is one
   const [keptExplore] = (await prompts(kept)).filter((p) => p.includes('exploring UI variants'))
   assert.ok(keptExplore)
   assert.ok(!keptExplore.includes(QUESTION))
-  assert.ok(keptExplore.includes('Keep every variant within its tokens and rules'))
+  assert.ok(keptExplore.includes('Keep every variant within its tokens and prose'))
 })
