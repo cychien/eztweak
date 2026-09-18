@@ -24,13 +24,31 @@ import type { AcpSnapshot } from './acp-agent.js'
 import { type AcpConfigValue, configLabel, configValueName } from './acp-config.js'
 import { AGENT_PROFILES, type AgentProfile, agentBrandFor, agentProfileFor } from './agents.js'
 import { clearAgentRecord, reapOrphanedAgents } from './agent-children.js'
-import { attachmentIds, parseReferences } from './anchor.js'
+import { attachmentIds, parseReferences, sanitizeAnchor, sanitizeCapture } from './anchor.js'
 import { injectOverlay, wantsHtml } from './inject.js'
-import { toAgentAttachments, toAgentItem, toConversationItem } from './label.js'
-import type { Annotation, PollResult, SessionEndedBy } from './protocol.js'
+import type { AttachmentLocator } from './label.js'
+import { shortAnchor, toAgentAttachments, toAgentItem, toConversationItem } from './label.js'
+import { type IncomingVariant, ExploreMcp, MCP_ROUTE, isExploreTool } from './mcp-explore.js'
+import type {
+  Anchor,
+  Annotation,
+  Attachment,
+  ExploreCapture,
+  ExploreState,
+  ExploreStatus,
+  PollResult,
+  Reference,
+  SessionEndedBy,
+} from './protocol.js'
 import { listSkills, skillPrefix, spendSkillMarkers } from './skills.js'
 import { SessionStore, listRestorableSessions, newId } from './store.js'
-import { clearRegistry, launchDaemon, probeDaemon, readRegistry, writeRegistry } from './registry.js'
+import {
+  clearRegistry,
+  launchDaemon,
+  probeDaemon,
+  readRegistry,
+  writeRegistry,
+} from './registry.js'
 import { installVersion, pruneInstalledVersions } from './installer.js'
 import { latestVersion, updateChecksDisabled } from './update-check.js'
 import { Updater, type UpdateWire } from './updater.js'
@@ -96,6 +114,12 @@ interface SnapshotWire {
   agentOnline: boolean
   /** Agent took a batch and hasn't come back to poll — it's off editing. */
   agentBusy: boolean
+  /** Work the agent has and has not started: a batch waiting behind a session that
+   *  is still opening, or the explore about to run in the branch just made. The
+   *  complement of `agentBusy` rather than an overlap with it - the two together
+   *  are "the review is waiting", which is what the thread draws a pulse for, and
+   *  apart they are whether a turn has actually begun. */
+  agentQueued?: true
   /** The agent's latest word on what it is doing right now. Transient by design:
    *  progress is status, not conversation, so it lives next to `agentBusy` and
    *  dies with it instead of accumulating stale lines in the log. */
@@ -112,6 +136,14 @@ interface SnapshotWire {
   /** A newer version or a stale skill to offer, and the update's progress once
    *  taken up. Daemon-wide: every session's shell shows the same one. */
   update?: UpdateWire
+  /** The explore rounds still on the page, oldest first. Not filtered by which
+   *  conversation is showing: a round's variant stands in the page whichever
+   *  thread the user is reading, and the strip is about the page. */
+  explores?: ExploreState[]
+  /** Whether this review can start one at all. Depends on what the agent
+   *  advertised, so the page is told rather than left to guess: a command in the
+   *  menu that always fails is worse than one that is not offered. */
+  canExplore?: true
 }
 
 /** One conversation as the picker draws it. The count is what tells two of them
@@ -122,6 +154,14 @@ interface ChatWire {
   startedAt: number
   entries: number
   current: boolean
+  /** The conversation this one branched off, when it did. The picker draws the
+   *  indent from it, and 回主線 is a switch to it. */
+  parentChatId?: string
+  /** What this conversation is called, when it is not the review itself. */
+  title?: string
+  /** What it was opened about - the element, for an explore - which is what
+   *  tells two rounds with the same name apart. */
+  detail?: string
 }
 
 /** Bind `app` on the loopback at `port`, or reject. Deliberately not
@@ -174,7 +214,10 @@ function acpPrompt(
   const spoken: typeof feedback = {
     ...feedback,
     note: named(feedback.note),
-    items: feedback.items.map((item) => ({ ...item, comment: named(item.comment) ?? item.comment })),
+    items: feedback.items.map((item) => ({
+      ...item,
+      comment: named(item.comment) ?? item.comment,
+    })),
   }
   return [
     // The first one, hoisted. The agent expands a leading slash command itself,
@@ -191,9 +234,173 @@ function acpPrompt(
     'use `anchor.components` / `anchor.section` / `anchor.selector` / `anchor.text`.',
     '`[file n]` in a comment is `attachments[n-1]` (read the file at `path`);',
     '`[ref n]` names the entry in `references` whose `n` matches.',
+    'A reference carrying a `variant` is one the user chose in an explore round. Its html is',
+    'the look they settled on, not code to paste: it is a stand-in that rendered in a shadow',
+    "root with styles of its own. Build that look for real, in the project's own components,",
+    'tokens and conventions, against the element the reference anchors to.',
     'Apply every item, then reply with what you changed, item by item, one short line each.',
     '',
     JSON.stringify(spoken, null, 2),
+  ].join('\n')
+}
+
+/** What an explore branch is asked for.
+ *
+ *  Its own prompt rather than `acpPrompt`, because it is a different request: no
+ *  file is to be edited, the answer comes back through a tool rather than in
+ *  prose, and what the agent is looking at is markup it has been handed rather
+ *  than a queue of comments about a page.
+ *
+ *  The rules the tool enforces are stated here too. A rejection costs a turn and
+ *  arrives after the agent has written the variant; a rule read before it starts
+ *  costs nothing. */
+function explorePrompt(
+  round: ExploreState,
+  capture: ExploreCapture,
+  files: AttachmentLocator,
+): string {
+  const attachments = toAgentAttachments(round.attachments, files)
+  const styles = Object.entries(capture.styles ?? {})
+  const slot = capture.slot
+  const layout = slot
+    ? (['display', 'direction', 'align', 'justify', 'gap'] as const)
+        .filter((key) => slot[key])
+        .map((key) => `${key}: ${slot[key]}`)
+    : []
+  const inherits = Object.entries(slot?.inherits ?? {})
+  const tokens = Object.entries(capture.tokens ?? {})
+  const siblings = capture.siblings ?? []
+  const theme = capture.theme
+  return [
+    `The user is exploring UI variants of one element on the page they are reviewing: ${round.label}.`,
+    round.direction
+      ? `They asked for: ${round.direction}`
+      : 'They gave no direction, so range across genuinely different treatments rather than varying one thing.',
+    ...(attachments?.length
+      ? [
+          '',
+          '`[file n]` in that direction is `attachments[n-1]` here - read the file at `path`:',
+          '',
+          '```json',
+          JSON.stringify(attachments, null, 2),
+          '```',
+        ]
+      : []),
+    ...(round.references?.length
+      ? [
+          '',
+          '`[ref n]` in that direction names the entry here whose `n` matches. Each is another element',
+          'on the same page the user is pointing you at - resolve it from `anchor.source` (file:line)',
+          'when present, else from `components` / `section` / `selector` / `text`:',
+          '',
+          '```json',
+          JSON.stringify(round.references, null, 2),
+          '```',
+        ]
+      : []),
+    '',
+    '## The element, as it currently renders',
+    '',
+    '```html',
+    capture.html,
+    '```',
+    ...(capture.truncated
+      ? ['', 'That markup was cut short - the element has more in it than you are being shown.']
+      : []),
+    ...(styles.length
+      ? ['', 'Its computed styling, resolved:', ...styles.map(([k, v]) => `- ${k}: ${v}`)]
+      : []),
+    ...(capture.rules?.length
+      ? [
+          '',
+          "The page's CSS that currently styles it (and what is inside it), as authored. Hover, focus",
+          'and pseudo-element states are here; copy from these rather than re-deriving them:',
+          '',
+          '```css',
+          ...capture.rules,
+          '```',
+        ]
+      : []),
+    '',
+    '## Where it stands',
+    '',
+    ...(capture.parentWidth ? [`- The container is ${capture.parentWidth}px wide.`] : []),
+    ...(layout.length ? [`- The container lays its children out with ${layout.join(', ')}.`] : []),
+    ...(siblings.length
+      ? [
+          `- Its siblings in that container, in order: ${siblings
+            .map(
+              (s) =>
+                `<${s.tag}${s.class ? ` class="${s.class}"` : ''}> ${s.width}×${s.height}${s.text ? ` "${s.text}"` : ''}`,
+            )
+            .join('; ')}.`,
+          '  A wider variant pushes them; a taller one changes the row.',
+        ]
+      : []),
+    ...(theme
+      ? [
+          `- Theme: ${[
+            theme.scheme ? `color-scheme ${theme.scheme}` : null,
+            theme.dataTheme ? `data-theme="${theme.dataTheme}"` : null,
+            theme.classes ? `classes "${theme.classes}"` : null,
+          ]
+            .filter(Boolean)
+            .join(', ')}.`,
+        ]
+      : []),
+    '',
+    '## How your variant is rendered - read this before writing any CSS',
+    '',
+    "The variant is placed in a **shadow root** standing in the element's slot. Consequences:",
+    '',
+    capture.styles?.['box-sizing']
+      ? `- **\`box-sizing\` is \`${capture.styles['box-sizing']}\` on every element inside the root**, matching the element it`
+      : '- **`box-sizing` inside the root matches the element it stands in for**, on every element - the',
+    capture.styles?.['box-sizing']
+      ? '  stands in for, so `width: 100%` with padding lays out the way it does on the page. Nothing'
+      : '  page has set it, so `width: 100%` with padding lays out the way it does on the page. Nothing',
+    '  else from the page comes with it.',
+    "- **None of the page's CSS reaches it.** Not `.btn`, not resets, nothing. Class names from the",
+    '  page do nothing inside; write every rule the variant needs yourself, in one `<style>` inside the',
+    '  root or as inline styles. The rules above are there to be copied from.',
+    ...(inherits.length
+      ? [
+          '- **What it does inherit** from its position, so you need not restate these unless changing them:',
+          ...inherits.map(([k, v]) => `  - ${k}: ${v}`),
+          "  Note these are the *container's* values. A white `color` on the original comes from its own",
+          '  class and will not carry over.',
+        ]
+      : []),
+    ...(tokens.length
+      ? [
+          "- **The page's CSS custom properties are available** inside the variant and keep it in step with the",
+          '  theme. Prefer them where they fit:',
+          ...tokens.map(([k, v]) => `  - ${k}: ${v}`),
+        ]
+      : []),
+    '- `@media`, `@keyframes`, `@supports` all work. Write `:host` where you would write `:root`;',
+    '  `:root` matches nothing in a shadow tree.',
+    '',
+    '## Rules',
+    '',
+    '- Do not edit, create or delete any file. Nothing here is being implemented.',
+    "- You may read the file in the element's anchor for context; nothing else needs reading.",
+    '- Each variant is exactly one root element, at most one `<style>` inside it.',
+    '- **No JavaScript** - no `<script>`, no inline handlers, no `javascript:` urls. Interaction is done',
+    '  with the platform: `:hover`/`:focus-visible`/`:active`; `<details>`; `<input type=checkbox>` +',
+    '  `:checked` + `:has()`; the `popover` attribute with `popovertarget`; `<dialog open>`; CSS',
+    '  transitions and `@keyframes`; `scroll-snap`. A state that needs a click to see is better as a',
+    '  second variant ("menu open") than as behaviour.',
+    '- No `<iframe>`, `<link>`, `<object>`, `<embed>`.',
+    '- The variants stand in for the real element on the page, so keep them the same kind of thing:',
+    '  the same text, the same purpose, a different treatment.',
+    '',
+    'Produce 4 variants. Send each one with the `explore_variant` tool the moment it is ready,',
+    'rather than writing them all out first: each call puts another option in front of the user.',
+    '',
+    'This conversation is a branch. The user may keep talking to you here about the variants, and',
+    'nothing said here reaches the review they branched from unless they adopt one.',
+    'When all four are sent, reply with one short line and stop.',
   ].join('\n')
 }
 
@@ -256,6 +463,13 @@ function configChangeNote(option: SessionConfigOption, value: AcpConfigValue): s
 class SessionRuntime {
   readonly store: SessionStore
   readonly bus = new EventEmitter()
+  /** The explore rounds this session is taking variants for, and the tool the
+   *  agent sends them through. */
+  readonly exploreMcp = new ExploreMcp()
+  /** The ask for a round whose branch is still opening. Held rather than sent,
+   *  because a prompt to a session that is not up yet is a prompt that is
+   *  dropped - see `deliverToAcp`. */
+  private pendingExplore: string | null = null
   port = 0
   private server!: Server
   private sseClients = new Set<Response>()
@@ -293,6 +507,8 @@ class SessionRuntime {
     // Session start is the one moment no composer can be holding a fresh upload,
     // which is what makes an unreferenced attachment safe to judge by age alone.
     this.store.sweepAttachments()
+    // Likewise: a round mid-turn when the last daemon went down has no turn now.
+    this.store.settleExplores()
     this.bus.setMaxListeners(50)
   }
 
@@ -320,6 +536,9 @@ class SessionRuntime {
   snapshot(): SnapshotWire {
     const s = this.store.session
     const update = this.updater.snapshot()
+    // A dismissed round is history: the thread still names it, but nothing of it
+    // is on the page and nothing about it is on offer.
+    const live = this.store.explores.filter((e) => e.status !== 'dismissed')
     return {
       version: this.version,
       state: s.state,
@@ -330,10 +549,19 @@ class SessionRuntime {
       agentOnline:
         this.pollWaiters.size > 0 || (!!this.acp && this.acp.snapshot().state !== 'exited'),
       agentBusy: this.agentBusy,
+      // Work the agent has been given and not yet started: a batch sitting behind
+      // a session that is still opening, or the explore about to run in the branch
+      // just made. Not the same as busy - no turn has begun - but the review is
+      // waiting all the same, and the thread says so.
+      ...(!this.agentBusy && (this.pendingExplore || this.store.nextBatch())
+        ? { agentQueued: true as const }
+        : {}),
       ...(this.agentProgress ? { agentProgress: this.agentProgress } : {}),
       ...(this.agentBusy && this.activeBatch ? { activeBatchId: this.activeBatch } : {}),
       ...(this.acp ? { acp: this.acp.snapshot(), chats: this.chatsWire() } : {}),
       ...(update ? { update } : {}),
+      ...(live.length ? { explores: live } : {}),
+      ...(this.canExplore ? { canExplore: true as const } : {}),
     }
   }
 
@@ -342,7 +570,17 @@ class SessionRuntime {
    *  entry-belongs-to-chat rule with the thread window, which is the only way the
    *  two can agree. */
   private chatsWire(): ChatWire[] {
-    return this.store.chatSummaries().reverse()
+    // A branch is named by what it was opened to do, and that outlives the round
+    // being dismissed - the conversation is still there to go back to, and a
+    // nameless row in the picker is one the user cannot choose between.
+    const explores = this.store.explores
+    return this.store
+      .chatSummaries()
+      .map((chat) => {
+        const round = explores.find((e) => e.chatId === chat.id)
+        return round ? { ...chat, title: '探索樣式', detail: round.label } : chat
+      })
+      .reverse()
   }
 
   broadcast(): void {
@@ -430,6 +668,11 @@ class SessionRuntime {
       // next turn.
       rememberedLimit: () => rememberedLimit(command),
       onLimitChange: (limit) => rememberLimit(command, limit),
+      // Whatever rounds are taking variants when this session opens. The port is
+      // read now rather than captured, because a restored session can come back
+      // on a different one.
+      mcpServers: () => this.exploreMcp.serverEntries(this.port),
+      ownTool: isExploreTool,
       // Delivery rides on every state change: the moment the agent first goes
       // idle - or comes back idle - whatever is queued goes out.
       onChange: () => {
@@ -466,7 +709,8 @@ class SessionRuntime {
         // no reply and no explanation, which reads as a turn still running long
         // after it stopped - the one thing the thread must never do, because
         // there is no other way to tell waiting from finished.
-        const note = stopReason === 'end_turn' ? (text ? null : SAID_NOTHING_NOTE) : turnEndNote(stopReason)
+        const note =
+          stopReason === 'end_turn' ? (text ? null : SAID_NOTHING_NOTE) : turnEndNote(stopReason)
         if (note) {
           this.store.appendConversation({
             role: 'system',
@@ -475,6 +719,13 @@ class SessionRuntime {
             ...answers,
           })
         }
+        // After the reply and its note, so the round's own note reads as the
+        // last word on the turn rather than as an interruption of it. A round
+        // lasts exactly as long as the turn that asked for it: whatever arrived
+        // stays, and what stops is the agent's ability to send more, because a
+        // variant arriving after that turn answers a question nobody is waiting
+        // on.
+        this.endExplore(stopReason === 'cancelled' ? 'cancelled' : 'done')
         // The turn is the whole delivery in ACP mode, so its end is the ack -
         // including a cancelled one: the user stopped it, and handing the batch
         // straight back would undo that.
@@ -547,8 +798,12 @@ class SessionRuntime {
       })
   }
 
-  answerAcp(id: string, answers: Record<string, string>): boolean {
+  answerAcp(id: string, answers: unknown): boolean {
     return this.acp?.answer(id, answers) ?? false
+  }
+
+  declineAcp(id: string): boolean {
+    return this.acp?.decline(id) ?? false
   }
 
   /** The user picked a model, an effort level, a mode - whatever this agent
@@ -583,7 +838,202 @@ class SessionRuntime {
     return this.moveToChat(() => this.store.startChat().id)
   }
 
+  /** Branch the review off the conversation it is on: the agent copies the
+   *  transcript into a new session, a new chat is recorded against it, and the
+   *  review moves there. Everything said from now on belongs to the branch and
+   *  never reaches the parent.
+   *
+   *  The copy has to happen before the move, because a branch is only a branch if
+   *  the agent kept the history: a fork the agent refused would otherwise leave
+   *  the review on a fresh, empty conversation that looks like a branch and is
+   *  not. So a refusal here leaves everything exactly where it was, and the
+   *  caller decides what to say about it.
+   *
+   *  Resuming the copy is `reopenSession`'s job, which is also where the mcp
+   *  servers and the review's pinned model get re-asserted - both of which a
+   *  resumed session needs, since it comes back on the agent's own defaults. */
+  async branchAcpChat(): Promise<boolean> {
+    if (!this.acp?.canBranch) return false
+    // Nothing said yet means nothing to carry, and an agent refuses to fork a
+    // session with no transcript - which made `/explore` fail on every review
+    // that had not had a turn yet, which is most of them at the moment someone
+    // first reaches for it. A plain new chat is then not a degradation but the
+    // identical outcome: same empty context, same isolation from the review. The
+    // *parent* is still recorded, so 回主線 still goes back.
+    if (!this.acp.hasTranscript) {
+      return this.moveToChat(() => this.store.startBranch(undefined, undefined).id)
+    }
+    const agent = this.acp.snapshot().agent
+    const forked = await this.acp.forkSession()
+    if (!forked) return false
+    return this.moveToChat(() => this.store.startBranch(forked, agent).id)
+  }
 
+  /** The conversation this one branched off, when it did. */
+  parentChatId(): string | undefined {
+    return this.store.currentChat.parentChatId
+  }
+
+  /** Whether this session can run an explore at all: an agent that takes a tool
+   *  over HTTP MCP, and one that branches. Both, because a round without the
+   *  tool has no way back and a round without the branch would be had in the
+   *  review itself. */
+  get canExplore(): boolean {
+    return !!this.acp?.canBranch && this.acp.servesMcpHttp
+  }
+
+  /** Open a round: a url for the agent to send variants to, a branch to have it
+   *  on, and the turn that asks for them.
+   *
+   *  The order is forced. The round's mcp server has to exist before the branch
+   *  session is opened, because `mcpServers` is read at open time and a session
+   *  opened without it has no tool to answer with - which fails as silence
+   *  rather than as an error. So: open the round, branch, record, ask.
+   *
+   *  A branch that does not happen takes the round with it. Running the explore
+   *  in the review itself would be the one thing this feature exists not to do. */
+  async startExplore(input: {
+    anchor: Anchor
+    capture: ExploreCapture
+    direction?: string
+    attachments?: Attachment[]
+    references?: Reference[]
+  }): Promise<ExploreState | null> {
+    if (!this.canExplore) return null
+    const id = newId()
+    this.exploreMcp.open(id, (variant) => this.takeVariant(id, variant))
+    if (!(await this.branchAcpChat())) {
+      this.exploreMcp.close(id)
+      return null
+    }
+    const label = shortAnchor(input.anchor)
+    const round = this.store.startExplore({
+      id,
+      chatId: this.store.currentChat.id,
+      label,
+      anchor: input.anchor,
+      ...(input.direction ? { direction: input.direction } : {}),
+      ...(input.attachments?.length ? { attachments: input.attachments } : {}),
+      ...(input.references?.length ? { references: input.references } : {}),
+    })
+    this.store.appendConversation({
+      role: 'user',
+      text: input.direction ? `探索 ${label}：${input.direction}` : `探索 ${label}`,
+      ts: Date.now(),
+      ...(round.attachments?.length ? { attachments: round.attachments.map((a) => a.name) } : {}),
+      ...(round.references?.length
+        ? { references: round.references.map((r) => ({ n: r.n, label: r.label })) }
+        : {}),
+    })
+    this.pendingExplore = explorePrompt(round, input.capture, this.store)
+    this.deliverToAcp()
+    this.broadcast()
+    return round
+  }
+
+  /** One variant, arriving from the agent's tool call. The string goes back as
+   *  the tool's result, which is the agent's cue for what to do next: how many
+   *  have landed is what tells it when it is done. */
+  private takeVariant(id: string, variant: IncomingVariant): string {
+    const round = this.store.addVariant(id, variant)
+    if (!round)
+      return 'This explore round is over; the user is no longer looking at it. Stop sending variants.'
+    // The first one goes on the page by itself. The user asked to see variants,
+    // and a strip of buttons that all have to be clicked before anything happens
+    // is a worse answer to that than showing the first and letting them move.
+    if (round.variants.length === 1) this.store.selectVariant(id, round.variants[0]!.id)
+    this.broadcast()
+    return `Variant ${round.variants.length} ("${variant.name}") is now on the user's page.`
+  }
+
+  /** The round a conversation is about, while any of it is still on offer. */
+  private roundOf(chatId: string): ExploreState | undefined {
+    return this.store.explores.find((e) => e.chatId === chatId && e.status !== 'dismissed')
+  }
+
+  /** The branch's turn is over, however it ended, so the round stops taking
+   *  variants - but not for good, and its url stays open.
+   *
+   *  It has to. The agent was handed that url when its session opened and no
+   *  protocol takes one back, so the tool sits in its list for as long as the
+   *  branch does. Closing the url at the end of the first turn left every
+   *  finished branch advertising a tool that answers 404 - and the user asking
+   *  for more in the one conversation where asking for more should work.
+   *
+   *  What refuses a variant between turns is the round's status, which the next
+   *  turn in this branch puts back: see `resumeRound`. */
+  private endExplore(status: ExploreStatus): void {
+    const round = this.roundOf(this.store.currentChat.id)
+    if (!round || round.status !== 'generating') return
+    this.store.endExplore(round.id, status)
+    if (!round.variants.length && status === 'done') {
+      this.store.appendConversation({
+        role: 'system',
+        text: '這一輪沒有產出任何 variant',
+        ts: Date.now(),
+      })
+    }
+  }
+
+  /** The review has left the branch, so the round is done with: the url goes, and
+   *  a turn that was still running is settled as the cancel that took it. */
+  private closeRound(chatId: string): void {
+    const round = this.roundOf(chatId)
+    if (!round) return
+    this.exploreMcp.close(round.id)
+    if (round.status === 'generating') this.store.endExplore(round.id, 'cancelled')
+  }
+
+  /** A turn is about to run in the conversation being read, so if that
+   *  conversation is a branch with a round, the round is taking variants again.
+   *  Asking for more in the branch carries on the round rather than starting one:
+   *  the strip grows, and what was already chosen stays chosen. */
+  private resumeRound(): void {
+    const round = this.roundOf(this.store.currentChat.id)
+    if (!round || round.status === 'generating') return
+    this.store.resumeExplore(round.id)
+  }
+
+  selectVariant(id: string, variantId: string | null): boolean {
+    if (!this.store.selectVariant(id, variantId)) return false
+    this.broadcast()
+    return true
+  }
+
+  dismissExplore(id: string): boolean {
+    if (!this.store.dismissExplore(id)) return false
+    this.exploreMcp.close(id)
+    this.broadcast()
+    return true
+  }
+
+  /** Done with a round: the review leaves the branch and the page goes back to
+   *  what it really is.
+   *
+   *  One act, because it is one decision. A round dismissed with the review still
+   *  standing in its branch leaves a conversation whose only purpose has just been
+   *  taken away - the agent still holds the variant tool and the daemon no longer
+   *  answers it, which is the shape the user met as "MCP server 已經斷線".
+   *
+   *  `variantId` is the one the user chose. The page still goes back to the real
+   *  element: the choice travels to the main line as markup for the agent to build
+   *  properly, and a stand-in left on the page would make it impossible to see
+   *  whether that work had landed.
+   *
+   *  Out of the branch before the round is dismissed, because leaving can be
+   *  refused - an agent that has gone - and the other order would strand the
+   *  review in a branch with nothing left in it. */
+  exitExplore(id: string, variantId?: string): boolean {
+    const round = this.store.explores.find((e) => e.id === id)
+    if (!round) return false
+    if (variantId && !round.variants.some((v) => v.id === variantId)) return false
+    const parent = this.store.chats.find((c) => c.id === round.chatId)?.parentChatId
+    if (parent && this.store.currentChat.id === round.chatId && !this.switchAcpChat(parent)) {
+      return false
+    }
+    if (variantId) this.store.markExploreAdopted(id, variantId)
+    return this.dismissExplore(id)
+  }
 
   /** Show an earlier conversation and put the agent back on it. */
   switchAcpChat(id: string): boolean {
@@ -607,6 +1057,19 @@ class SessionRuntime {
     const from = this.store.currentChat.id
     const to = move()
     if (!to) return false
+    // The round of the conversation being left is over for good now, which is the
+    // one end a round's own turn never gets to report: the turn goes with the
+    // session - `reopenSession` cancels a working one - and its end then arrives
+    // on a session this daemon has already let go of, which the epoch drops.
+    //
+    // Before the session is opened rather than after. `reopenSession` reads the
+    // open rounds synchronously to hand the next session its urls, and a round
+    // the review is walking away from must not be among them: the agent would
+    // start the new conversation holding a tool for the old one, and reach for it
+    // first. The rollback below can then leave a closed round behind, which costs
+    // nothing - the only way past that line is an agent that has exited, and a
+    // round whose agent is gone is over whatever this says.
+    this.closeRound(from)
     if (!this.acp.reopenSession()) {
       this.store.switchChat(from)
       return false
@@ -628,6 +1091,18 @@ class SessionRuntime {
    *  the same JSON `poll` prints, so the skill's reading of it carries over. */
   private deliverToAcp(): void {
     if (!this.acp || this.acp.snapshot().state !== 'idle') return
+    // The explore's own turn goes first and alone. Branching only *starts* the
+    // session it will run in - `reopenSession` returns as soon as it has let go
+    // of the old one - so the ask waits here for the branch to actually be open,
+    // the same way a queued batch waits for the agent to be ready for it.
+    const explore = this.pendingExplore
+    if (explore) {
+      this.pendingExplore = null
+      this.agentBusy = true
+      this.acp.prompt(explore)
+      this.broadcast()
+      return
+    }
     const outcome = this.pollOutcome()
     if (!outcome) return
     if (outcome.type === 'session-ended') {
@@ -635,6 +1110,10 @@ class SessionRuntime {
       this.acp = null
       return
     }
+    // Before the prompt: a variant can arrive on the agent's first tool call, and
+    // a round still settled when it does would refuse it. The explore's own turn
+    // above needs none of this - `startExplore` opened the round generating.
+    this.resumeRound()
     this.acp.prompt(acpPrompt(outcome, this.activeSkills, this.acp.snapshot().agent))
   }
 
@@ -721,6 +1200,11 @@ class SessionRuntime {
     )
 
     api.use(express.json({ limit: '2mb' }))
+
+    // The agent's own end of the review: one url per live explore round, each
+    // behind its own token. Mounted on this session's app because a round
+    // belongs to a session, so a url cannot reach across to another one's.
+    api.post(MCP_ROUTE, this.exploreMcp.handler())
 
     api.get('/state', (_req, res) => res.json(this.snapshot()))
 
@@ -856,9 +1340,7 @@ class SessionRuntime {
         ts: Date.now(),
         batchId: batch.batchId,
         items: batch.items.map(toConversationItem),
-        ...(batch.attachments?.length
-          ? { attachments: batch.attachments.map((a) => a.name) }
-          : {}),
+        ...(batch.attachments?.length ? { attachments: batch.attachments.map((a) => a.name) } : {}),
         ...(batch.references?.length
           ? { references: batch.references.map((r) => ({ n: r.n, label: r.label })) }
           : {}),
@@ -870,15 +1352,21 @@ class SessionRuntime {
     })
 
     // SPIKE: the user answered the agent's question card in the shell.
+    // Either the answers, or `decline: true` for a question the user would
+    // rather not answer. The shape of the answers is the agent's to check
+    // against the fields it asked for; a mismatch reads as the question having
+    // moved on, which for the shell it has.
     api.post('/acp/answer', (req, res) => {
       const id = String(req.body?.id ?? '')
-      const answers = req.body?.answers as Record<string, string> | undefined
-      if (!id || typeof answers !== 'object' || answers === null) {
-        return res.status(400).json({ error: 'id and answers are required' })
-      }
-      if (!this.answerAcp(id, answers)) {
-        return res.status(409).json({ error: 'that question is no longer waiting' })
-      }
+      if (!id) return res.status(400).json({ error: 'id is required' })
+      const settled =
+        req.body?.decline === true
+          ? this.declineAcp(id)
+          : typeof req.body?.answers === 'object' && req.body.answers !== null
+            ? this.answerAcp(id, req.body.answers)
+            : null
+      if (settled === null) return res.status(400).json({ error: 'answers or decline is required' })
+      if (!settled) return res.status(409).json({ error: 'that question is no longer waiting' })
       res.json({ ok: true })
     })
 
@@ -957,8 +1445,15 @@ class SessionRuntime {
     // opened rather than ridden along on every broadcast: naming them reaches
     // outside this process - a transcript on disk, a call to codex - and a turn
     // streaming chunks must not pay for that a hundred times a second.
+    // The conversations `/resume` offers: the review's own lines, not the
+    // branches off them. A branch is reached from the breadcrumb of the line it
+    // came off, where its siblings are and where the context makes it mean
+    // something; in a flat list of everything the review has ever had, a row
+    // called 探索樣式 says nothing about which conversation it belongs to.
+    // Filtered before the titles are fetched, so nothing is asked of the agent
+    // for rows that will not be drawn.
     api.get('/acp/chats', async (_req, res) => {
-      const summaries = this.store.chatSummaries()
+      const summaries = this.store.chatSummaries().filter((chat) => !chat.parentChatId)
       const command = this.acp?.snapshot().agent ?? ''
       let titles = new Map<string, string>()
       try {
@@ -999,6 +1494,85 @@ class SessionRuntime {
         return res.status(409).json({ error: 'that conversation cannot be opened right now' })
       }
       res.json({ ok: true })
+    })
+
+    // Start a round: branch the conversation and ask for variants of one element.
+    api.post('/explore/start', async (req, res) => {
+      const anchor = sanitizeAnchor(req.body?.anchor)
+      const capture = sanitizeCapture(req.body?.capture)
+      if (!anchor || !capture) {
+        return res.status(400).json({ error: 'anchor and capture are required' })
+      }
+      const direction = typeof req.body?.direction === 'string' ? req.body.direction.trim() : ''
+      // The same resolution `/annotations` does, because the markers in the text
+      // mean the same thing here: `[file n]` is a path the agent opens, `[ref n]`
+      // an element it is being pointed at.
+      const ids = attachmentIds(req.body?.attachments)
+      if (!ids) return res.status(400).json({ error: 'attachments must be an array of ids' })
+      const files = this.store.getAttachments(ids)
+      if (!files) return res.status(400).json({ error: 'unknown attachment id' })
+      const refs = parseReferences(req.body?.references)
+      if (!refs) return res.status(400).json({ error: 'references must be an array of anchors' })
+      const round = await this.startExplore({
+        anchor,
+        capture,
+        ...(direction ? { direction } : {}),
+        ...(files.length ? { attachments: files } : {}),
+        ...(refs.length ? { references: refs } : {}),
+      })
+      if (!round) {
+        return res.status(409).json({ error: 'this agent cannot run an explore right now' })
+      }
+      res.json({ exploreId: round.id })
+    })
+
+    // Put one variant on the page, or `null` for the element as it really is.
+    api.post('/explore/select', (req, res) => {
+      const id = String(req.body?.id ?? '')
+      const variantId = req.body?.variantId
+      if (!id || (variantId !== null && typeof variantId !== 'string')) {
+        return res.status(400).json({ error: 'id and variantId are required' })
+      }
+      if (!this.selectVariant(id, variantId)) {
+        return res.status(409).json({ error: 'no such variant in that round' })
+      }
+      res.json({ ok: true })
+    })
+
+    // Close a round: the page goes back to what it really is, and the agent's
+    // url for it stops taking variants.
+    api.post('/explore/dismiss', (req, res) => {
+      const id = String(req.body?.id ?? '')
+      if (!id) return res.status(400).json({ error: 'id is required' })
+      if (!this.dismissExplore(id)) return res.status(409).json({ error: 'no such explore round' })
+      res.json({ ok: true })
+    })
+
+    // Done with a round, with or without a pick: the review comes out of the
+    // branch and the page goes back to what it really is.
+    api.post('/explore/exit', (req, res) => {
+      const id = String(req.body?.id ?? '')
+      const variantId = req.body?.variantId
+      if (!id || (variantId !== undefined && typeof variantId !== 'string')) {
+        return res.status(400).json({ error: 'id is required' })
+      }
+      if (!this.exitExplore(id, variantId)) {
+        return res.status(409).json({ error: 'that round cannot be left right now' })
+      }
+      res.json({ ok: true })
+    })
+
+    // Branch the conversation: the agent copies what has been said so far into a
+    // session of its own and the review moves there. Answers with the new chat
+    // and the one it came from, so the caller can offer the way back without
+    // reading the whole picker.
+    api.post('/acp/branch', async (_req, res) => {
+      if (!(await this.branchAcpChat())) {
+        return res
+          .status(409)
+          .json({ error: 'this agent cannot branch the conversation right now' })
+      }
+      res.json({ chatId: this.store.currentChat.id, parentChatId: this.parentChatId() })
     })
 
     // SPIKE: clear the agent's context and carry on in a fresh session.
@@ -1427,8 +2001,7 @@ export async function daemonMain(version: string, opts: DaemonOptions = {}): Pro
   // registered, so restoring before it has exited would land them elsewhere
   // and orphan every open shell. If it never exits, restore anyway - a daemon
   // on other ports beats no daemon.
-  const predecessorGone =
-    opts.succeed === undefined || (await waitForExit(opts.succeed, 15_000))
+  const predecessorGone = opts.succeed === undefined || (await waitForExit(opts.succeed, 15_000))
   if (!predecessorGone) {
     // eslint-disable-next-line no-console
     console.error(`predecessor pid ${opts.succeed} is still running; restoring sessions anyway`)

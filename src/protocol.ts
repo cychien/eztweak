@@ -64,6 +64,22 @@ export interface Reference {
   anchor: Anchor
   /** A name for the element, for the sidebar and the conversation log. */
   label: string
+  /** The markup the user settled on for this element, out of an explore round.
+   *
+   *  A reference carrying one is not "look at that" but "make this one look like
+   *  this". What a round produces is a stand-in - shadow-rooted, never written to
+   *  a file, never wired to anything - so choosing one is not the end of the work
+   *  but the start of it: this is the picture, now build the real thing the way
+   *  the project builds things. */
+  variant?: ChosenVariant
+}
+
+/** One explore variant, as the user hands it on. The round it came from is over
+ *  by then and its id would name nothing, so what travels is the markup itself
+ *  and the name the user chose it by. */
+export interface ChosenVariant {
+  name: string
+  html: string
 }
 
 /** A reference as it reads back in the conversation log and the queue: enough to
@@ -83,6 +99,100 @@ export interface Annotation {
   attachments?: Attachment[]
   references?: Reference[]
 }
+
+/** What the agent is shown of the element it is exploring, captured in the page
+ *  at the moment the user asked.
+ *
+ *  Separate from `Anchor`, which answers *where* the element is. This answers
+ *  what it currently looks like, which is the question a variant is an answer to
+ *  - and unlike the anchor it cannot be resolved later, because by then the
+ *  agent's own variant may be standing in its place. */
+export interface ExploreCapture {
+  /** The element's own markup, capped. What the variants are variants *of*. */
+  html: string
+  /** Set when `html` was cut short, so the agent knows it is not seeing all of
+   *  it rather than inventing what it cannot see. */
+  truncated?: true
+  /** The few computed values that read as design decisions rather than as
+   *  layout: font, size, weight, colour, background, radius, padding, gap. Keyed
+   *  by CSS property name, in the browser's own serialisation. */
+  styles?: Record<string, string>
+  /** The content width of the element's parent, in CSS pixels. What says how
+   *  much room a variant has to work in. */
+  parentWidth?: number
+  /** The page's own CSS rules that currently apply to the element or anything
+   *  inside it, as authored (`cssText`), pseudo-class and pseudo-element rules
+   *  included. What computed values cannot give: `:hover`, `::after`, and the
+   *  `var(--brand)` behind an `rgb(...)`. Inside a shadow root none of these
+   *  rules reach the variant, so this is how the agent gets to *copy* them. */
+  rules?: string[]
+  /** The slot the variant will stand in: how the parent lays its children out,
+   *  and what the variant will inherit from it. The inherited values are the
+   *  parent's, not the element's - a white `color` on the original comes from
+   *  the original's own class, and the variant will not get it for free. */
+  slot?: {
+    display?: string
+    direction?: string
+    align?: string
+    justify?: string
+    gap?: string
+    inherits?: Record<string, string>
+  }
+  /** The page's CSS custom properties on `:root`, resolved. They cross the
+   *  shadow boundary, so a variant that uses them stays in step with the theme. */
+  tokens?: Record<string, string>
+  /** The element's siblings in the same parent, in order, so a variant knows
+   *  what it is standing next to and what a wider one would push. */
+  siblings?: { tag: string; class?: string; text?: string; width: number; height: number }[]
+  /** Whether the page is in a dark scheme, and the theme hooks it hangs that on. */
+  theme?: { scheme?: string; classes?: string; dataTheme?: string }
+}
+
+/** One variant the agent produced, as it is stored and drawn. */
+export interface ExploreVariant {
+  id: string
+  name: string
+  html: string
+  note?: string
+  createdAt: number
+}
+
+/** One round of exploring one element.
+ *
+ *  A list of these, not one: the user explores a button, then a heading, and
+ *  both stay on the page at once because they are different anchors. Rounds are
+ *  told apart by id everywhere - in the strip, in the swap, and in the url the
+ *  agent sends variants to - so a variant can only ever land in the round it was
+ *  asked for. */
+export interface ExploreState {
+  id: string
+  /** The branch conversation this round is being had in. */
+  chatId: string
+  /** A short name for the element, for the strip and the thread. */
+  label: string
+  anchor: Anchor
+  /** What the user typed after `/explore`, when they typed anything. */
+  direction?: string
+  status: ExploreStatus
+  variants: ExploreVariant[]
+  /** Which variant is on the page, or null for the original. */
+  selected: string | null
+  /** Set once this round's pick has been sent to the main line. */
+  adopted?: string
+  /** Files put in the direction - "like this screenshot". `[file n]` in
+   *  `direction` is `attachments[n-1]`, the same positional contract a comment
+   *  has. */
+  attachments?: Attachment[]
+  /** Elements the direction points at - "make it match that one". `[ref n]`
+   *  names the entry whose `n` matches, which is not its position. */
+  references?: Reference[]
+  startedAt: number
+}
+
+/** `generating` - the branch turn is running. `done` - it finished. `cancelled` -
+ *  the user stopped it; whatever had arrived stays. `dismissed` - the user closed
+ *  the strip, so nothing of this round is on the page any more. */
+export type ExploreStatus = 'generating' | 'done' | 'cancelled' | 'dismissed'
 
 export interface FeedbackBatch {
   batchId: string

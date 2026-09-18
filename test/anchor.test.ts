@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { attachmentIds, parseReferences, sanitizeAnchor } from '../src/anchor.js'
+import { attachmentIds, parseReferences, sanitizeAnchor, sanitizeCapture } from '../src/anchor.js'
 
 test('an absent field means none, a malformed one is an error', () => {
   assert.deepEqual(attachmentIds(undefined), [])
@@ -85,7 +85,13 @@ test('an empty anchor is a valid anchor, a non-object is not', () => {
 // Dropping a bad reference would leave its [ref N] marker in the comment naming
 // nothing, which is worse for the agent than an error the client can report.
 test('one unusable reference fails the request rather than vanishing', () => {
-  assert.equal(parseReferences([{ n: 1, anchor: { source: 'a' } }, { n: 2, anchor: null }]), null)
+  assert.equal(
+    parseReferences([
+      { n: 1, anchor: { source: 'a' } },
+      { n: 2, anchor: null },
+    ]),
+    null,
+  )
   assert.equal(parseReferences([{ n: 1, label: 'no anchor' }]), null)
 })
 
@@ -95,8 +101,53 @@ test('a reference with no label parses to an empty one', () => {
   ])
 })
 
+// A reference can carry the variant the user settled on in an explore round. It
+// travels whole to the agent, html included, so it is bounded and checked here
+// the way everything else that reaches a prompt from the page is.
+test('a reference carries the variant the user chose', () => {
+  const refs = parseReferences([
+    {
+      n: 1,
+      anchor: { source: 'a.tsx:1' },
+      label: 'cta',
+      variant: { name: '實心', html: '<b>x</b>' },
+    },
+  ])
+  assert.deepEqual(refs, [
+    {
+      n: 1,
+      anchor: { source: 'a.tsx:1' },
+      label: 'cta',
+      variant: { name: '實心', html: '<b>x</b>' },
+    },
+  ])
+})
+
+test('a plain pick does not invent the field', () => {
+  const refs = parseReferences([{ n: 1, anchor: { source: 'a.tsx:1' }, label: 'cta' }])
+  assert.equal('variant' in refs![0]!, false)
+})
+
+// Present and unusable fails the whole request rather than quietly becoming a
+// plain pick: the comment's `[ref n]` would then name something other than what
+// the user attached, which is the one thing a marker must never do.
+test('a variant that is there and unusable fails the request', () => {
+  const anchor = { source: 'a.tsx:1' }
+  assert.equal(parseReferences([{ n: 1, anchor, label: '', variant: {} }]), null)
+  assert.equal(parseReferences([{ n: 1, anchor, label: '', variant: { html: '   ' } }]), null)
+  assert.equal(parseReferences([{ n: 1, anchor, label: '', variant: 'nope' }]), null)
+  assert.equal(
+    parseReferences([{ n: 1, anchor, label: '', variant: { html: 'x'.repeat(33 * 1024) } }]),
+    null,
+  )
+})
+
 test('more references than a person would pick is refused', () => {
-  const many = Array.from({ length: 17 }, (_, i) => ({ n: i + 1, anchor: { source: 'a' }, label: 'x' }))
+  const many = Array.from({ length: 17 }, (_, i) => ({
+    n: i + 1,
+    anchor: { source: 'a' },
+    label: 'x',
+  }))
   assert.equal(parseReferences(many), null)
   assert.equal(parseReferences(many.slice(0, 16))?.length, 16)
   assert.equal(parseReferences(many, 2), null)
@@ -110,4 +161,74 @@ test('the framed list is bounded in length and in width', () => {
   assert.equal(sanitizeAnchor({ contains: ['x'.repeat(500)] })?.contains?.[0]?.length, 120)
   assert.equal(sanitizeAnchor({ contains: [] })?.contains, undefined)
   assert.equal(sanitizeAnchor({ contains: '<Card>' })?.contains, undefined)
+})
+
+// ------------------------------------------------------------- explore capture
+
+test('a capture keeps what a variant needs to be written and drops what it does not', () => {
+  const capture = sanitizeCapture({
+    html: '<a class="btn">go</a>',
+    styles: {
+      'box-sizing': 'border-box',
+      'font-size': '15px',
+      'background-color': 'rgb(37, 99, 235)',
+      zzz: 'dropped',
+    },
+    parentWidth: 640.4,
+    rules: ['.btn { padding: 12px }', '.btn:hover { opacity: .9 }', 42, ''],
+    slot: {
+      display: 'flex',
+      align: 'center',
+      gap: '12px',
+      bogus: 'dropped',
+      inherits: { 'font-family': 'Inter', color: 'rgb(23, 23, 23)', padding: 'dropped' },
+    },
+    tokens: {
+      '--brand': '#2563eb',
+      '--radius': '8px',
+      'not-a-token': 'dropped',
+      '--x y': 'dropped',
+    },
+    siblings: [
+      { tag: 'a', class: 'btn btn-ghost', text: '看 2 分鐘介紹', width: 120.6, height: 44 },
+      { tag: 'p', width: 'nope', height: 1 },
+      'junk',
+    ],
+    theme: { scheme: 'light dark', classes: 'theme-a', dataTheme: 'dark', extra: 'dropped' },
+  })
+  assert.deepEqual(capture, {
+    html: '<a class="btn">go</a>',
+    styles: {
+      'box-sizing': 'border-box',
+      'font-size': '15px',
+      'background-color': 'rgb(37, 99, 235)',
+    },
+    parentWidth: 640,
+    rules: ['.btn { padding: 12px }', '.btn:hover { opacity: .9 }'],
+    slot: {
+      display: 'flex',
+      align: 'center',
+      gap: '12px',
+      inherits: { 'font-family': 'Inter', color: 'rgb(23, 23, 23)' },
+    },
+    tokens: { '--brand': '#2563eb', '--radius': '8px' },
+    siblings: [{ tag: 'a', class: 'btn btn-ghost', text: '看 2 分鐘介紹', width: 121, height: 44 }],
+    theme: { scheme: 'light dark', classes: 'theme-a', dataTheme: 'dark' },
+  })
+})
+
+test('the matched rules are bounded in count, per rule, and in total', () => {
+  const many = Array.from({ length: 60 }, (_, i) => `.r${i} { color: red }`)
+  assert.equal(sanitizeCapture({ html: '<i/>', rules: many })!.rules!.length, 40)
+  const long = sanitizeCapture({ html: '<i/>', rules: ['x'.repeat(5000)] })!.rules!
+  assert.equal(long.length, 1)
+  assert.equal(long[0]!.length, 1000)
+  const total = sanitizeCapture({ html: '<i/>', rules: Array(10).fill('y'.repeat(900)) })!.rules!
+  assert.equal(total.length, 4)
+})
+
+test('a capture with none of the new fields is unchanged, and one with nothing to vary is refused', () => {
+  assert.deepEqual(sanitizeCapture({ html: '<i/>' }), { html: '<i/>' })
+  assert.equal(sanitizeCapture({ html: '', rules: ['.a{}'] }), null)
+  assert.equal(sanitizeCapture({ rules: ['.a{}'] }), null)
 })

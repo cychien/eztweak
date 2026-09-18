@@ -9,6 +9,7 @@
 
 import AlignSelectionIcon from '@hugeicons/core-free-icons/AlignSelectionIcon'
 import File02Icon from '@hugeicons/core-free-icons/File02Icon'
+import MagicWand01Icon from '@hugeicons/core-free-icons/MagicWand01Icon'
 import {
   NBSP,
   draftFileIds,
@@ -52,6 +53,11 @@ interface Options {
 export interface AttachController {
   /** Insert this where the composer goes. */
   wrap: HTMLElement
+  /** The bordered box the editable sits in - the drop target and the focus ring.
+   *  Exposed so a host can put a header of its own *inside* it, above the text,
+   *  rather than in the gap above the box where it would read as a separate
+   *  thing from the field it is labelling. */
+  field: HTMLElement
   /** The editable box, for `focus()` and the host's own key handling. */
   editable: HTMLElement
   /** What the user typed, chips excluded. */
@@ -82,6 +88,9 @@ export interface AttachController {
   beginRef(label: string): boolean
   /** Fill the placeholder in and leave the caret past it. */
   resolveRef(ref: RefWire): void
+  /** Drop an already-settled reference at the caret, for one that needed no
+   *  going away to choose. */
+  insertRef(ref: RefWire): void
   /** Take the placeholder back out, caret where it stood. */
   cancelRef(): void
   /** This box as data, in document order. The one DOM walk in this module: text,
@@ -219,18 +228,24 @@ export function attachify({
     return chip
   }
 
-  const fileChip = (name: string, id = '') =>
-    makeChip(name, CHIP_ATTR, id, File02Icon as IconNode)
+  const fileChip = (name: string, id = '') => makeChip(name, CHIP_ATTR, id, File02Icon as IconNode)
   /** A settled reference reads its number; a placeholder reads whatever the host
    *  gave it, because it does not have one yet. */
   const refChip = (ref: NumberedRef | null, placeholder: string) => {
     const chip = makeChip(
-      ref ? refChipText(ref.n) : placeholder,
+      ref ? refChipText(ref.n, !!ref.variant) : placeholder,
       REF_ATTR,
       ref ? JSON.stringify(ref) : '',
-      AlignSelectionIcon as IconNode,
+      (ref?.variant ? MagicWand01Icon : AlignSelectionIcon) as IconNode,
     )
-    if (ref?.label) chip.title = ref.label
+    // The element it is about, and - when the user brought one back from an
+    // explore - the variant they settled on, because two chips for two different
+    // choices about the same element have to be tellable apart on hover.
+    if (ref?.variant) chip.classList.add('ez-chip-chosen')
+    const title = ref?.variant
+      ? [ref.variant.name, ref.label].filter(Boolean).join(' · ')
+      : (ref?.label ?? '')
+    if (title) chip.title = title
     return chip
   }
 
@@ -334,12 +349,24 @@ export function attachify({
     if (!chip) return
     const numbered: NumberedRef = { ...ref, n: nextRefNumber(snapshot()) }
     chip.setAttribute(REF_ATTR, JSON.stringify(numbered))
-    chip.querySelector('.ez-chip-name')!.textContent = refChipText(numbered.n)
+    chip.querySelector('.ez-chip-name')!.textContent = refChipText(numbered.n, !!numbered.variant)
     if (numbered.label) chip.title = numbered.label
     chip.classList.remove('ez-chip-pending')
     // Past the spacer, not past the chip: the caret has to land somewhere it can
     // sit, and a chip that ends the box has nothing after it but that space.
     if (chip.nextSibling) placeCaretAfter(chip.nextSibling)
+    changed()
+  }
+
+  /** Drop a reference that is already settled at the caret.
+   *
+   *  Its own entry rather than `beginRef` + `resolveRef`, because nothing went
+   *  off to choose: the user picked a variant on the strip and the answer came
+   *  back with the act. It still takes the next number, so it sits in the same
+   *  `[ref n]` sentence as everything else. */
+  function insertRef(ref: RefWire): void {
+    const numbered: NumberedRef = { ...ref, n: nextRefNumber(snapshot()) }
+    insertAtCaret(refChip(numbered, numbered.label))
     changed()
   }
 
@@ -371,7 +398,14 @@ export function attachify({
       else if (node.t === 'file') editable.appendChild(fileChip(node.name, node.id))
       else if (node.t === 'skill') editable.appendChild(skillChip(node.name))
       else {
-        const ref = node.anchor ? { n: node.n, anchor: node.anchor, label: node.label } : null
+        const ref = node.anchor
+          ? {
+              n: node.n,
+              anchor: node.anchor,
+              label: node.label,
+              ...(node.variant ? { variant: node.variant } : {}),
+            }
+          : null
         editable.appendChild(refChip(ref, node.label))
       }
     }
@@ -479,6 +513,7 @@ export function attachify({
 
   return {
     wrap,
+    field,
     editable,
     // All three read the same single walk, so the text a comment reads as, the
     // files it carries and the elements it points at can never disagree about
@@ -503,6 +538,7 @@ export function attachify({
     closeSlash: () => slash.close() || skillMenu.close(),
     beginRef,
     resolveRef,
+    insertRef,
     cancelRef,
     snapshot,
     restore,
@@ -542,6 +578,7 @@ function collectNodes(node: Node, out: DraftNode[]): void {
         n: ref?.n ?? 0,
         anchor: ref?.anchor ?? null,
         label: ref?.label ?? name,
+        ...(ref?.variant ? { variant: ref.variant } : {}),
       })
       continue
     }

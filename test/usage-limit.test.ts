@@ -49,6 +49,17 @@ test('a figure whose window has reset is dropped rather than shown', () => {
   assert.equal(rememberedLimit(CLAUDE, now), undefined)
 })
 
+// A version that dated a spent window a year out wrote that date to this file,
+// where it would have been held as live for the year it claims.
+test('a figure dated further out than its window is long is dropped too', () => {
+  const now = Date.now()
+  const yearOut = 365 * 24 * HOUR
+  rememberLimit(CLAUDE, {
+    windows: [{ windowMinutes: 300, remaining: 1, resetsAt: now / 1000 + yearOut }],
+  })
+  assert.equal(rememberedLimit(CLAUDE, now), undefined)
+})
+
 // One window rolling over says nothing about the others - the weekly one outlives
 // five of the session's in a morning.
 test('only the window that reset is dropped', () => {
@@ -235,6 +246,28 @@ test('a reset past new year takes the coming one', async () => {
     claudeLimitFromUsageText(newYear, new Date('2026-12-31T23:00:00+08:00').getTime())?.windows[0]
       ?.resetsAt,
     new Date('2027-01-02T00:15:00+08:00').getTime() / 1000,
+  )
+})
+
+// At 0% used there is no live window, so the CLI dates the line with the one that
+// already ended. Reaching for a year that puts it ahead showed a spent window as
+// "剩 100% 直到 9/17 19:20" on the 18th.
+test('a window nobody has spent anything in yet is left undated', async () => {
+  const { claudeLimitFromUsageText } = await import('../src/usage-limit.js')
+  const fresh = 'Current session: 0% used · resets Sep 14 at 7:20pm (Asia/Taipei)'
+  assert.deepEqual(claudeLimitFromUsageText(fresh, READ_AT)?.windows, [
+    { windowMinutes: 300, remaining: 1 },
+  ])
+})
+
+// The reverse of the new year case: on January 1st, "Dec 31" is last night, not
+// eleven months out.
+test('a reset rendered just before new year is not carried forward a year', async () => {
+  const { claudeLimitFromUsageText } = await import('../src/usage-limit.js')
+  const lastNight = 'Current session: 0% used · resets Dec 31 at 11:00pm (Asia/Taipei)'
+  assert.deepEqual(
+    claudeLimitFromUsageText(lastNight, new Date('2027-01-01T02:00:00+08:00').getTime())?.windows,
+    [{ windowMinutes: 300, remaining: 1 }],
   )
 })
 

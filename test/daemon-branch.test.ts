@@ -1,0 +1,181 @@
+import assert from 'node:assert/strict'
+import { after, test } from 'node:test'
+import { DaemonWorld, FAKE_AGENT, waitFor } from './helpers/daemon.js'
+
+const world = new DaemonWorld(4490)
+after(() => world.dispose())
+
+interface ChatWire {
+  id: string
+  entries: number
+  current: boolean
+  parentChatId?: string
+}
+
+interface State {
+  acp?: { state?: string }
+  chats?: ChatWire[]
+  conversation?: { role: string; text: string; chatId?: string }[]
+}
+
+/** A distinct origin per test, counted rather than drawn at random: the origin
+ *  is half of a session's identity, so two tests that happen to pick the same
+ *  one share a store - and the second then reads the first one's thread. */
+let nextPort = 9980
+
+async function ready(env?: Record<string, string>): Promise<number> {
+  world.spawnDaemon()
+  const { port: control } = await world.liveDaemon()
+  const { port } = await world.openSession(control, {
+    url: `http://localhost:${nextPort++}`,
+    project: world.dataDir,
+    agent: env
+      ? `${Object.entries(env)
+          .map(([k, v]) => `${k}=${v}`)
+          .join(' ')} ${FAKE_AGENT}`
+      : FAKE_AGENT,
+  })
+  await waitFor(async () => {
+    const s = (await world.state(port)) as State
+    return s.acp?.state === 'idle'
+  }, 'the agent to be ready')
+  return port
+}
+
+const api = (port: number, path: string, body?: unknown) =>
+  fetch(`http://127.0.0.1:${port}/__eztweak/api${path}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body ?? {}),
+  })
+
+/** Send a batch and wait for the turn it starts to finish. */
+async function send(port: number, note: string): Promise<void> {
+  const before = ((await world.state(port)) as State).conversation?.length ?? 0
+  await api(port, '/send', { note })
+  await waitFor(async () => {
+    const s = (await world.state(port)) as State
+    return (s.conversation?.length ?? 0) > before + 1 && s.acp?.state === 'idle'
+  }, `the turn for ${note}`)
+}
+
+/** What the thread is showing, which is one chat's worth of the log. */
+async function visible(port: number): Promise<string[]> {
+  const s = (await world.state(port)) as State
+  return (s.conversation ?? []).map((e) => `${e.role}:${e.text}`)
+}
+
+const chatsOf = async (port: number): Promise<ChatWire[]> =>
+  ((await world.state(port)) as State).chats ?? []
+
+test('a branch is its own conversation, and the review comes back to the one it left', async () => {
+  const port = await ready()
+  await send(port, 'on the main line')
+  const before = await visible(port)
+  assert.ok(before.some((e) => e.includes('on the main line')))
+
+  const branched = await api(port, '/acp/branch')
+  assert.equal(branched.status, 200)
+  const { chatId, parentChatId } = (await branched.json()) as {
+    chatId: string
+    parentChatId: string
+  }
+  assert.notEqual(chatId, parentChatId)
+
+  // The thread empties: a branch is a conversation of its own, and what was said
+  // on the main line is not in it - the *agent* has the history, the shell does
+  // not pretend the user does.
+  assert.deepEqual(await visible(port), [])
+  const onBranch = await chatsOf(port)
+  assert.equal(onBranch.find((c) => c.current)?.id, chatId)
+  assert.equal(onBranch.find((c) => c.id === chatId)?.parentChatId, parentChatId)
+
+  await send(port, 'only on the branch')
+  assert.ok((await visible(port)).some((e) => e.includes('only on the branch')))
+
+  // 回主線: an ordinary switch to the parent, and the branch is not in it.
+  await api(port, '/acp/chat', { id: parentChatId })
+  const back = await visible(port)
+  assert.ok(back.some((e) => e.includes('on the main line')))
+  assert.ok(!back.some((e) => e.includes('only on the branch')))
+
+  // And the branch is still there to go back to.
+  await api(port, '/acp/chat', { id: chatId })
+  assert.ok((await visible(port)).some((e) => e.includes('only on the branch')))
+})
+
+// The other half: opening a conversation opens a session too, and nobody asked
+// that session for anything. A review that reported work waiting there would put
+// a pulse in the thread for its own plumbing, which is what it looked like on
+// every switch back to the main line.
+test('a switch nobody asked anything of reports no work waiting', async () => {
+  const port = await ready()
+  await send(port, 'on the main line')
+  const branched = await api(port, '/acp/branch')
+  const { parentChatId } = (await branched.json()) as { parentChatId: string }
+
+  // Polled across the whole switch rather than after it: the window this would be
+  // wrong in is exactly the one the session takes to come back up.
+  let sawWaiting = false
+  const moved = api(port, '/acp/chat', { id: parentChatId })
+  await waitFor(async () => {
+    const s = (await world.state(port)) as State & { agentQueued?: true }
+    if (s.agentQueued) sawWaiting = true
+    return s.acp?.state === 'idle' && s.chats?.find((c) => c.current)?.id === parentChatId
+  }, 'the switch to settle')
+  await moved
+
+  assert.equal(sawWaiting, false, 'a switch with nothing asked of it reported work waiting')
+})
+
+test('an agent that cannot branch is refused, and the review does not move', async () => {
+  const port = await ready({ EZ_FAKE_NO_FORK: '1' })
+  await send(port, 'on the main line')
+  const was = (await chatsOf(port)).find((c) => c.current)?.id
+
+  const refused = await api(port, '/acp/branch')
+  assert.equal(refused.status, 409)
+  assert.match(((await refused.json()) as { error: string }).error, /cannot branch/)
+
+  assert.equal((await chatsOf(port)).find((c) => c.current)?.id, was)
+  assert.ok((await visible(port)).some((e) => e.includes('on the main line')))
+})
+
+test('a fork the agent takes and then fails leaves no half-made branch behind', async () => {
+  const port = await ready({ EZ_FAKE_REFUSE_FORK: '1' })
+  await send(port, 'on the main line')
+  const before = await chatsOf(port)
+
+  assert.equal((await api(port, '/acp/branch')).status, 409)
+
+  // The danger this guards: a refused fork that still started a chat would leave
+  // the review on an empty conversation that looks like a branch and has none of
+  // the history a branch is for.
+  assert.deepEqual(
+    (await chatsOf(port)).map((c) => c.id),
+    before.map((c) => c.id),
+  )
+  assert.ok((await visible(port)).some((e) => e.includes('on the main line')))
+})
+
+test('a review that has said nothing branches anyway, because there is nothing to carry', async () => {
+  const port = await ready()
+  // No turn first, which is where /explore actually failed: an agent refuses to
+  // fork a session with no transcript, and that is most reviews at the moment
+  // someone first reaches for it.
+  const branched = await api(port, '/acp/branch')
+  assert.equal(branched.status, 200)
+  const { chatId, parentChatId } = (await branched.json()) as {
+    chatId: string
+    parentChatId: string
+  }
+  assert.notEqual(chatId, parentChatId)
+
+  // A branch in every way that matters: its own thread, and a way back.
+  const chats = await chatsOf(port)
+  assert.equal(chats.find((c) => c.current)?.id, chatId)
+  assert.equal(chats.find((c) => c.id === chatId)?.parentChatId, parentChatId)
+  await send(port, 'only on the branch')
+  await api(port, '/acp/chat', { id: parentChatId })
+  assert.ok(!(await visible(port)).some((e) => e.includes('only on the branch')))
+})

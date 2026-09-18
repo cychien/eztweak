@@ -6,7 +6,8 @@
  *  have to be read past `AcpAgent`, which owns the child's stdio.
  *
  *  Prompt vocabulary:
- *    SLOW      park the turn until cancelled, then stop with `cancelled`
+ *    SLOW      park the turn until cancelled, then stop with `cancelled` - in an
+ *              explore turn, after its variants have been sent
  *    CHUNKS    stream CHUNK_COUNT message chunks back-to-back, then end the turn
  *    CONFIGPUSH  push a `config_option_update` nobody asked for, then end the turn
  *    MODEPUSH  push a bare `current_mode_update`, then end the turn
@@ -14,6 +15,9 @@
  *
  *  Env: EZ_FAKE_NO_RESUME     do not advertise session/resume
  *       EZ_FAKE_REFUSE_RESUME advertise it, then refuse every resume
+ *       EZ_FAKE_NO_FORK       do not advertise session/fork
+ *       EZ_FAKE_REFUSE_FORK   advertise it, then refuse every fork
+ *       EZ_FAKE_NO_MCP        do not advertise mcpCapabilities.http
  *    REPORT    reply with {opened, closed, prompts, log} as JSON
  *    else      reply with `<sessionId>:<prompt>` and stop with `end_turn` */
 
@@ -57,6 +61,15 @@ let refuseHaiku = false
  *  known before asking, the other only after. */
 const canResume = !process.env.EZ_FAKE_NO_RESUME
 const refuseResume = !!process.env.EZ_FAKE_REFUSE_RESUME
+/** Whether this agent branches, and whether it takes the request and fails.
+ *  `EZ_FAKE_NO_FORK` is an agent that cannot; `EZ_FAKE_REFUSE_FORK` one that
+ *  says it can and then will not - both are real, and they differ in whether
+ *  the client knows before asking. */
+const canFork = !process.env.EZ_FAKE_NO_FORK
+const refuseFork = !!process.env.EZ_FAKE_REFUSE_FORK
+/** Whether this agent can reach an HTTP MCP server, which is what decides
+ *  whether the client offers it any. */
+const mcpHttp = !process.env.EZ_FAKE_NO_MCP
 /** Where the sessions this agent has live, when a test wants them to outlast the
  *  process. A real agent keeps transcripts on disk, which is the whole reason a
  *  restarted daemon can resume one; an agent that forgot them on exit would make
@@ -73,6 +86,22 @@ const persisted = (() => {
 
 /** Sessions this agent still has. A resume of anything else is refused. */
 const live = new Set(persisted?.live ?? [])
+/** Sessions that have been forked but not yet resumed. Mirrors the real agent
+ *  measured on claude-agent-acp 0.77.0: `session/fork` answers with an id, and
+ *  that id is not promptable until `session/resume` has read the copied
+ *  transcript. A client that forks and then prompts is wrong, and this is what
+ *  says so. */
+const unresumedForks = new Set()
+/** Sessions that have finished at least one turn, and so have something a fork
+ *  could copy. */
+const turned = new Set()
+/** Which session each fork was taken from, so a test can prove the copy was
+ *  made from the conversation the review was actually on. */
+const forkedFrom = new Map()
+/** The mcp servers each session was opened with, by name. The whole point of
+ *  the explore tool is that they reach the agent, and a session opened without
+ *  them is the failure that looks like nothing at all. */
+const mcpBySession = new Map()
 /** How many sessions have ever been opened, so ids do not restart at s1 in a
  *  second process and quietly collide with the first one's. */
 let everOpened = persisted?.everOpened ?? 0
@@ -117,16 +146,87 @@ function configOptions() {
   ]
 }
 
+/** One JSON-RPC call to an MCP server the client handed us, over plain HTTP.
+ *  Hand-rolled rather than through the MCP SDK: the fake agent is here to prove
+ *  the wire works, and a second implementation of the client half is exactly
+ *  what would hide a mismatch in it. */
+async function mcpCall(server, method, params, id) {
+  const headers = { 'content-type': 'application/json', accept: 'application/json, text/event-stream' }
+  for (const h of server.headers ?? []) headers[h.name] = h.value
+  const res = await fetch(server.url, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ jsonrpc: '2.0', id, method, params }),
+  })
+  return { status: res.status, body: await res.json().catch(() => null) }
+}
+
+/** Answer an explore the way a real agent does: initialize against the round's
+ *  server, then send variants through its tool one at a time. */
+async function sendVariants(sessionId, variants) {
+  const server = (mcpBySession.get(sessionId)?.servers ?? []).find((s) =>
+    s.name.startsWith('eztweak-explore-'),
+  )
+  if (!server) return ['no explore server was offered']
+  let id = 0
+  await mcpCall(server, 'initialize', {
+    protocolVersion: '2025-06-18',
+    capabilities: {},
+    clientInfo: { name: 'fake-acp-agent', version: '1' },
+  }, ++id)
+  const said = []
+  for (const variant of variants) {
+    const { body } = await mcpCall(
+      server,
+      'tools/call',
+      { name: 'explore_variant', arguments: variant },
+      ++id,
+    )
+    said.push(body?.result?.content?.[0]?.text ?? `error: ${JSON.stringify(body?.error ?? body)}`)
+  }
+  return said
+}
+
+/** `session/request_permission` as Claude Code sends it for a tool call: the
+ *  options its own dialog has, in its order. Resolves to the option id the
+ *  client selected, or the outcome when it selected none. */
+async function askPermission(ctx, sessionId, toolName) {
+  const response = await ctx.client.request(methods.client.session.requestPermission, {
+    sessionId,
+    toolCall: { toolCallId: `call-${toolName}`, name: toolName, title: toolName, kind: 'other' },
+    options: [
+      { optionId: 'allow-once', name: 'Yes', kind: 'allow_once' },
+      { optionId: 'allow-always', name: "Yes, and don't ask again", kind: 'allow_always' },
+      { optionId: 'reject', name: 'No', kind: 'reject_once' },
+    ],
+  })
+  const picked =
+    response.outcome.outcome === 'selected' ? response.outcome.optionId : response.outcome.outcome
+  log.push(`permission:${toolName}:${picked}`)
+  return picked
+}
+
 const app = agent({ name: 'fake-acp-agent' })
   .onRequest(methods.agent.initialize, (ctx) => {
     log.push(`initialize:boolean=${!!ctx.params.clientCapabilities?.session?.configOptions?.boolean}`)
     return {
       protocolVersion: PROTOCOL_VERSION,
-      agentCapabilities: { sessionCapabilities: { close: {}, ...(canResume ? { resume: {} } : {}) } },
+      agentCapabilities: {
+        sessionCapabilities: {
+          close: {},
+          ...(canResume ? { resume: {} } : {}),
+          ...(canFork ? { fork: {} } : {}),
+        },
+        ...(mcpHttp ? { mcpCapabilities: { http: true } } : {}),
+      },
     }
   })
-  .onRequest(methods.agent.session.new, () => {
+  .onRequest(methods.agent.session.new, (ctx) => {
     const sessionId = `s${++everOpened}`
+    mcpBySession.set(sessionId, {
+      names: (ctx.params.mcpServers ?? []).map((m) => m.name),
+      servers: ctx.params.mcpServers ?? [],
+    })
     opened.push(sessionId)
     live.add(sessionId)
     persist()
@@ -153,10 +253,34 @@ const app = agent({ name: 'fake-acp-agent' })
     config[configId] = value
     return { configOptions: configOptions() }
   })
+  .onRequest(methods.agent.session.fork, (ctx) => {
+    const { sessionId } = ctx.params
+    log.push(`fork:${sessionId}`)
+    if (refuseFork || !live.has(sessionId)) throw new Error(`cannot fork: ${sessionId}`)
+    // What the real agent does, and the reason /explore failed on fresh reviews:
+    // there is no transcript to copy until the session has been asked something.
+    if (!turned.has(sessionId)) throw new Error(`no transcript to fork: ${sessionId}`)
+    const forked = `s${++everOpened}`
+    live.add(forked)
+    unresumedForks.add(forked)
+    forkedFrom.set(forked, sessionId)
+    opened.push(forked)
+    persist()
+    // Only the id, the way the real one answers. No configOptions: the client
+    // has to resume to get them, and to make the session promptable at all.
+    return { sessionId: forked }
+  })
   .onRequest(methods.agent.session.resume, (ctx) => {
     const { sessionId } = ctx.params
     log.push(`resume:${sessionId}`)
     if (refuseResume || !live.has(sessionId)) throw new Error(`no such session: ${sessionId}`)
+    unresumedForks.delete(sessionId)
+    // A resumed session came back with its transcript.
+    turned.add(sessionId)
+    mcpBySession.set(sessionId, {
+      names: (ctx.params.mcpServers ?? []).map((m) => m.name),
+      servers: ctx.params.mcpServers ?? [],
+    })
     // A resumed session comes back on this agent's defaults, the way the real one
     // does - which is what makes a re-asserted pick observable on this path too.
     config.model = 'opus'
@@ -175,6 +299,9 @@ const app = agent({ name: 'fake-acp-agent' })
   })
   .onRequest(methods.agent.session.prompt, async (ctx) => {
     const { sessionId, prompt } = ctx.params
+    // A forked session is not live until it has been resumed.
+    if (unresumedForks.has(sessionId)) throw new Error(`Session not found: ${sessionId}`)
+    turned.add(sessionId)
     const text = prompt.map((b) => (b.type === 'text' ? b.text : '')).join('')
     const say = (t) =>
       ctx.client.notify(methods.client.session.update, {
@@ -197,7 +324,16 @@ const app = agent({ name: 'fake-acp-agent' })
       return { stopReason: 'end_turn' }
     }
     if (text.includes('REPORT')) {
-      await say(JSON.stringify({ opened, closed, prompts, log }))
+      await say(
+        JSON.stringify({
+          opened,
+          closed,
+          prompts,
+          log,
+          forkedFrom: Object.fromEntries(forkedFrom),
+          mcpBySession: Object.fromEntries([...mcpBySession].map(([k, v]) => [k, v.names])),
+        }),
+      )
       return { stopReason: 'end_turn' }
     }
     // An option set by nobody's request: a real agent does this when its own
@@ -242,6 +378,73 @@ const app = agent({ name: 'fake-acp-agent' })
       })
       return { stopReason: 'end_turn' }
     }
+    // An explore turn: the daemon's own prompt asks for variants through the
+    // tool it served, so this answers it the way a real agent does - over HTTP,
+    // to the url it was handed in `mcpServers`. A direction of BADVARIANTS
+    // sends markup the validator has to refuse, so a test can see what the
+    // agent is told about it.
+    if (text.includes('explore_variant')) {
+      prompts.push({ sessionId, text })
+      // Permission first, the way Claude Code asks it outside Auto mode: the
+      // tool's full name, and the three options its dialog offers. What the
+      // client picks is logged, and a refusal ends the turn with nothing sent.
+      const server = (mcpBySession.get(sessionId)?.servers ?? []).find((s) =>
+        s.name.startsWith('eztweak-explore-'),
+      )
+      const picked = await askPermission(ctx, sessionId, `mcp__${server?.name}__explore_variant`)
+      if (picked !== 'allow-once' && picked !== 'allow-always') {
+        await say(`not allowed: ${picked}`)
+        return { stopReason: 'end_turn' }
+      }
+      const variants = text.includes('BADVARIANTS')
+        ? [
+            { name: 'two roots', html: '<div>a</div><div>b</div>' },
+            { name: 'scripted', html: '<div><script>go()</script></div>' },
+            { name: 'fine', html: '<button class="cta">ok</button>' },
+          ]
+        : [
+            { name: '緊湊版', html: '<button class="cta">免費試用</button>', note: 'tighter' },
+            { name: 'Outline', html: '<button class="cta outline">免費試用 14 天</button>' },
+          ]
+      const said = await sendVariants(sessionId, variants)
+      await say(said.join(' | '))
+      // `SLOW` parks an explore turn too, after its variants are in. That is the
+      // only way to hold a round in the state a user actually decides things in -
+      // variants on the page, the agent still going - and it is the state the one
+      // end a round's own turn never reports happens in: the review leaving.
+      if (text.includes('SLOW')) return await park(sessionId)
+      return { stopReason: 'end_turn' }
+    }
+    // Ask permission for a tool - `Bash` unless `EZ_FAKE_PERMISSION_TOOL` names
+    // one - and reply with what the client decided, so a test sees whether the
+    // request was put to the user or settled on the client's own authority.
+    if (text.includes('PERMISSION')) {
+      prompts.push({ sessionId, text })
+      const tool = process.env.EZ_FAKE_PERMISSION_TOOL || 'Bash'
+      await say(`${tool}: ${await askPermission(ctx, sessionId, tool)}`)
+      return { stopReason: 'end_turn' }
+    }
+    // Ask the user a form, the way AskUserQuestion reaches a client: the payload
+    // is `{ message, requestedSchema }` from the prompt, and the turn's reply is
+    // the client's answer verbatim - accept with its content, decline, or cancel -
+    // so a test sees exactly what the agent would have been handed.
+    const elicit = /ELICIT (\{.*\})/.exec(text)
+    if (elicit) {
+      prompts.push({ sessionId, text })
+      // Through the daemon the note arrives inside the batch's own JSON, quotes
+      // escaped; straight from a test it arrives bare. Either reads.
+      const { message, requestedSchema } = JSON.parse(
+        elicit[1].startsWith('{\\') ? elicit[1].replace(/\\"/g, '"') : elicit[1],
+      )
+      const response = await ctx.client.request(methods.client.elicitation.create, {
+        sessionId,
+        mode: 'form',
+        message,
+        requestedSchema,
+      })
+      await say(JSON.stringify(response))
+      return { stopReason: 'end_turn' }
+    }
     // A turn that ends properly having said nothing - an agent that only ran
     // tools, or whose skill did its work silently. The thread used to record
     // nothing at all for one of these.
@@ -250,15 +453,21 @@ const app = agent({ name: 'fake-acp-agent' })
       return { stopReason: 'end_turn' }
     }
     prompts.push({ sessionId, text })
+    turned.add(sessionId)
     log.push(`prompt:${sessionId}`)
     await say(`${sessionId}:${text}`)
     if (!text.includes('SLOW')) return { stopReason: 'end_turn' }
-    const abort = new AbortController()
-    turns.set(sessionId, abort)
-    await new Promise((resolve) => abort.signal.addEventListener('abort', resolve, { once: true }))
-    turns.delete(sessionId)
-    return { stopReason: 'cancelled' }
+    return await park(sessionId)
   })
+
+/** Hold the turn open until the client cancels it. */
+async function park(sessionId) {
+  const abort = new AbortController()
+  turns.set(sessionId, abort)
+  await new Promise((resolve) => abort.signal.addEventListener('abort', resolve, { once: true }))
+  turns.delete(sessionId)
+  return { stopReason: 'cancelled' }
+}
 
 const stream = ndJsonStream(Writable.toWeb(process.stdout), Readable.toWeb(process.stdin))
 await app.connectWith(stream, () => new Promise(() => {}))

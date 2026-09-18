@@ -2,7 +2,9 @@
 
 import Cancel01Icon from '@hugeicons/core-free-icons/Cancel01Icon'
 import AlignSelectionIcon from '@hugeicons/core-free-icons/AlignSelectionIcon'
-import ArrowDown01Icon from '@hugeicons/core-free-icons/ArrowDown01Icon'
+import ChevronDownIcon from '@hugeicons/core-free-icons/ChevronDownIcon'
+import ChevronRightIcon from '@hugeicons/core-free-icons/ChevronRightIcon'
+import MagicWand01Icon from '@hugeicons/core-free-icons/MagicWand01Icon'
 import ArrowRight02Icon from '@hugeicons/core-free-icons/ArrowRight02Icon'
 import Grid02Icon from '@hugeicons/core-free-icons/Grid02Icon'
 import ChatGptIcon from '@hugeicons/core-free-icons/ChatGptIcon'
@@ -17,6 +19,7 @@ import BubbleChatAddIcon from '@hugeicons/core-free-icons/BubbleChatAddIcon'
 import BubbleChatOutcomeIcon from '@hugeicons/core-free-icons/BubbleChatOutcomeIcon'
 import Edit02Icon from '@hugeicons/core-free-icons/Edit02Icon'
 import type { SessionConfigOption } from '@agentclientprotocol/sdk'
+import type { AcpAskAnswer, AcpAskField, AcpAskOption } from '../acp-ask.js'
 import { AGENT_PROFILES, type AgentBrand, agentBrandFor, agentProfileFor } from '../agents.js'
 import {
   type AcpConfigValue,
@@ -52,10 +55,11 @@ import {
   toggleDevice,
 } from './canvas-layout.js'
 import type { CanvasMetrics, Layout } from './canvas-layout.js'
-import type { DraftWire, NumberedRef, RefWire } from './draft.js'
+import type { AnchorWire, DraftWire, NumberedRef, RefWire } from './draft.js'
 import {
   bodyFromComment,
   fileMarker,
+  nextRefNumber,
   refChipText,
   refMarker,
   skillMarker,
@@ -117,6 +121,20 @@ interface ConversationWire {
   references?: RefEcho[]
 }
 
+/** One explore round as the strip draws it. */
+interface ExploreWire {
+  id: string
+  chatId: string
+  label: string
+  anchor: AnchorWire
+  direction?: string
+  status: 'generating' | 'done' | 'cancelled' | 'dismissed'
+  variants: { id: string; name: string; html: string; note?: string }[]
+  selected: string | null
+  adopted?: string
+  startedAt: number
+}
+
 interface SnapshotWire {
   version: string
   state: 'active' | 'ended'
@@ -128,11 +146,16 @@ interface SnapshotWire {
   conversation: ConversationWire[]
   agentOnline: boolean
   agentBusy: boolean
+  /** Something is waiting to go to the agent, with no turn started yet - a batch
+   *  behind a session still opening, or a branch's explore. */
+  agentQueued?: true
   agentProgress?: string
   acp?: AcpWire
   /** The conversations this review has had, newest first. ACP mode only. */
   chats?: ChatWire[]
   update?: UpdateWire
+  explores?: ExploreWire[]
+  canExplore?: true
 }
 
 interface ChatWire {
@@ -140,6 +163,12 @@ interface ChatWire {
   startedAt: number
   entries: number
   current: boolean
+  /** The conversation this one branched off, when it did. */
+  parentChatId?: string
+  /** The agent's own name for it, when it has one. */
+  title?: string
+  /** What it was opened about, for a branch. */
+  detail?: string
 }
 
 /** A newer daemon on the registry, and how far the update has got once the user
@@ -178,16 +207,7 @@ interface AcpAskWire {
   id: string
   kind: 'permission' | 'question'
   title: string
-  questions: {
-    key: string
-    text?: string
-    options: {
-      id: string
-      name: string
-      description?: string
-      hint?: string
-    }[]
-  }[]
+  fields: AcpAskField[]
 }
 
 const PREFIX = (() => {
@@ -575,7 +595,7 @@ const deviceName = h('button', 'ez-seg-label')
 deviceName.onclick = () => setDevice(deviceId)
 
 const deviceCaret = h('button', 'ez-seg-caret')
-deviceCaret.append(icon(ArrowDown01Icon as IconNode, 11))
+deviceCaret.append(icon(ChevronDownIcon as IconNode, 12))
 deviceCaret.setAttribute('aria-haspopup', 'menu')
 deviceCaret.setAttribute('aria-expanded', 'false')
 
@@ -870,6 +890,379 @@ const stage = h('div', 'ez-stage')
 const canvas = h('div', 'ez-canvas')
 stage.appendChild(canvas)
 
+/** The variant strip: what the agent produced, across the bottom of the stage.
+ *
+ *  Across the stage rather than in the sidebar because it is about the *page* -
+ *  every preview on the canvas shows the selected variant at once, and the thing
+ *  you are comparing is what you are looking at, not what you are reading.
+ *
+ *  One pill per live round, stacked. Every round's choice is standing on the
+ *  page at the same time, so a switcher could only ever hide selections that are
+ *  already in effect. Which element a pill is about is in its tooltip: the
+ *  variants are what the eye came here for, and a name in front of them is a
+ *  word to read before you can start looking. */
+const strip = h('div', 'ez-strip')
+strip.hidden = true
+
+/** Say something went wrong where the strip would have appeared. Its own line
+ *  rather than the thread's: an explore that never started wrote nothing to the
+ *  conversation, so there is nowhere else for this to be. */
+function stripNotice(text: string): void {
+  strip.hidden = false
+  const pill = h('div', 'ez-strip-pill')
+  pill.append(icon(MagicWand01Icon as IconNode, 14), h('div', 'ez-strip-pending', text))
+  strip.replaceChildren(pill)
+  setTimeout(() => {
+    if (!liveExplores().length) strip.hidden = true
+  }, 4000)
+}
+
+/** What each frame currently has standing in it, so a repaint only posts the
+ *  swaps that actually changed. Without it every snapshot - and they arrive on
+ *  every keystroke the agent streams - would re-swap the page under the user. */
+const posted = new Map<string, string | null>()
+
+function liveExplores(): ExploreWire[] {
+  return snapshot?.explores ?? []
+}
+
+/** Push every round's selection into every preview, and only what moved. */
+function paintVariants(): void {
+  const rounds = liveExplores()
+  for (const round of rounds) {
+    const variant = round.variants.find((v) => v.id === round.selected)
+    const html = variant?.html ?? null
+    if (posted.get(round.id) === (variant?.id ?? null)) continue
+    posted.set(round.id, variant?.id ?? null)
+    broadcast({ type: 'ez:variant', exploreId: round.id, anchor: round.anchor, html })
+  }
+  // A round that is gone - dismissed, or the session moved on - takes its markup
+  // off the page with it.
+  for (const id of [...posted.keys()]) {
+    if (rounds.some((r) => r.id === id)) continue
+    posted.delete(id)
+    broadcast({ type: 'ez:variant', exploreId: id, anchor: null, html: null })
+  }
+}
+
+/** A newly mounted frame has none of this yet. */
+function seedVariants(id: string): void {
+  for (const round of liveExplores()) {
+    const variant = round.variants.find((v) => v.id === round.selected)
+    toFrame(id, {
+      type: 'ez:variant',
+      exploreId: round.id,
+      anchor: round.anchor,
+      html: variant?.html ?? null,
+    })
+  }
+}
+
+function select(round: ExploreWire, variantId: string | null): void {
+  void api('/explore/select', {
+    method: 'POST',
+    body: JSON.stringify({ id: round.id, variantId }),
+  })
+}
+
+/** Signature of what the strip currently draws, on the same rule the queue uses:
+ *  an ACP turn broadcasts a snapshot per streamed chunk, and rebuilding the pills
+ *  on every one of them swaps a chip out from under the pointer between mousedown
+ *  and mouseup - and takes any card the strip has open with it. What the pills
+ *  draw is a handful of small objects, so stringifying them is cheaper than the
+ *  DOM work it saves. */
+let stripDrawn: string | null = null
+
+function paintStrip(): void {
+  const rounds = liveExplores()
+  strip.hidden = rounds.length === 0
+  const signature = JSON.stringify([currentChatId(), snapshot?.agentBusy ?? false, rounds])
+  if (signature === stripDrawn) return
+  stripDrawn = signature
+  strip.replaceChildren(...rounds.map((round) => roundPill(round)))
+}
+
+/** Which conversation the review is reading, for the pills - a round's actions
+ *  depend on whether you are standing in the branch it belongs to. */
+function currentChatId(): string | null {
+  return snapshot?.chats?.find((c) => c.current)?.id ?? null
+}
+
+/** The user settled on one.
+ *
+ *  The round ends and the review comes out of the branch - `/explore/exit` does
+ *  both - and the markup rides back to the main line in the composer, as a
+ *  reference to the element carrying the answer attached to it. That is what the
+ *  round was for: what it produced is a picture of the thing, and building the
+ *  real one, in the project's own components and tokens, is the main line's work.
+ *
+ *  The page goes back to the real element on the way out. A stand-in left
+ *  standing would make it impossible to see whether the agent's work had landed. */
+async function adoptVariant(
+  round: ExploreWire,
+  variant: { id: string; name: string; html: string },
+): Promise<void> {
+  const ref: RefWire = {
+    anchor: round.anchor,
+    label: round.label,
+    variant: { name: variant.name, html: variant.html },
+  }
+  // Only the round the held comment is waiting on answers into it. A pick from
+  // some other round that happens to be live belongs to nobody's sentence, and
+  // goes to the sidebar the way a pick with no popup behind it does.
+  const held = exploreHold?.round === round.id ? exploreHold : null
+  if (held) held.leaving = true
+  const res = await api('/explore/exit', {
+    method: 'POST',
+    body: JSON.stringify({ id: round.id, variantId: variant.id }),
+  })
+  if (!res.ok) {
+    if (held) held.leaving = false
+    return
+  }
+  if (held) held.answer = ref
+  else {
+    noteAttach.insertRef(ref)
+    noteAttach.editable.focus()
+  }
+}
+
+/** The comment an explore was armed from, held as data while the round runs.
+ *
+ *  The overlay closes that popup when the explore is sent and hands its draft
+ *  here - the route a pick takes when its popup will not survive a navigation.
+ *  `frame` is where to rebuild it, and `round` is what it is waiting on, so a
+ *  round that ends by any route at all can give it back. Kept across the frame
+ *  reloading: the draft is data, and rebuilding it is the whole point. */
+let exploreHold: {
+  frame: string
+  draft: DraftWire
+  /** The annotate mode the comment was written in. The popup is that mode's
+   *  doing, so it comes back with it: a round runs long enough for the user to
+   *  have put the mode away meanwhile, and a popup standing with no mode armed
+   *  is half of the state they left, not the state they left. */
+  mode: Mode
+  /** What it is waiting on, once the start request has said. */
+  round?: string
+  /** The round has been on a snapshot at least once, so "gone" can mean gone. */
+  seen?: boolean
+  /** The strip's own way out of the round is in flight. */
+  leaving?: boolean
+  /** What that way out answered with: a pick, or `null` for none. */
+  answer?: RefWire | null
+} | null = null
+
+/** Give the round's ending back to the comment that asked for it.
+ *
+ *  The popup is rebuilt where it was - same element, same scroll - with the
+ *  chosen variant appended to the sentence as a reference, exactly the way a
+ *  picked element arrives. Left with nothing, it comes back as it was. A round
+ *  started with no comment behind it, or one whose frame has since gone, has
+ *  nowhere to rebuild, and then the sidebar's own composer is where a pick lands. */
+function endExploreIn(ref?: RefWire): void {
+  const held = exploreHold
+  // Let go here rather than later: the round can end while nothing is listening,
+  // and a hold nobody ever clears is a comment the user never sees again.
+  exploreHold = null
+  if (held && frames.has(held.frame)) {
+    // The mode first, the popup second - the same order `ez:ready` replays them
+    // in. `setMode` takes an open popup down with it, so a popup rebuilt before
+    // its mode arrived would be dismissed by the very message meant to restore
+    // the state around it. A mode that was off is left off: the overlay's echo
+    // then keeps the sidebar honest either way.
+    if (held.mode !== 'off') toFrame(held.frame, { type: 'ez:set-mode', mode: held.mode })
+    const body = ref
+      ? [...held.draft.body, { t: 'ref' as const, n: nextRefNumber(held.draft.body), ...ref }]
+      : held.draft.body
+    toFrame(held.frame, { type: 'ez:restore', draft: { ...held.draft, body } })
+    return
+  }
+  if (!ref) return
+  noteAttach.insertRef(ref)
+  noteAttach.editable.focus()
+}
+
+/** The one place the held comment is given back, run on every snapshot after the
+ *  page has been told what stands where.
+ *
+ *  A round can end without anyone pressing anything on the strip - one that
+ *  produced nothing is dismissed where it stands, a daemon restart settles every
+ *  round it finds - and it can end because the strip's own buttons asked. Both
+ *  reach here the same way: the round is gone from the snapshot. Delivering from
+ *  here, rather than from the button's own response, is what gets three
+ *  orderings right at once. The rebuild goes out after `paintVariants` has put
+ *  the real element back, so the popup is placed against something visible
+ *  rather than the zero-sized box a swapped-out element has. The snapshot saying
+ *  the round is gone can beat the button's response, so a pick in flight is
+ *  waited for instead of the comment coming back empty a beat early. And the id
+ *  arrives on the start request's response while the round arrives on a
+ *  snapshot, with nothing ordering the two - so "gone" only counts once the
+ *  round has been seen here at all. */
+function settleHold(): void {
+  const held = exploreHold
+  if (!held?.round) return
+  if (liveExplores().some((e) => e.id === held.round)) {
+    held.seen = true
+    return
+  }
+  if (!held.seen) return
+  if (held.leaving && held.answer === undefined) return
+  endExploreIn(held.answer ?? undefined)
+}
+
+/** Left with nothing. The round ends the same way it would with a pick, and the
+ *  comment it was armed from still comes back: a round that produced nothing
+ *  useful is no reason to lose what the user had already written. */
+async function leaveRound(round: ExploreWire): Promise<void> {
+  const held = exploreHold?.round === round.id ? exploreHold : null
+  if (held) held.leaving = true
+  const res = await api('/explore/exit', {
+    method: 'POST',
+    body: JSON.stringify({ id: round.id }),
+  })
+  if (!held) return
+  if (res.ok) held.answer = null
+  else held.leaving = false
+}
+
+/** The card the strip puts over its own buttons before an act that ends the
+ *  explore. One at a time, because there is one pointer and one decision. */
+let stripAsk: (() => void) | null = null
+
+function closeStripAsk(): void {
+  const close = stripAsk
+  stripAsk = null
+  close?.()
+}
+
+/** Ask on the strip, and run the act on a yes. Both of these leave the explore
+ *  behind, which is not something to discover afterwards - so the question is
+ *  put where the button is, and the answer can be put away for good. */
+function askOnStrip(
+  actions: HTMLElement,
+  offer: { key: string; body: string; go: string },
+  run: () => void,
+): void {
+  if (confirmSkipped(localStorage, offer.key)) {
+    run()
+    return
+  }
+  closeStripAsk()
+  const card = h('div', 'ez-strip-ask')
+  card.setAttribute('role', 'dialog')
+  card.setAttribute('aria-label', offer.go)
+  const skip = h('input') as HTMLInputElement
+  skip.type = 'checkbox'
+  const skipLabel = h('label', 'ez-strip-ask-skip')
+  skipLabel.append(skip, h('span', undefined, '不要再提示'))
+  const go = h('button', 'ez-strip-ask-go', offer.go)
+  const no = h('button', 'ez-strip-ask-no', '取消')
+  const row = h('div', 'ez-strip-ask-actions')
+  row.append(go, no)
+  card.append(h('div', undefined, offer.body), row, skipLabel)
+
+  // Closed by a press anywhere outside it, never by where focus went. Focus is
+  // the wrong signal for this card on macOS: a mousedown on a control does not
+  // focus it there, and a click on the checkbox's label blurs whatever had focus
+  // *as part of* forwarding the click to the box - so a focusout-based close shut
+  // the card in the instant before the tick landed, twice over, for two different
+  // reasons. Where the pointer went down is the question actually being asked.
+  const outside = (e: PointerEvent) => {
+    if (e.target instanceof Node && !card.contains(e.target)) done(false)
+  }
+  const done = (ok: boolean) => {
+    document.removeEventListener('pointerdown', outside, true)
+    card.remove()
+    stripAsk = null
+    // Only a yes is ever remembered - see `confirm-skip.ts`.
+    rememberConfirm(localStorage, offer.key, { ok, skip: skip.checked })
+    if (ok) run()
+  }
+  go.onclick = () => done(true)
+  no.onclick = () => done(false)
+  card.onkeydown = (e) => {
+    if (e.key !== 'Escape') return
+    e.stopPropagation()
+    done(false)
+  }
+  // Ticking the box leaves focus on the body - see above - which is where Escape
+  // would then go. Back onto the button that answers, so it still means "no".
+  skip.addEventListener('change', () => go.focus())
+  stripAsk = () => {
+    document.removeEventListener('pointerdown', outside, true)
+    card.remove()
+  }
+  document.addEventListener('pointerdown', outside, true)
+  actions.append(card)
+  go.focus()
+}
+
+function roundPill(round: ExploreWire): HTMLElement {
+  const pill = h('div', 'ez-strip-pill')
+  pill.title = round.direction ? `${round.label}：${round.direction}` : round.label
+  pill.setAttribute('role', 'group')
+  pill.setAttribute('aria-label', `探索 ${round.label}`)
+  pill.append(icon(MagicWand01Icon as IconNode, 14))
+
+  const chips = h('div', 'ez-strip-chips')
+  const original = h('button', `ez-strip-chip${round.selected === null ? ' ez-on' : ''}`, '原本')
+  original.title = '這個元素原本的樣子'
+  original.onclick = () => select(round, null)
+  chips.append(original)
+  for (const variant of round.variants) {
+    const on = variant.id === round.selected
+    const chip = h('button', `ez-strip-chip${on ? ' ez-on' : ''}`, variant.name)
+    // The note is a sentence about what this variant did, and on the pill it
+    // would set the width that four variants have to share. It is the tooltip's
+    // to carry, alongside the name in full - the chip clips that too.
+    chip.title = variant.note ? `${variant.name}：${variant.note}` : variant.name
+    chip.onclick = () => select(round, variant.id)
+    chips.append(chip)
+  }
+  if (round.status === 'generating') {
+    chips.append(h('div', 'ez-strip-pending', round.variants.length ? '還在想…' : '正在產生…'))
+  }
+  pill.append(chips)
+
+  // Two ways out, and they are the only two: take the one on the page with you,
+  // or leave with nothing. Both end the round - what a round is for is over once
+  // you have decided - so both ask first.
+  const actions = h('div', 'ez-strip-actions')
+  const chosen = round.variants.find((v) => v.id === round.selected)
+  const adopt = h('button', 'ez-strip-action', '選擇')
+  adopt.disabled = !chosen
+  adopt.title = chosen
+    ? `帶「${chosen.name}」回主對話，交給 agent 實作進專案`
+    : '先挑一個變體，才有東西可以帶回去'
+  adopt.onclick = () =>
+    askOnStrip(
+      actions,
+      {
+        key: 'explore-adopt',
+        body: '離開這一輪探索回到主對話。你選的版本會附在訊息上，交給 agent 實作進專案。',
+        go: '選擇',
+      },
+      () => void adoptVariant(round, chosen!),
+    )
+  actions.append(adopt)
+
+  const quit = h('button', 'ez-strip-action', '退出探索')
+  quit.title = '結束這一輪探索，回到主對話'
+  quit.onclick = () =>
+    askOnStrip(
+      actions,
+      {
+        key: 'explore-exit',
+        body: '離開這一輪探索回到主對話，頁面回到原本的樣子，這些變體不會留下。',
+        go: '退出探索',
+      },
+      () => void leaveRound(round),
+    )
+  actions.append(quit)
+  pill.append(actions)
+  return pill
+}
+
 /** Which sizes the canvas shows. Its own control, in the corner of the thing it
  *  changes rather than up in the header: what is on the canvas is a property of
  *  the canvas, and the header is already carrying the one question of whether to
@@ -900,7 +1293,7 @@ const shownItems = CANVAS_DEVICES.map((d) => {
 
 const shownWrap = h('div', 'ez-shown')
 shownWrap.append(shownBtn, shownMenu)
-stageWrap.append(stage, shownWrap)
+stageWrap.append(stage, shownWrap, strip)
 
 let shownMenuOpen = false
 
@@ -1601,12 +1994,356 @@ editAttach.wrap.addEventListener(
   true,
 )
 
+// ------------------------------------------------------------------- fork chip
+
+/** Where the review is, when it is not on the main line.
+ *
+ *  A branch and the conversation it came from are the same shape - same thread,
+ *  same composer - and the only thing that told them apart was which messages
+ *  happened to be in view. That is not a signal, it is a coincidence. So a
+ *  branch says so: a breadcrumb held in the top corner of the thread, and a way
+ *  back through it.
+ *
+ *  Absolute rather than a bar of its own. A permanent row would cost the thread
+ *  a strip of height on every review, to say something that is true on almost
+ *  none of them; floating in the corner costs nothing until there is something
+ *  to say. The thread scrolls under it, which is why it carries a ground. */
+const forkBar = h('nav', 'ez-fork-bar')
+forkBar.hidden = true
+forkBar.setAttribute('aria-label', '目前的對話位置')
+/** The way back to the review itself. A branch's most likely exit by far, so it
+ *  is a click rather than a click-then-choose. */
+const forkRoot = h('button', 'ez-fork-root')
+/** The conversation being read, and the trigger for everything else it could
+ *  be. The current crumb is the natural place for it: a breadcrumb's last item
+ *  is where you are, so opening a list of the others from it needs no second
+ *  control. */
+const forkChip = h('button', 'ez-fork-here')
+const forkName = h('span', 'ez-fork-name')
+forkChip.append(icon(MagicWand01Icon as IconNode, 13), forkName)
+
+/** The top of the tree this conversation belongs to: walk up until a chat has
+ *  no parent. A review can have several - `/new` starts one each time - and a
+ *  branch belongs to exactly one of them. Bounded, because a parent chain read
+ *  off the wire is not this code's to trust with an unbounded walk. */
+function rootOf(chat: ChatWire, chats: ChatWire[]): ChatWire {
+  let at = chat
+  for (let hops = 0; at.parentChatId && hops < 32; hops += 1) {
+    const parent = chats.find((c) => c.id === at.parentChatId)
+    if (!parent) break
+    at = parent
+  }
+  return at
+}
+
+/** The name a conversation goes by here. A branch is named by what it was opened
+ *  to do, because that is what the user will be looking for when they come back
+ *  to it; the line it came off is the main one.
+ *
+ *  `isRoot` means "the top of the tree being shown", not "the review's first
+ *  conversation". Everything this control draws is scoped to one tree, so there
+ *  is only ever one of these on screen and 主對話 is unambiguous - while inside
+ *  a branch, the line you came off *is* the main conversation, whether or not
+ *  the review happened to start there. */
+function chatName(chat: ChatWire, isRoot: boolean): string {
+  if (chat.parentChatId) return chat.title ?? '分支對話'
+  return isRoot ? '主對話' : (chat.title ?? '對話')
+}
+
+/** What the branch was about - the element, for an explore - which is what tells
+ *  two of them apart when both are called 探索樣式. */
+function chatDetail(chat: ChatWire): string {
+  return chat.detail ?? chatTime(chat.startedAt)
+}
+
+/** The branches that came off the line being read, and only those. Two
+ *  exclusions.
+ *
+ *  The line itself, because whichever control is showing this list already names
+ *  it, and offering the same destination twice is not a choice.
+ *
+ *  And branches of branches. `/explore` forks from wherever the review is, so
+ *  exploring from inside an explore goes a level deeper - real reviews reach
+ *  five - but those are somewhere the user went *from* a fork rather than
+ *  somewhere to go *to* from here. The breadcrumb still names whichever one is
+ *  current, however deep it sits; this list stays one level so it reads as a set
+ *  of siblings rather than a tree to navigate.
+ *
+ *  One tree only. `/new` starts a separate conversation with branches of its
+ *  own, and stepping into one of those is not going back - it is going somewhere
+ *  else entirely, which `/resume` is for.
+ *
+ *  Oldest first, so the branches read in the order they were opened. The
+ *  picker's own order, not the header's - this is a tree being read, not a
+ *  history being scrolled. */
+function branchesOf(s: SnapshotWire | null): ChatWire[] {
+  const all = [...(s?.chats ?? [])].reverse()
+  const current = all.find((c) => c.current)
+  const here = current ? rootOf(current, all) : undefined
+  return all.filter((c) => c.parentChatId && (here ? c.parentChatId === here.id : false))
+}
+
+interface BranchPicker {
+  menu: HTMLElement
+  close: (focusTrigger?: boolean) => void
+  isOpen: () => boolean
+}
+
+/** The list of branches off this line, and the machinery to open one from a
+ *  trigger. Two controls hang it - the breadcrumb, while the review is inside a
+ *  branch, and the corner chip, while it is on the line they came off - and they
+ *  offer exactly the same set, so it is written once and mounted twice. */
+function branchPicker(trigger: HTMLButtonElement, menuClass: string): BranchPicker {
+  const menu = h('div', `ez-menu ${menuClass}`)
+  menu.setAttribute('role', 'menu')
+  menu.setAttribute('aria-label', '切換到某個對話')
+  menu.hidden = true
+
+  let rows: HTMLElement[] = []
+  let open = false
+
+  /** Which row the arrow is on. The same single-pointer rule the resume card
+   *  has: hover and the arrow keys write one piece of state between them, so the
+   *  list never shows two answers to "which row is the keyboard about to open". */
+  function pointAt(row: HTMLElement): void {
+    for (const other of rows) other.toggleAttribute('data-active', other === row)
+  }
+
+  function close(focusTrigger = false): void {
+    open = false
+    menu.hidden = true
+    trigger.setAttribute('aria-expanded', 'false')
+    if (focusTrigger) trigger.focus()
+  }
+
+  function show(): void {
+    menu.textContent = ''
+    rows = branchesOf(snapshot).map((chat) => {
+      const row = h('button', 'ez-notice-row ez-fork-row')
+      row.setAttribute('role', 'menuitemradio')
+      row.setAttribute('aria-checked', String(chat.current))
+      if (chat.current) row.dataset.current = ''
+      row.append(
+        icon(ArrowRight02Icon as IconNode, 12),
+        h('span', 'ez-notice-row-name', chatName(chat, false)),
+        h('span', 'ez-notice-row-when', chatDetail(chat)),
+      )
+      row.addEventListener('pointerenter', () => pointAt(row))
+      row.addEventListener('focus', () => pointAt(row))
+      row.onclick = () => {
+        close()
+        if (!chat.current) void switchChat(chat.id)
+      }
+      menu.append(row)
+      return row
+    })
+    open = true
+    menu.hidden = false
+    trigger.setAttribute('aria-expanded', 'true')
+    // Into the list, which is also what puts the arrow on a row: the keyboard is
+    // the point of this control, the same as the resume card's.
+    ;(rows.find((r) => 'current' in r.dataset) ?? rows[0])?.focus()
+  }
+
+  trigger.setAttribute('aria-haspopup', 'menu')
+  trigger.setAttribute('aria-expanded', 'false')
+  trigger.onclick = () => (open ? close() : show())
+  // Pressing inside the control must not move focus. A mousedown on a button
+  // does not focus it on macOS - focus falls to the body - and the focusout
+  // below would then close the menu before the click reached the row, so every
+  // pick landed on whatever the menu had been covering. Holding focus where it
+  // is means the control never sees a focusout of its own making; a press
+  // anywhere else still moves focus off the list and still closes it.
+  const holdFocus = (e: MouseEvent) => e.preventDefault()
+  trigger.addEventListener('mousedown', holdFocus)
+  menu.addEventListener('mousedown', holdFocus)
+  menu.onkeydown = (e) => {
+    if (walkMenu(e, rows)) return
+    if (e.key === 'Escape') {
+      e.stopPropagation()
+      close(true)
+    }
+  }
+  menu.addEventListener('focusout', () => {
+    // The whole control is one focus scope: leaving it closes it, but moving
+    // between its own rows must not.
+    queueMicrotask(() => {
+      if (open && !menu.contains(document.activeElement) && document.activeElement !== trigger) {
+        close()
+      }
+    })
+  })
+
+  return { menu, close, isOpen: () => open }
+}
+
+/** Whether a review can step back into a branch it has left.
+ *
+ *  Off, and the reason is the variants rather than the conversation. A branch's
+ *  variants are markup captured when it ran, and between two rounds the agent is
+ *  editing the very code they stand in for - so re-entering an old branch means
+ *  putting yesterday's alternative in the place of an element that has since
+ *  been rewritten, with nothing that can tell you it has. In this tool a stale
+ *  variant is the ordinary case, not the corner one.
+ *
+ *  So a review's shape is one way: explore, choose, come back, and the round is
+ *  over. Exploring again starts a round of its own, on the page as it is now.
+ *
+ *  The machinery is kept whole behind this one flag rather than removed - the
+ *  picker, the list it draws, the rows that switch chat. Set this to true and the
+ *  crumb opens it again and the main line gets its way in back, exactly as
+ *  before. `/resume` is unaffected either way: it has always listed only the
+ *  conversations with no parent. */
+const BRANCHES_REACHABLE: boolean = false
+
+const forkPicker = BRANCHES_REACHABLE ? branchPicker(forkChip, 'ez-fork-menu') : null
+// Where you are, and with the branches one-way that is all it is. Left as a
+// button so the crumb keeps one shape across both settings of the flag, and
+// marked the way a breadcrumb marks its last item so it still reads as a place.
+if (!forkPicker) {
+  forkChip.disabled = true
+  forkChip.setAttribute('aria-current', 'page')
+}
+
+/** The way into the branches, from the line they came off. The breadcrumb only
+ *  exists inside a branch, so on the main line a review that had forked five
+ *  times looked exactly like one that had never forked at all - the work was
+ *  there, with no way back to it but `/resume`.
+ *
+ *  At the far end of the same row, because the left of that row is already
+ *  saying where you are and this is the one thing it does not answer: where else
+ *  you could be. Named for what the list holds rather than for where it is
+ *  opened from - `主對話` is the crumb three inches to its left, and a row that
+ *  says it twice reads as two controls for one place. */
+const forkMore = h('button', 'ez-fork-more')
+forkMore.append(h('span', undefined, '分支對話'), icon(ChevronDownIcon as IconNode, 12))
+forkMore.title = '這條主線底下的分支對話'
+const morePicker = BRANCHES_REACHABLE ? branchPicker(forkMore, 'ez-fork-more-menu') : null
+
+/** Leaving a branch, which the review cannot come back into - see
+ *  `BRANCHES_REACHABLE`. Both ways out ask first, because both end the same two
+ *  things: the conversation, and whatever the agent is part-way through in it.
+ *
+ *  Asked rather than refused. The strip's way back used to grey itself out while
+ *  a turn ran, which answered the question by taking the choice away - and the
+ *  choice is the user's: they can see the turn running, and leaving it is a
+ *  perfectly ordinary thing to decide. */
+async function leaveBranch(toChatId: string): Promise<void> {
+  const ok = await askConfirm({
+    // Keyed on the act. The body says one clause more when a turn is running,
+    // but it is the same decision either way, so answering it once answers it.
+    key: 'leave-branch',
+    title: '確定要回主對話？',
+    body: snapshot?.agentBusy
+      ? '回去會立刻停下 agent，這一輪探索就此結束，之後無法再回到這個對話。'
+      : '這一輪探索就此結束，之後無法再回到這個對話。',
+    go: '回主對話',
+  })
+  if (!ok) return
+  await switchChat(toChatId)
+}
+
+forkRoot.onclick = () => {
+  const chats = [...(snapshot?.chats ?? [])].reverse()
+  const current = chats.find((c) => c.current)
+  if (!current) return
+  const root = rootOf(current, chats)
+  if (!root.current) void leaveBranch(root.id)
+}
+
+/** Which chat the thread is drawing, so the next render can tell whether the
+ *  review went deeper, came back, or merely got another message. */
+let shownChatId: string | null = null
+
+function paintFork(s: SnapshotWire): void {
+  const chats = s.chats ?? []
+  const current = chats.find((c) => c.current)
+  const onBranch = !!current?.parentChatId
+  // One row, two things to say. Inside a branch it is the trail out; on the line
+  // the branches came off it is the way into them, and it only earns its height
+  // there once there is at least one.
+  // With the branches one-way there is nothing for the main line's half of this
+  // row to offer, so the row becomes a branch's alone.
+  const branches = morePicker ? branchesOf(s).length : 0
+  forkBar.hidden = !onBranch && !branches
+  forkMore.hidden = onBranch || !branches
+  if (forkMore.hidden && morePicker?.isOpen()) morePicker.close()
+  if (!onBranch) {
+    if (forkPicker?.isOpen()) forkPicker.close()
+    forkSep.hidden = true
+    forkChip.hidden = true
+    if (current) {
+      const name = chatName(current, true)
+      forkRoot.textContent = name
+      // Where you already are. It keeps the crumb's place in the row and stops
+      // being a way to get anywhere, which is what a trail's last item is.
+      forkRoot.disabled = true
+      forkRoot.setAttribute('aria-current', 'page')
+      forkRoot.removeAttribute('title')
+    }
+    shownChatId = current?.id ?? null
+    return
+  }
+  forkSep.hidden = false
+  forkChip.hidden = false
+  forkRoot.disabled = false
+  forkRoot.removeAttribute('aria-current')
+  // The crumb always starts at the review itself, not at the immediate parent:
+  // branches can nest, and "探索樣式 › 探索樣式" says nothing about where the
+  // user is being offered a way back to. Nothing stands for the levels in
+  // between - there is no rung to step onto there, and an ellipsis that opens
+  // nothing is a control that lies. The popover lists them.
+  //
+  // Named by what kind of session it is. The element it was opened on is more
+  // identifying, and was tried - but it is long, it carries the viewport tag,
+  // and one crumb's worth of it crowds a line whose job is to say "you are one
+  // level down". The element is a keystroke away in the popover.
+  const here = chatName(current, false)
+  const root = rootOf(current, chats)
+  const rootName = chatName(root, true)
+  forkRoot.textContent = rootName
+  forkRoot.title = `回到${rootName}`
+  forkName.textContent = here
+  forkChip.title = forkPicker ? `${here} · 點一下切換對話` : here
+}
+
+/** The thread moved between conversations. Push it sideways, in the direction
+ *  the review actually went: into a branch it enters from the right, back out of
+ *  one it enters from the left. Exit the way it entered, which is what makes the
+ *  gesture legible rather than decorative.
+ *
+ *  An animation rather than a transition: this is a view arriving whole, not a
+ *  value being retargeted, and it has to stay smooth across the re-render and
+ *  the round trip that caused it. Retriggered by taking the attribute off and
+ *  putting it back, so two switches in a row both play. */
+function pushThread(s: SnapshotWire): void {
+  const chats = s.chats ?? []
+  const current = chats.find((c) => c.current)
+  if (!current || current.id === shownChatId) return
+  const was = shownChatId
+  shownChatId = current.id
+  if (!was) return
+  const deeper = current.parentChatId === was
+  const back = chats.find((c) => c.id === was)?.parentChatId === current.id
+  convScroll.removeAttribute('data-enter')
+  void convScroll.offsetWidth
+  convScroll.dataset.enter = deeper ? 'deeper' : back ? 'back' : 'swap'
+}
+
 const convSection = h('section', 'ez-section ez-conv-section')
 const convList = h('div', 'ez-conv')
 const convScroll = h('div', 'ez-fade ez-conv-scroll')
 convScroll.appendChild(convList)
 
-convSection.append(convScroll, notices)
+const forkSep = h('span', 'ez-fork-sep')
+forkSep.append(icon(ChevronRightIcon as IconNode, 10))
+forkBar.append(forkRoot, forkSep, forkChip)
+if (forkPicker) forkBar.append(forkPicker.menu)
+if (morePicker) forkBar.append(forkMore, morePicker.menu)
+// Above the thread and in the flow, so the conversation starts below it rather
+// than under it: a breadcrumb is where you *are*, which is part of the page
+// rather than something floating over it.
+convSection.append(forkBar, convScroll, notices)
 
 const resizer = h('div', 'ez-resizer')
 resizer.tabIndex = 0
@@ -1958,11 +2695,27 @@ let pickSeq = 0
 /** What the note box shows while the user is off pointing at something. */
 const PICKING_LABEL = '選取中…'
 
+/** Whether the review is reading an explore branch rather than its main line.
+ *  Painted from the snapshot, because which conversation is current is the
+ *  daemon's to say. */
+let onBranch = false
+
+/** The line at the edge of every screen, which two states use: an element being
+ *  chosen for a comment, and the page standing in an explore. One line, one
+ *  colour apart, because they are the same statement - that what is on screen is
+ *  not the ordinary page. */
+function paintVeil(): void {
+  const state = pickState ? 'pick' : onBranch ? 'explore' : ''
+  if (state) stage.dataset.ezVeil = state
+  else delete stage.dataset.ezVeil
+}
+
 function dispatchPick(e: PickEvent): void {
   const was = pickState
   const out = reducePick(pickState, e)
   pickState = out.state
   for (const effect of out.effects) applyPickEffect(effect)
+  paintVeil()
   // One place for every way a pick can end without an answer - aborted, timed
   // out, called off from the page - so none of them can leave a placeholder
   // stranded in the note box. A no-op when there is none, which is every
@@ -2087,8 +2840,25 @@ let sending = false
 
 /** The one owner of the button's state: `render()` runs on every snapshot, and
  *  an upload settling has to be able to repaint it between two of them. */
+/** Whether the composer can hand anything over right now.
+ *
+ *  One predicate for the button and for the chord, because they are two ways of
+ *  asking for the same thing and a greyed-out button that ⌘+Enter walks past is
+ *  worse than no button state at all.
+ *
+ *  A session still opening is deliberately not in here. The batch waits for it -
+ *  the daemon hands over whatever is queued the moment the agent goes idle - so
+ *  the send lands either way, and blocking it would buy nothing but the button
+ *  going dead and live again on every chat switch. A control that flickers to
+ *  report something the user never had to act on is worse than one that quietly
+ *  takes the work and gets to it when it can. */
+function canSend(): boolean {
+  if (sending || noteAttach.pending() > 0) return false
+  return snapshot?.state !== 'ended'
+}
+
 function paintSendState(): void {
-  sendBtn.disabled = sending || snapshot?.state === 'ended' || noteAttach.pending() > 0
+  sendBtn.disabled = !canSend()
 }
 
 /** Keep the usage figure honest.
@@ -2118,7 +2888,7 @@ document.addEventListener('visibilitychange', refreshLimit)
 setInterval(refreshLimit, LIMIT_BEAT_MS)
 
 async function sendBatch(): Promise<void> {
-  if (sending || noteAttach.pending() > 0) return
+  if (!canSend()) return
   const count = snapshot?.annotations.length ?? 0
   const attachments = noteAttach.ids()
   const references = noteAttach.refs()
@@ -2126,7 +2896,13 @@ async function sendBatch(): Promise<void> {
   const skills = noteAttach.skills()
   // A skill on its own is a request: "run this over what you can see" needs no
   // annotation and no note.
-  if (count === 0 && !text && attachments.length === 0 && references.length === 0 && !skills.length) {
+  if (
+    count === 0 &&
+    !text &&
+    attachments.length === 0 &&
+    references.length === 0 &&
+    !skills.length
+  ) {
     return
   }
   // Called off before the box is emptied: an answer arriving after the reset
@@ -2396,7 +3172,7 @@ async function switchAgent(agent: AgentWire): Promise<void> {
     // way the switch goes, so answering it once answers it for all of them.
     key: 'switch-agent',
     title: `確定要改用 ${agent.name}？`,
-    body: 'Session 綁定 Agent，切換 Agent 會開啟新對話。',
+    body: '切換 Agent 會開啟新對話，遺失現有上下文。',
     go: `改用 ${agent.name}`,
   })
   if (!ok) return
@@ -2422,7 +3198,7 @@ function paintAgents(): void {
   agentPill.append(
     ...brandMark(agentBrandFor(command), 14),
     h('span', 'ez-agent-name', agentProfileFor(command)?.name ?? 'Agent'),
-    icon(ArrowDown01Icon as IconNode, 11),
+    icon(ChevronDownIcon as IconNode, 12),
   )
 
   agentMenu.textContent = ''
@@ -2494,7 +3270,6 @@ function chatTime(at: number): string {
 async function switchChat(id: string): Promise<void> {
   await api('/acp/chat', { method: 'POST', body: JSON.stringify({ id }) })
 }
-
 
 // -------------------------------------------------------------- agent config
 
@@ -2621,7 +3396,7 @@ function paintConfig(acp: AcpWire | undefined): void {
       ? shortConfigValueName(configValueName(named, named.currentValue))
       : (named && configLabel(named)) || ''
   configPill.textContent = ''
-  configPill.append(h('span', 'ez-config-name', label), icon(ArrowDown01Icon as IconNode, 11))
+  configPill.append(h('span', 'ez-config-name', label), icon(ChevronDownIcon as IconNode, 12))
   // The qualifier the label dropped, plus the agent's own description of the
   // value - which is where "Best for everyday, complex tasks" lives.
   const full = named && named.type === 'select' ? configValueName(named, named.currentValue) : ''
@@ -3070,6 +3845,18 @@ function render(): void {
   paintSendState()
   paintConfig(s.acp)
   paintLimit(s.acp)
+  paintStrip()
+  paintVariants()
+  settleHold()
+  paintFork(s)
+  pushThread(s)
+  broadcast({ type: 'ez:can-explore', on: s.canExplore === true })
+  // The page is standing in an explore rather than showing the review's own
+  // line. The page is told because it withdraws `/explore` while it is true; the
+  // line that says so is drawn out here, on the frame's own edge.
+  onBranch = !!s.chats?.find((c) => c.current)?.parentChatId
+  paintVeil()
+  broadcast({ type: 'ez:in-explore', on: onBranch })
   agentWrap.hidden = !s.acp
   // The row carries the gap below it, so it has to go when both of its controls
   // do - otherwise a poll-mode review keeps six pixels of nothing.
@@ -3085,6 +3872,12 @@ function render(): void {
   } else if (s.agentBusy) {
     agentStatus.className = 'ez-badge ez-working'
     agentStatus.textContent = 'Agent 修改中'
+  } else if (s.acp?.state === 'starting') {
+    // Connected, with no session to ask anything of yet - it is opening one, or
+    // picking an earlier one back up. The composer cannot send while this is
+    // true, and this line is the only thing that says why.
+    agentStatus.className = 'ez-badge ez-working'
+    agentStatus.textContent = 'Agent 準備中'
   } else if (s.agentOnline) {
     agentStatus.className = 'ez-badge ez-online'
     agentStatus.textContent = 'Agent 已連線'
@@ -3120,9 +3913,23 @@ function render(): void {
       prevRole = 'agent'
     }
   }
-  // Nothing in the thread claimed it: a turn with no batch behind it, or one whose
-  // question is not in the log. It still has to be visible, so it goes last.
-  if (s.agentBusy && !livePlaced) convList.appendChild(liveTurnEl(s, prevRole))
+  // Nothing in the thread claimed it: a turn with no batch behind it, one whose
+  // question is not in the log, or a session still opening - which has no batch
+  // to sit under because the one just sent is waiting for it. It still has to be
+  // visible, so it goes last.
+  //
+  // A session opening counts as something to wait on. The composer takes a batch
+  // through that window and holds it, and a thread that shows nothing meanwhile
+  // is one where the send looks to have gone nowhere.
+  //
+  // Only when something is actually waiting on it, though. Switching to another
+  // conversation opens a session too, and there the wait buys nothing: nobody
+  // asked for anything, so a pulse would be reporting the tool's own plumbing.
+  // `agentQueued` is the difference, and it is what makes an explore pulse - the
+  // branch is made with its prompt already waiting on the session.
+  const opening = s.acp?.state === 'starting' && !!s.agentQueued
+  const waiting = s.agentBusy || opening
+  if (waiting && !livePlaced) convList.appendChild(liveTurnEl(s, prevRole))
   if (s.acp?.ask) convList.appendChild(acpAskEl(s.acp.ask))
   if (s.acp?.state === 'exited' && s.acp.error) {
     convList.appendChild(
@@ -3143,7 +3950,10 @@ function liveTurnEl(s: SnapshotWire, prevRole: string | null): HTMLElement {
   const row = h('div', `ez-msg ez-msg-agent${prevRole === 'agent' ? ' ez-msg-cont' : ''}`)
   const dots = h('div', 'ez-thinking')
   dots.setAttribute('role', 'status')
-  dots.setAttribute('aria-label', s.agentProgress ?? 'Agent 修改中')
+  // What the pulse is about, which is not always a turn: said the way the badge
+  // says it, so the two never disagree about what the agent is doing.
+  const opening = s.acp?.state === 'starting'
+  dots.setAttribute('aria-label', s.agentProgress ?? (opening ? 'Agent 準備中' : 'Agent 修改中'))
   for (let i = 0; i < 3; i++) dots.appendChild(h('span', 'ez-dot'))
   // The agent's own words on what it is doing, when it sends any - rendered where
   // the reply will land, because it is the reply, mid-formation.
@@ -3193,40 +4003,279 @@ function acpFeedEl(acp: AcpWire): HTMLElement {
   return box
 }
 
-/** SPIKE: a decision routed out of the agent - AskUserQuestion, a permission
- *  prompt - answered here instead of in a terminal. Every question is a row of
- *  option buttons; the answer goes out the moment the last one is picked. */
+/** A decision routed out of the agent - a permission prompt, AskUserQuestion, an
+ *  elicitation form - answered here instead of in a terminal.
+ *
+ *  Two tempos. A card that is nothing but choices sends itself the moment an
+ *  option is picked for the last of them, which is how permission prompts have
+ *  always felt and how a one-question multiple choice should. Anything with a
+ *  typed field gets a 送出 button instead: a value someone is still writing must
+ *  not leave on its own, and one button for the whole card beats guessing which
+ *  field was last. Typing into a choice's own "Other" box moves that card to the
+ *  second tempo too, for the same reason. A question (not a permission) can also
+ *  be declined, which the protocol models and the agent knows how to carry on
+ *  from. */
 function acpAskEl(ask: AcpAskWire): HTMLElement {
   const card = h('div', 'ez-acp-ask')
   card.append(h('div', 'ez-acp-ask-title', ask.title))
-  const picked = new Map<string, string>()
-  const submit = (): void => {
-    if (picked.size < ask.questions.length) return
-    for (const b of card.querySelectorAll('button')) b.disabled = true
-    void api('/acp/answer', {
-      method: 'POST',
-      body: JSON.stringify({ id: ask.id, answers: Object.fromEntries(picked) }),
-    })
-  }
-  for (const question of ask.questions) {
-    if (question.text) card.append(h('div', 'ez-acp-ask-q', question.text))
-    const row = h('div', 'ez-acp-ask-options')
-    for (const option of question.options) {
-      const btn = h('button', `ez-acp-opt${option.hint ? ` ez-acp-opt-${option.hint}` : ''}`)
-      btn.append(h('span', undefined, option.name))
-      if (option.description) btn.append(h('span', 'ez-acp-opt-desc', option.description))
-      btn.title = option.description ?? ''
-      btn.onclick = () => {
-        picked.set(question.key, option.id)
-        for (const b of row.querySelectorAll('button')) b.classList.remove('ez-on')
-        btn.classList.add('ez-on')
-        submit()
-      }
-      row.appendChild(btn)
+  const values = new Map<string, AcpAskAnswer>()
+  const choicesOnly = ask.fields.every((f) => f.kind === 'select')
+  const customKeys = new Set(
+    ask.fields.flatMap((f) =>
+      (f.kind === 'select' || f.kind === 'multiselect') && f.custom ? [f.custom.key] : [],
+    ),
+  )
+  const typedCustom = (): boolean => [...values.keys()].some((k) => customKeys.has(k))
+  let settled = false
+  const send = (body: Record<string, unknown>): void => {
+    if (settled) return
+    settled = true
+    for (const c of card.querySelectorAll<
+      HTMLButtonElement | HTMLInputElement | HTMLTextAreaElement
+    >('button, input, textarea')) {
+      c.disabled = true
     }
-    card.appendChild(row)
+    void api('/acp/answer', { method: 'POST', body: JSON.stringify({ id: ask.id, ...body }) })
   }
+  // A choice answered by its Other box counts as answered; a card with nothing
+  // in it is not sent - that is what 略過 is for.
+  const complete = (): boolean =>
+    values.size > 0 &&
+    ask.fields.every(
+      (f) =>
+        f.optional ||
+        values.has(f.key) ||
+        ((f.kind === 'select' || f.kind === 'multiselect') &&
+          !!f.custom &&
+          values.has(f.custom.key)),
+    )
+  const submit = (): void => {
+    if (complete()) send({ answers: Object.fromEntries(values) })
+  }
+  const submitBtn = h('button', 'ez-acp-opt ez-acp-opt-primary', '送出')
+  submitBtn.onclick = submit
+  const refresh = (): void => {
+    const instant = choicesOnly && !typedCustom()
+    submitBtn.hidden = instant
+    submitBtn.disabled = !complete()
+  }
+  const changed = (how: 'pick' | 'edit'): void => {
+    if (how === 'pick' && choicesOnly && !typedCustom()) submit()
+    else refresh()
+  }
+  // Every field says 選填 only when the card also has ones that are not: a
+  // form where nothing is required (Claude's AskUserQuestion) would otherwise
+  // say it on every line and mean nothing by it.
+  const mixed = ask.fields.some((f) => f.optional) && ask.fields.some((f) => !f.optional)
+  ask.fields.forEach((field, i) => {
+    let labelId: string | undefined
+    if (field.text || (mixed && field.optional)) {
+      const label = h(
+        'div',
+        'ez-acp-ask-q',
+        `${field.text ?? ''}${mixed && field.optional ? '（選填）' : ''}`,
+      )
+      labelId = `${ask.id}-q${i}`
+      label.id = labelId
+      card.append(label)
+    }
+    card.append(acpFieldEl(field, values, changed, submit, labelId))
+  })
+  if (ask.kind === 'question' || !choicesOnly) {
+    const actions = h('div', 'ez-acp-ask-actions')
+    if (ask.kind === 'question') {
+      const skip = h('button', 'ez-acp-opt', '略過')
+      skip.onclick = () => send({ decline: true })
+      actions.append(skip)
+    }
+    actions.append(submitBtn)
+    card.append(actions)
+  }
+  refresh()
   return card
+}
+
+/** One field of an ask, drawn for its kind. `values` is the card's answer so far;
+ *  `changed` is told after every edit whether it was a pick or typing, `submit`
+ *  is ⌘/Ctrl+Enter in a typed field - the composer's own chord for "this is
+ *  done". A default is shown as the current value, never sent on its own: the
+ *  user still confirms. */
+function acpFieldEl(
+  field: AcpAskField,
+  values: Map<string, AcpAskAnswer>,
+  changed: (how: 'pick' | 'edit') => void,
+  submit: () => void,
+  labelId?: string,
+): HTMLElement {
+  const labelled = <T extends HTMLElement>(el: T, role?: string): T => {
+    if (role) el.setAttribute('role', role)
+    if (labelId) el.setAttribute('aria-labelledby', labelId)
+    return el
+  }
+  const optionButton = (option: AcpAskOption): HTMLButtonElement => {
+    const btn = h('button', `ez-acp-opt${option.hint ? ` ez-acp-opt-${option.hint}` : ''}`)
+    btn.append(h('span', undefined, option.name))
+    if (option.description) btn.append(h('span', 'ez-acp-opt-desc', option.description))
+    btn.title = option.description ?? ''
+    return btn
+  }
+  const chord = (e: KeyboardEvent): void => {
+    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+      e.preventDefault()
+      submit()
+    }
+  }
+  const textField = (
+    key: string,
+    opts: { max?: number; placeholder?: string; initial?: string; onInput?: () => void },
+  ): HTMLTextAreaElement => {
+    const area = h('textarea', 'ez-acp-field')
+    area.rows = 1
+    if (opts.max !== undefined) area.maxLength = opts.max
+    if (opts.placeholder) area.placeholder = opts.placeholder
+    const grow = (): void => {
+      area.style.height = 'auto'
+      area.style.height = `${area.scrollHeight}px`
+    }
+    if (opts.initial !== undefined) {
+      area.value = opts.initial
+      values.set(key, opts.initial)
+    }
+    area.oninput = () => {
+      if (area.value) values.set(key, area.value)
+      else values.delete(key)
+      grow()
+      opts.onInput?.()
+      changed('edit')
+    }
+    area.onkeydown = chord
+    queueMicrotask(grow)
+    return area
+  }
+  /** The choice's own "Other" box, when it has one. Typing into it un-picks a
+   *  single-select - the agent reads a typed answer as replacing the pick, so
+   *  the card should not show both - and leaves a multi-select alone, where the
+   *  two add up. Picking clears the box the same way. */
+  const withCustom = (row: HTMLElement, clearPick: () => void): HTMLElement => {
+    if (field.kind !== 'select' && field.kind !== 'multiselect') return row
+    const custom = field.custom
+    if (!custom) return row
+    const group = h('div', 'ez-acp-group')
+    const box = textField(custom.key, {
+      placeholder: custom.text ?? '其他',
+      onInput: () => {
+        if (field.kind === 'select' && box.value) clearPick()
+      },
+    })
+    group.append(row, box)
+    return group
+  }
+  switch (field.kind) {
+    case 'select': {
+      const row = labelled(h('div', 'ez-acp-ask-options'), 'radiogroup')
+      const clearPick = (): void => {
+        values.delete(field.key)
+        for (const b of row.querySelectorAll('button')) b.classList.remove('ez-on')
+      }
+      const group = withCustom(row, clearPick)
+      for (const option of field.options) {
+        const btn = optionButton(option)
+        if (option.id === field.default) {
+          values.set(field.key, option.id)
+          btn.classList.add('ez-on')
+        }
+        btn.onclick = () => {
+          clearPick()
+          values.set(field.key, option.id)
+          btn.classList.add('ez-on')
+          if (field.custom) {
+            const box = group.querySelector('textarea')
+            if (box) box.value = ''
+            values.delete(field.custom.key)
+          }
+          changed('pick')
+        }
+        row.append(btn)
+      }
+      return group
+    }
+    case 'multiselect': {
+      const row = labelled(h('div', 'ez-acp-ask-options'), 'group')
+      const picked = new Set<string>(field.default ?? [])
+      const sync = (): void => {
+        if (picked.size) values.set(field.key, [...picked])
+        else values.delete(field.key)
+        const full = field.max !== undefined && picked.size >= field.max
+        for (const b of row.querySelectorAll('button')) {
+          const on = picked.has(b.dataset.id ?? '')
+          b.classList.toggle('ez-on', on)
+          b.setAttribute('aria-pressed', String(on))
+          b.disabled = full && !on
+        }
+      }
+      for (const option of field.options) {
+        const btn = optionButton(option)
+        btn.dataset.id = option.id
+        btn.onclick = () => {
+          if (picked.has(option.id)) picked.delete(option.id)
+          else picked.add(option.id)
+          sync()
+          changed('pick')
+        }
+        row.append(btn)
+      }
+      sync()
+      return withCustom(row, () => {})
+    }
+    case 'boolean': {
+      const row = labelled(h('div', 'ez-acp-ask-options'), 'radiogroup')
+      for (const [value, name] of [
+        [true, '是'],
+        [false, '否'],
+      ] as const) {
+        const btn = optionButton({ id: String(value), name })
+        if (field.default === value) {
+          values.set(field.key, value)
+          btn.classList.add('ez-on')
+        }
+        btn.onclick = () => {
+          values.set(field.key, value)
+          for (const b of row.querySelectorAll('button')) b.classList.remove('ez-on')
+          btn.classList.add('ez-on')
+          changed('pick')
+        }
+        row.append(btn)
+      }
+      return row
+    }
+    case 'number': {
+      const input = labelled(h('input', 'ez-acp-field ez-acp-field-number'))
+      input.type = 'number'
+      if (field.min !== undefined) input.min = String(field.min)
+      if (field.max !== undefined) input.max = String(field.max)
+      input.step = field.integer ? '1' : 'any'
+      if (field.default !== undefined) {
+        input.value = String(field.default)
+        values.set(field.key, field.default)
+      }
+      input.oninput = () => {
+        const n = input.value === '' ? NaN : Number(input.value)
+        if (Number.isFinite(n)) values.set(field.key, n)
+        else values.delete(field.key)
+        changed('edit')
+      }
+      input.onkeydown = chord
+      return input
+    }
+    case 'text':
+      return labelled(
+        textField(field.key, {
+          ...(field.max !== undefined ? { max: field.max } : {}),
+          ...(field.format ? { placeholder: field.format } : {}),
+          ...(field.default !== undefined ? { initial: field.default } : {}),
+        }),
+      )
+  }
 }
 
 window.addEventListener('message', (e: MessageEvent) => {
@@ -3245,6 +4294,11 @@ window.addEventListener('message', (e: MessageEvent) => {
     host?: 'popup' | 'note'
     draft?: DraftWire
     ref?: RefWire
+    anchor?: unknown
+    capture?: unknown
+    direction?: string
+    attachments?: string[]
+    references?: RefWire[]
     resumed?: boolean
     ratio?: number
     dx?: number
@@ -3301,12 +4355,47 @@ window.addEventListener('message', (e: MessageEvent) => {
   if (data?.type === 'ez:page' && data.url) {
     dispatchNav({ t: 'moved', url: data.url, from })
   }
+  // The user typed a direction into an element's composer and asked for
+  // variants. The shell owns the request because it is the one holding the
+  // session's api - and the one that can say why it was refused.
+  if (data?.type === 'ez:explore' && data.anchor && data.capture) {
+    void (async () => {
+      const res = await api('/explore/start', {
+        method: 'POST',
+        body: JSON.stringify({
+          anchor: data.anchor,
+          capture: data.capture,
+          direction: data.direction ?? '',
+          attachments: data.attachments ?? [],
+          references: data.references ?? [],
+        }),
+      })
+      if (!res.ok) {
+        // Nothing to wait for, so the comment comes straight back rather than
+        // staying hidden behind a round that never started.
+        stripNotice('這個 agent 現在無法執行探索')
+        endExploreIn()
+        return
+      }
+      // What the held comment is waiting on, so any ending at all can release it.
+      const { exploreId } = (await res.json()) as { exploreId?: string }
+      if (exploreHold && exploreId) exploreHold = { ...exploreHold, round: exploreId }
+    })()
+  }
   if (data?.type === 'ez:ready') {
     dispatchNav({ t: 'loaded', url: data.url ?? data.page ?? '/', from })
     // Straight to the frame, not through `sendMode`: this is a replay of state
     // the overlay lost, and `sendMode` calls off any pick that is still out -
     // which is exactly the pick this fresh overlay has to be handed back.
     toFrame(from, { type: 'ez:set-mode', mode: annotateMode })
+    // A fresh page has none of this: whether it may offer the command, and what
+    // is meant to be standing in place of what.
+    toFrame(from, { type: 'ez:can-explore', on: snapshot?.canExplore === true })
+    toFrame(from, {
+      type: 'ez:in-explore',
+      on: !!snapshot?.chats?.find((c) => c.current)?.parentChatId,
+    })
+    seedVariants(from)
     const frame = frames.get(from)
     if (frame) {
       toFrame(from, {
@@ -3326,6 +4415,12 @@ window.addEventListener('message', (e: MessageEvent) => {
       now: Date.now(),
       frame: from,
     })
+  }
+  // The comment `/explore` was armed from, handed over before its popup closed.
+  // Which frame sent it matters: that is where it is rebuilt when the round ends,
+  // and the sidebar's own composer is the fallback for a frame that has gone.
+  if (data?.type === 'ez:explore-held' && from && data.draft) {
+    exploreHold = { frame: from, draft: data.draft, mode: annotateMode }
   }
   if (data?.type === 'ez:pick-armed' && data.pickId) {
     dispatchPick({

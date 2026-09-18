@@ -18,6 +18,7 @@ import {
   type ClientContext,
   type CreateElicitationRequest,
   type CreateElicitationResponse,
+  type McpServer,
   type RequestPermissionRequest,
   type RequestPermissionResponse,
   type SessionConfigOption,
@@ -27,6 +28,13 @@ import {
   methods,
   ndJsonStream,
 } from '@agentclientprotocol/sdk'
+import {
+  type AcpAskAnswers,
+  type AcpAskField,
+  type ElicitationSchemaIn,
+  fieldsFromSchema,
+  validateAnswers,
+} from './acp-ask.js'
 import { type AcpConfigValue, configValues } from './acp-config.js'
 import { limitFrom, mergeLimit } from './usage-limit.js'
 import { killGroup, killTrackedAgents, trackAgent, untrackAgent } from './agent-children.js'
@@ -44,29 +52,22 @@ export type AcpFeedItem =
   | { kind: 'tool'; toolCallId: string; title: string; status: string }
   | { kind: 'plan'; entries: { content: string; status: string }[] }
 
-export interface AcpAskOption {
-  id: string
-  name: string
-  description?: string
-  /** Permission-option kind (allow_once, reject_once, ...) - styling hint. */
-  hint?: string
-}
-
-export interface AcpAskQuestion {
-  key: string
-  text?: string
-  options: AcpAskOption[]
-}
+export type { AcpAskAnswers, AcpAskField, AcpAskOption } from './acp-ask.js'
 
 /** A decision routed out of the agent, waiting on the user in the shell. A
- *  permission prompt is one question; an AskUserQuestion form can be several.
- *  Either way the shell answers with one option id per question key. */
+ *  permission prompt is one select; an elicitation form can be several fields of
+ *  several kinds. Either way the shell answers with one value per field key, or
+ *  declines the whole thing. */
 export interface AcpAsk {
   id: string
   kind: 'permission' | 'question'
   title: string
-  questions: AcpAskQuestion[]
+  fields: AcpAskField[]
 }
+
+/** How an ask was settled. `null` is a shutdown: nobody answered, the request
+ *  must still be released. */
+type AskOutcome = { answers: AcpAskAnswers } | { declined: true } | null
 
 /** One subscription window, as last reported.
  *
@@ -155,6 +156,16 @@ export interface AcpAgentOptions {
    *  taken once: every session this agent opens asks again, and the answer
    *  changes as the review moves between its own conversations. */
   resumeSessionId?: () => string | undefined
+  /** The MCP servers this session should be opened with - eztweak's own, one
+   *  per live explore round. Read at open time for the same reason as the rest,
+   *  and ignored entirely by an agent that cannot reach an HTTP one. */
+  mcpServers?: () => McpServer[]
+  /** Whether a tool the agent asks permission to call is one of eztweak's own -
+   *  served by this daemon, for this review. Such a request is granted here
+   *  without a card: the user asked for the thing the tool does when they
+   *  started the round, and "may eztweak talk to eztweak" is not a question they
+   *  can meaningfully answer. Every other tool's request still goes to them. */
+  ownTool?: (toolName: string) => boolean
   /** The last figure this agent reported, from before the daemon restarted. The
    *  line is permanent once it has a number, and nothing here can ask for one -
    *  see `usage-limit.ts`. */
@@ -172,7 +183,6 @@ export interface AcpAgentOptions {
 export type AcpSessionStart = 'new' | 'resumed'
 
 const FEED_CAP = 100
-
 
 /** Tool titles quote absolute paths, and the sidebar is 340px wide: the project
  *  prefix is the part every one of them shares and says nothing. */
@@ -206,7 +216,7 @@ export class AcpAgent {
   private modeValue: string | null = null
   private limit: AcpLimit | null
   private ask: AcpAsk | null = null
-  private askResolve: ((answers: Record<string, string> | null) => void) | null = null
+  private askResolve: ((outcome: AskOutcome) => void) | null = null
   private askSeq = 0
   private cancelling = false
   /** Bumped whenever the live session is replaced. A turn, or an update, that
@@ -219,6 +229,20 @@ export class AcpAgent {
   /** Set when the agent advertises `session/resume`, which is what lets a review
    *  pick its own conversation back up after the daemon that held it went away. */
   private canResume = false
+  /** Set when the agent can reach an MCP server over HTTP, which is how eztweak
+   *  gives it a tool of its own: a client cannot serve one down the ACP
+   *  connection until `mcp-over-acp` lands on both ends. Gated rather than
+   *  assumed - a session opened with a server the agent cannot reach may fail
+   *  outright, and the feature that needs it is better absent than broken. */
+  private canMcpHttp = false
+  /** Set when the agent advertises `session/fork`, which is what lets an explore
+   *  run on a copy of the conversation instead of in it. */
+  private canFork = false
+  /** Turns the *live* session has finished. Reset with the session, because what
+   *  it answers is whether this session has a transcript - which is what both
+   *  resume and fork need, and neither can be given by a session that has never
+   *  been asked anything. */
+  private sessionTurns = 0
   /** Resolved when the agent is done, and nothing else: it is what holds the
    *  connection open, so a session swap must not disturb it. */
   private finish: (() => void) | null = null
@@ -391,15 +415,28 @@ export class AcpAgent {
   }
 
   /** The user answered in the shell: one option id per question key. */
-  answer(id: string, answers: Record<string, string>): boolean {
+  /** The user's answers to the ask `id`, as the shell sent them. Refused - and
+   *  the ask left waiting - unless they are complete and well-typed for its
+   *  fields, so the agent is never handed a half-answer. */
+  answer(id: string, raw: unknown): boolean {
+    if (!this.ask || this.ask.id !== id) return false
+    const answers = validateAnswers(this.ask.fields, raw)
+    if (!answers) return false
+    return this.settle(id, { answers })
+  }
+
+  /** The user would rather not answer. The agent hears `decline`, which is its
+   *  cue to carry on without, instead of a turn that can only be cancelled. */
+  decline(id: string): boolean {
+    return this.settle(id, { declined: true })
+  }
+
+  private settle(id: string, outcome: AskOutcome): boolean {
     if (!this.ask || this.ask.id !== id || !this.askResolve) return false
-    if (!this.ask.questions.every((q) => q.options.some((o) => o.id === answers[q.key]))) {
-      return false
-    }
     const resolve = this.askResolve
     this.ask = null
     this.askResolve = null
-    resolve(answers)
+    resolve(outcome)
     this.opts.onChange()
     return true
   }
@@ -415,6 +452,58 @@ export class AcpAgent {
     return true
   }
 
+  /** Whether this agent can branch a conversation at all. */
+  get canBranch(): boolean {
+    return this.canFork && this.canResume
+  }
+
+  /** Whether the live session has anything for a fork to copy.
+   *
+   *  Measured, and the reason `/explore` failed on every fresh review: an agent
+   *  refuses `session/fork` on a session that has had no turn, because there is
+   *  no transcript to make a copy of - the same property `session/resume` has,
+   *  which this codebase already relies on elsewhere. A caller that wants a
+   *  branch has to know the difference between "nothing to carry" and "the agent
+   *  would not", because they call for different answers. */
+  get hasTranscript(): boolean {
+    return this.sessionTurns > 0
+  }
+
+  /** Whether this agent will reach an MCP server eztweak serves over HTTP,
+   *  which is the only way it can be given a tool of eztweak's. */
+  get servesMcpHttp(): boolean {
+    return this.canMcpHttp
+  }
+
+  /** Copy the live conversation into a new session and answer with its id,
+   *  without moving onto it: the caller records it against a new chat and then
+   *  reopens, which is what puts the agent there.
+   *
+   *  Fork *and* resume, because a forked session is not live. Measured on
+   *  `claude-agent-acp` 0.77.0: `session/fork` answers with an id and nothing
+   *  else, and prompting that id fails with "Session not found" until
+   *  `session/resume` has read the copied transcript. So this only does the copy;
+   *  `openSession` does the resume, which is also where the mcp servers and the
+   *  review's pinned model get re-asserted - and they must be, since a resumed
+   *  session comes back on the agent's own defaults.
+   *
+   *  Null when the agent cannot do it or is not in a state to be asked. A caller
+   *  that gets null has lost nothing: the review is still on the conversation it
+   *  was on. */
+  async forkSession(): Promise<string | null> {
+    if (!this.ctx || !this.session || !this.canBranch) return null
+    if (this.state !== 'idle') return null
+    try {
+      const forked = await this.ctx.request(methods.agent.session.fork, {
+        sessionId: this.session.sessionId,
+        cwd: this.opts.cwd,
+      })
+      return forked?.sessionId ?? null
+    } catch {
+      return null
+    }
+  }
+
   /** Let go of the session this agent is on and open whichever one it should be
    *  on now - which `resumeSessionId` answers, so the caller decides by moving
    *  the review before calling this. A fresh conversation is that answer being
@@ -428,10 +517,19 @@ export class AcpAgent {
    *  conversation is the whole point of asking - and its end is then dropped on
    *  the epoch. */
   reopenSession(): boolean {
-    if (!this.ctx || !this.session) return false
-    if (this.state !== 'idle' && this.state !== 'working') return false
+    if (!this.ctx) return false
+    if (this.state === 'exited') return false
+    // `starting` is asked for as often as the other two. A review that moves
+    // twice in quick succession - into a branch and straight back out of it -
+    // asks for the second move while the first session is still opening, and
+    // refusing it dropped the move the user had actually made: the click did
+    // nothing at all, and only a second one, once the session was up, landed.
+    //
+    // The epoch is what makes it safe. An open in flight re-reads it at every
+    // step and closes whatever the agent hands back rather than installing it,
+    // so the newest request owns the session however many are outstanding.
     const old = this.session
-    if (this.state === 'working') this.sendCancel(old.sessionId)
+    if (this.state === 'working' && old) this.sendCancel(old.sessionId)
     this.epoch++
     this.session = null
     this.state = 'starting'
@@ -441,8 +539,12 @@ export class AcpAgent {
     // agent is blocked on it, and it has to be released before we let go.
     this.settleAsk()
     this.opts.onChange()
-    old.retire()
-    void this.closeSession(old.sessionId)
+    // Nothing to let go of when the move landed on a session that had not opened
+    // yet. The one in flight is the epoch's to discard.
+    if (old) {
+      old.retire()
+      void this.closeSession(old.sessionId)
+    }
     void this.openSession().catch((err: unknown) => {
       this.fail(err instanceof Error ? err.message : String(err))
     })
@@ -479,6 +581,9 @@ export class AcpAgent {
     if (!ctx) return
     const epoch = this.epoch
     const wanted = this.opts.resumeSessionId?.()
+    // Asked for at open time, like every other option here: a session opened
+    // later in the review is opened for whatever is live *then*.
+    const mcpServers = this.canMcpHttp ? (this.opts.mcpServers?.() ?? []) : []
     let sessionId: string | null = null
     let configOptions: SessionConfigOption[] = []
     let how: AcpSessionStart = 'new'
@@ -487,7 +592,7 @@ export class AcpAgent {
         const resumed = await ctx.request(methods.agent.session.resume, {
           sessionId: wanted,
           cwd: this.opts.cwd,
-          mcpServers: [],
+          mcpServers,
         })
         sessionId = wanted
         configOptions = resumed?.configOptions ?? []
@@ -500,7 +605,7 @@ export class AcpAgent {
     if (!sessionId) {
       const created = await ctx.request(methods.agent.session.new, {
         cwd: this.opts.cwd,
-        mcpServers: [],
+        mcpServers,
       })
       sessionId = created.sessionId
       configOptions = created.configOptions ?? []
@@ -513,6 +618,9 @@ export class AcpAgent {
     }
     const session = this.router.attach(ctx, sessionId)
     this.session = session
+    // A resumed session carries its transcript; a fresh one has none until it is
+    // asked something.
+    this.sessionTurns = how === 'resumed' ? 1 : 0
     // Baseline, not a change: this is a different conversation's options.
     this.modeValue = null
     this.setConfigOptions(configOptions)
@@ -595,6 +703,7 @@ export class AcpAgent {
   private turnEnded(stopReason: string, epoch: number): void {
     if (epoch !== this.epoch || this.state !== 'working') return
     this.state = 'idle'
+    this.sessionTurns += 1
     this.cancelling = false
     // The reply is the said segments of the feed, in order. Everything between
     // them - the tool runs - is what the paragraphs are narrating, so joining
@@ -611,7 +720,7 @@ export class AcpAgent {
   /** Parks an ask and resolves with the user's answers - or null when the ask
    *  was settled by a shutdown. One at a time by protocol shape: the agent
    *  blocks on the request, so a second cannot arrive while one is pending. */
-  private pendAsk(ask: Omit<AcpAsk, 'id'>): Promise<Record<string, string> | null> {
+  private pendAsk(ask: Omit<AcpAsk, 'id'>): Promise<AskOutcome> {
     return new Promise((resolve) => {
       this.ask = { id: `ask-${++this.askSeq}`, ...ask }
       this.askResolve = resolve
@@ -622,61 +731,47 @@ export class AcpAgent {
   private async requestPermission(
     params: RequestPermissionRequest,
   ): Promise<RequestPermissionResponse> {
-    const answers = await this.pendAsk({
+    // Our own tool is let through as a one-off, never as "always": an always is
+    // what the agent writes into the project's settings as a rule keyed by the
+    // tool's full name, and that name carries the round id - so the rule would
+    // never match again and the file would grow a dead line per round. Once
+    // costs nothing and leaves nothing behind. An agent offering no once falls
+    // through to the user rather than being granted something broader.
+    const toolName = params.toolCall.name ?? params.toolCall.title ?? ''
+    if (this.opts.ownTool?.(toolName)) {
+      const once = params.options.find((o) => o.kind === 'allow_once')
+      if (once) return { outcome: { outcome: 'selected', optionId: once.optionId } }
+    }
+    const field: AcpAskField = {
+      key: 'option',
+      kind: 'select',
+      options: params.options.map((o) => ({ id: o.optionId, name: o.name, hint: o.kind })),
+    }
+    const outcome = await this.pendAsk({
       kind: 'permission',
       title: params.toolCall.title ?? 'The agent needs a decision',
-      questions: [
-        {
-          key: 'option',
-          options: params.options.map((o) => ({ id: o.optionId, name: o.name, hint: o.kind })),
-        },
-      ],
+      fields: [field],
     })
-    const optionId = answers?.option
-    if (!optionId) return { outcome: { outcome: 'cancelled' } }
+    const optionId = outcome && 'answers' in outcome ? outcome.answers.option : undefined
+    if (typeof optionId !== 'string') return { outcome: { outcome: 'cancelled' } }
     return { outcome: { outcome: 'selected', optionId } }
   }
 
-  /** Form elicitation, the shape `claude-agent-acp` renders AskUserQuestion in:
-   *  an object schema of single-select string fields, each a titled `oneOf` of
-   *  option labels, with optional free-text companions. The spike answers the
-   *  selects and skips the rest; anything without options at all is declined
-   *  rather than parked on a card the user could never complete. */
+  /** Form elicitation: an object schema of primitive fields, which is also the
+   *  shape `claude-agent-acp` renders AskUserQuestion in. Every field kind the
+   *  protocol allows is drawn; a form with a required field the shell cannot
+   *  draw is declined rather than parked on a card the user could never
+   *  complete. URL-mode elicitation has no place in a review and is declined. */
   private async requestElicitation(
     params: CreateElicitationRequest,
   ): Promise<CreateElicitationResponse> {
     if (params.mode !== 'form') return { action: 'decline' }
-    const schema = params.requestedSchema as {
-      properties?: Record<
-        string,
-        {
-          title?: string
-          description?: string
-          oneOf?: { const?: unknown; title?: string; description?: string }[]
-        }
-      >
-    }
-    const questions: AcpAskQuestion[] = Object.entries(schema.properties ?? {}).flatMap(
-      ([key, field]) => {
-        const options = (field.oneOf ?? []).flatMap((o) =>
-          typeof o.const === 'string'
-            ? [{ id: o.const, name: o.title ?? o.const, ...(o.description ? { description: o.description } : {}) }]
-            : [],
-        )
-        if (!options.length) return []
-        return [
-          {
-            key,
-            ...(field.description ?? field.title ? { text: field.description ?? field.title } : {}),
-            options,
-          },
-        ]
-      },
-    )
-    if (!questions.length) return { action: 'decline' }
-    const answers = await this.pendAsk({ kind: 'question', title: params.message, questions })
-    if (!answers) return { action: 'cancel' }
-    return { action: 'accept', content: answers }
+    const fields = fieldsFromSchema(params.requestedSchema as ElicitationSchemaIn)
+    if (!fields) return { action: 'decline' }
+    const outcome = await this.pendAsk({ kind: 'question', title: params.message, fields })
+    if (!outcome) return { action: 'cancel' }
+    if ('declined' in outcome) return { action: 'decline' }
+    return { action: 'accept', content: outcome.answers }
   }
 
   /** Only ever called from `pump`, which has already established that the update
@@ -718,8 +813,7 @@ export class AcpAgent {
       case 'plan': {
         const entries = update.entries.map((e) => ({ content: e.content, status: e.status }))
         const existing = this.feed.find((f) => f.kind === 'plan') as
-          | Extract<AcpFeedItem, { kind: 'plan' }>
-          | undefined
+          Extract<AcpFeedItem, { kind: 'plan' }> | undefined
         if (existing) existing.entries = entries
         else this.feed.push({ kind: 'plan', entries })
         break
@@ -810,6 +904,8 @@ export class AcpAgent {
         })
         this.canClose = !!init.agentCapabilities?.sessionCapabilities?.close
         this.canResume = !!init.agentCapabilities?.sessionCapabilities?.resume
+        this.canMcpHttp = !!init.agentCapabilities?.mcpCapabilities?.http
+        this.canFork = !!init.agentCapabilities?.sessionCapabilities?.fork
         this.ctx = ctx
         await this.openSession()
         // `connectWith` closes the stream when this returns, so this is the

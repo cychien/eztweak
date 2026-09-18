@@ -1,5 +1,5 @@
-import { existsSync, readFileSync } from 'node:fs'
-import { dirname, join, parse, resolve } from 'node:path'
+import { readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import open, { apps } from 'open'
 import {
@@ -11,6 +11,7 @@ import {
 } from './constants.js'
 import { agentCommand } from './agents.js'
 import { daemonMain } from './daemon.js'
+import { projectRoot } from './project-root.js'
 import { ensureDaemon, findRunningDaemon } from './registry.js'
 import { VERSION_HEADER } from './version.js'
 import type { PollResult } from './protocol.js'
@@ -59,19 +60,6 @@ Examples:
   ${PKG_NAME} http://localhost:5173/
   ${PKG_NAME} poll http://localhost:5173/ --agent-reply "改好了 hero 區塊，請再看一次"
 `
-
-/** Which project this review belongs to. Anchored at the repo (or package) root
- *  rather than the raw cwd, so opening a session from a subdirectory resolves to
- *  the same session as opening it from the top. */
-function projectRoot(): string {
-  let dir = resolve(process.cwd())
-  const { root } = parse(dir)
-  for (;;) {
-    if (existsSync(join(dir, '.git')) || existsSync(join(dir, 'package.json'))) return dir
-    if (dir === root) return resolve(process.cwd())
-    dir = dirname(dir)
-  }
-}
 
 function fail(message: string, hint?: string): never {
   console.error(`error: ${message}`)
@@ -168,7 +156,7 @@ async function cmdOpen(
     body: JSON.stringify({
       url: target.href,
       reopen: flags.has('--reopen'),
-      project: projectRoot(),
+      project: projectRoot(process.cwd()),
       ...(agentArg ? { agent: agentCommand(agentArg) } : {}),
     }),
   })

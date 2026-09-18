@@ -64,6 +64,20 @@
   --ref: #f4d3e2;
   --ref-ink: #7b3a5c;
   --ref-accent: #cf5f92;
+  /* Explore's violet. Mirrors the overlay's - see the note on --ez-explore-ink
+     there for why hue 300 and why these two lightnesses. */
+  --explore-ink: #5e3f8c;
+  --explore-accent: #6b3baa;
+  /* The same violet as it reads on the variant strip's near-black pill.
+     --explore-accent is weighted for paper and all but disappears there. */
+  --explore-on-ink: #a97ae0;
+  /* Motion. One strong ease-out for everything that enters or leaves, because
+     the built-in curves are too weak to read as deliberate, and one duration
+     band: a view arriving is the slowest thing here and still under 300ms. */
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --t-pop: 0.16s;
+  --t-menu: 0.18s;
+  --t-view: 0.22s;
 
   /* Inline code in an agent's reply: rust text on a wash of itself, so the two
      can never drift apart. 4.63:1 on --paper through the 9% fill - past the
@@ -355,6 +369,39 @@ body.ez-arranging .ez-frame {
   border-radius: 10px;
   outline: 1px solid var(--border);
   overflow: hidden;
+}
+
+/* The line that says the page is in a state - an element being picked, or a
+   variant standing in for the real thing.
+
+   Drawn here rather than inside the page, for the two reasons the hairline above
+   is: it follows whatever corner the screen is clipped to, where a square line
+   inside a rounded clip had its corners eaten; and it is a true 2px at every
+   zoom, where a line drawn inside a scaled page thinned with it - and this one
+   has to be noticed. */
+.ez-screen::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  display: none;
+  box-shadow: inset 0 0 0 2px color-mix(in oklab, var(--veil-edge) 62%, transparent);
+}
+
+.ez-stage[data-ez-veil] .ez-screen::after {
+  display: block;
+}
+
+/* A pick wins the colour when both are true, which is any pick made from inside
+   a branch: the pick is the gesture actually in flight, and the branch is the
+   room it is being made in. */
+.ez-stage[data-ez-veil='pick'] {
+  --veil-edge: var(--ref-accent);
+}
+
+.ez-stage[data-ez-veil='explore'] {
+  --veil-edge: var(--explore-accent);
 }
 
 .ez-screen {
@@ -799,8 +846,6 @@ body.ez-arranging .ez-frame {
   color: var(--ink-ghost);
 }
 
-
-
 /* Holds the column whether or not there is a tick in it, so the names do not
    step sideways as boxes are checked. The green is the shell's own - the one it
    already uses for a thing that is attached and accounted for - and the stroke
@@ -1242,7 +1287,6 @@ body.ez-arranging .ez-frame {
   margin-top: -6px;
 }
 
-
 /* The agent's turns are unboxed, so whitespace is the only thing that separates
    one reply from the bubble on either side of it, and the only thing that
    separates two replies from each other. Both need more than the default gap,
@@ -1530,7 +1574,6 @@ body.ez-arranging .ez-frame {
   flex-direction: column;
   gap: 6px;
 }
-
 
 .ez-queue-item {
   border-radius: 12px;
@@ -2023,6 +2066,7 @@ body.ez-arranging .ez-frame {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  transform: translateY(1px);
 }
 
 /* ------------------------------------------------------- agent config pill */
@@ -2052,6 +2096,7 @@ body.ez-arranging .ez-frame {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  transform: translateY(1px);
 }
 
 /* A contenteditable, not a textarea: attachment chips are elements, and they
@@ -2139,6 +2184,16 @@ body.ez-arranging .ez-frame {
 .ez-chip-ref {
   background: var(--ref);
   color: var(--ref-ink);
+}
+
+/* A reference the user brought back from an explore, rather than off the picker.
+   The plate stays the reference's, because that is what it is - an element the
+   comment points at - and the mark carries the violet instead, the way the branch
+   crumb does: the colour says which *kind* of reference it is without claiming a
+   fourth chip colour, which the palette above deliberately does not have. The
+   word in the chip does the rest. */
+.ez-chip-ref.ez-chip-chosen svg {
+  color: var(--explore-accent);
 }
 
 /* The skill the batch runs, written into the sentence the way it would be typed.
@@ -2262,7 +2317,6 @@ body.ez-arranging .ez-frame {
   font-size: 12px;
   color: var(--ink-faint);
 }
-
 
 /* ------------------------------------------------- SPIKE: ACP live agent */
 
@@ -2535,6 +2589,68 @@ body.ez-arranging .ez-frame {
   border-color: var(--ink);
 }
 
+/* A typed field in an ask: the same box the option buttons sit in, drawn as an
+   input. The textarea grows with its content the way the note box does. */
+.ez-acp-field {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--foreground);
+  font-family: inherit;
+  font-size: 12.5px;
+  line-height: 1.45;
+  padding: 6px 8px;
+  resize: none;
+  outline: none;
+}
+
+.ez-acp-field:focus {
+  border-color: var(--ring);
+  outline: 3px solid var(--ring-halo);
+  outline-offset: 0;
+}
+
+.ez-acp-field:disabled {
+  opacity: 0.45;
+}
+
+.ez-acp-field-number {
+  width: 140px;
+}
+
+/* A choice and its own "Other" box, stacked as one control. */
+.ez-acp-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* `.ez-acp-opt` sets its own display, which would beat the UA's rule for the
+   attribute; the card hides its 送出 with `hidden` while picks send themselves. */
+.ez-acp-ask [hidden] {
+  display: none;
+}
+
+.ez-acp-ask-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+  margin-top: 10px;
+}
+
+.ez-acp-opt-primary {
+  background: var(--primary);
+  color: var(--primary-foreground);
+  border-color: var(--primary);
+}
+
+.ez-acp-opt-primary:disabled {
+  opacity: 0.35;
+}
+
 .ez-acp-turn {
   display: flex;
   flex-direction: column;
@@ -2757,4 +2873,604 @@ body.ez-arranging .ez-frame {
 
 .ez-notice-row[data-active] .ez-notice-row-when {
   color: var(--ink-faint);
+}
+
+/* --------------------------------------------------------- variant strip */
+
+/* `display` set in an author rule outranks the UA's `[hidden]`, so the strip has
+   to say this for itself. It is hidden far more often than it is shown, so
+   getting it wrong is not a corner case. */
+.ez-strip[hidden] {
+  display: none;
+}
+
+/* Across the bottom of the stage, over the canvas rather than in it: the canvas
+   pans and scrolls, and a control that slides away with it is one you have to
+   chase. Same reason the size picker sits where it does.
+
+   Centred and sized to its contents rather than stretched edge to edge. What is
+   in it is a handful of chips, and a bar the width of the stage spends the whole
+   bottom edge of the page saying so. */
+.ez-strip {
+  position: absolute;
+  left: 50%;
+  bottom: 12px;
+  transform: translateX(-50%);
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  max-width: calc(100% - 24px);
+}
+
+/* The dark pill the overlay already uses for anything it floats over a page -
+   see `.ez-pick-banner`. Dark because this one is over the app's own design and
+   has to stay legible above whatever is behind it, and because it is the same
+   gesture in the same place as the picker's: chrome about the page, not of it.
+   The violet is carried by the icon alone. */
+.ez-strip-pill {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  padding: 7px 8px 7px 12px;
+  border-radius: 999px;
+  background: var(--ink);
+  box-shadow:
+    0 0 0 1px oklch(100% 0 0 / 0.25),
+    0 6px 20px oklch(0% 0 0 / 0.3);
+  color: #fff;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.ez-strip-pill > svg {
+  flex-shrink: 0;
+  color: var(--explore-on-ink);
+}
+
+/* The chips are the point of the strip, so they get the room that is left and
+   scroll rather than wrap: a pill that grows taller pushes the page up. The
+   scrollbar is suppressed because it would land on the pill's own rounded edge
+   and there is nowhere inside it for a track to sit. */
+.ez-strip-chips {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.ez-strip-chips::-webkit-scrollbar {
+  display: none;
+}
+
+.ez-strip-chip {
+  flex: 0 0 auto;
+  border: 0;
+  border-radius: 999px;
+  background: oklch(100% 0 0 / 0.14);
+  color: inherit;
+  font: inherit;
+  padding: 4px 11px;
+  /* Names run to 40 characters. Clipped so one long one cannot take the room
+     the other three need to be seen at all; the whole of it is in the chip's
+     tooltip. */
+  max-width: 18ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.ez-strip-chip:hover {
+  background: oklch(100% 0 0 / 0.24);
+}
+
+/* The one on the page is filled white rather than outlined. On a ground this
+   dark an edge is the quieter of the two, and which variant you are looking at
+   is the one thing the strip has to say without being read. */
+.ez-strip-chip.ez-on {
+  background: #fff;
+  color: var(--ink);
+}
+
+.ez-strip-pending {
+  flex: 0 0 auto;
+  padding: 0 4px;
+  color: oklch(100% 0 0 / 0.62);
+}
+
+.ez-strip-actions {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+  padding-left: 8px;
+  border-left: 1px solid oklch(100% 0 0 / 0.18);
+}
+
+/* The question, put over the buttons that raised it. The sidebar's notice stack
+   is where the review's other confirmations live, and it is the wrong place for
+   this one: it would be answered from the far side of the screen, away from the
+   thing the pointer is already on and away from the variants it is about.
+
+   The pill's own ground, not the shell's light one. Everything down here belongs
+   to the same object - the card is the pill saying one more thing before it acts -
+   and a white panel hung off a near-black pill reads as a second control arriving
+   from somewhere else. A card rather than a pill, though: this one holds a
+   sentence, and only the radius says so. */
+.ez-strip-ask {
+  position: absolute;
+  bottom: calc(100% + 10px);
+  right: 0;
+  z-index: 6;
+  width: 250px;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding: 11px 12px;
+  border: 0;
+  border-radius: 12px;
+  background: var(--ink);
+  color: #fff;
+  /* The pill's ring, and a deeper drop under it: this sits a layer above the
+     thing it came out of and has to read as being off it. */
+  box-shadow:
+    0 0 0 1px oklch(100% 0 0 / 0.25),
+    0 14px 34px oklch(0% 0 0 / 0.38);
+  font-size: 12px;
+  line-height: 1.6;
+  text-align: left;
+  /* The pill keeps everything on one line; a paragraph in it must not. */
+  white-space: normal;
+  transform-origin: bottom right;
+  animation: ez-menu-in var(--t-menu) var(--ease-out) both;
+}
+
+.ez-strip-ask-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* The strip's own two weights, so the answer to the question is drawn in the same
+   language as the variants it is about: filled white for the one that acts, a
+   wash of white for the one that backs out.
+
+   Cornered rather than rounded off, unlike the chips above them. A pill is what
+   the strip uses for a thing you pick between; these are the two answers to a
+   question, which is what the review's other notice cards ask with, and they are
+   drawn the same way. */
+.ez-strip-ask-go,
+.ez-strip-ask-no {
+  border: 0;
+  border-radius: 6px;
+  font-family: inherit;
+  font-size: 11.5px;
+  line-height: 1.5;
+  padding: 5px 11px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.ez-strip-ask-go {
+  background: #fff;
+  color: var(--ink);
+}
+
+.ez-strip-ask-no {
+  background: oklch(100% 0 0 / 0.14);
+  color: inherit;
+}
+
+.ez-strip-ask-no:hover {
+  background: oklch(100% 0 0 / 0.24);
+}
+
+.ez-strip-ask-go:focus-visible,
+.ez-strip-ask-no:focus-visible {
+  outline: 2px solid oklch(100% 0 0 / 0.7);
+  outline-offset: 1px;
+}
+
+/* Under the buttons rather than beside them, the same way the sidebar's card puts
+   it: a footnote to the whole question, not a third answer to it. */
+.ez-strip-ask-skip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: oklch(100% 0 0 / 0.62);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+/* White box, dark tick - the filled chip's colouring, which is how this card says
+   "on" everywhere else in it. Left to itself the browser ticks in its own blue,
+   which is a colour this palette does not have; the violet was tried and read as
+   a third accent on a card that only has two things to say. */
+.ez-strip-ask-skip input {
+  accent-color: #fff;
+  margin: 0;
+  cursor: pointer;
+}
+
+.ez-strip-action {
+  border: 0;
+  border-radius: 999px;
+  background: oklch(100% 0 0 / 0.14);
+  color: inherit;
+  font: inherit;
+  font-size: 11.5px;
+  padding: 3px 9px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.ez-strip-action:hover:not(:disabled) {
+  background: oklch(100% 0 0 / 0.24);
+}
+
+.ez-strip-action:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* The page's focus halo is a wash of --ink, which says nothing on a ground this
+   dark. Everything inside the pill needs its own. */
+.ez-strip-chip:focus-visible,
+.ez-strip-action:focus-visible {
+  outline: 2px solid oklch(100% 0 0 / 0.7);
+  outline-offset: 1px;
+}
+
+/* ------------------------------------------------------------------ fork bar */
+
+/* Where the review is, when it is not on the main line. A breadcrumb in the
+   flow, above the thread, rather than a chip floating over it: this is where
+   you *are*, which is part of the page - and a thread that starts underneath
+   something is a thread whose first line is covered. It appears only on a
+   branch, so an ordinary review pays nothing for it. */
+.ez-fork-bar {
+  position: relative;
+  /* Its own animation makes this a stacking context, which traps the menu's
+     z-index inside it - so the bar has to carry one too, or the thread below
+     paints straight over a popover that is nominally above everything.
+
+     One, not five. Five put it level with the header's own menus, and being
+     later in the document it then cut through the size picker hanging over it.
+     The bar belongs above the conversation and below everything the chrome
+     drops. */
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  padding: 7px 0 7px;
+  /* Full-bleed, like the section rules above and below it: this separates two
+     regions of the sidebar, and a line inset from both edges reads as belonging
+     to the crumb rather than as the boundary it is. */
+  margin-inline: -14px;
+  padding-inline: 14px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  line-height: 1.5;
+  animation: ez-fork-in var(--t-pop) var(--ease-out) both;
+}
+
+.ez-fork-bar[hidden] {
+  display: none;
+}
+
+/* Nothing in the real world appears from nothing, so it arrives nearly its own
+   size and settles rather than growing out of a point. */
+@keyframes ez-fork-in {
+  from {
+    opacity: 0;
+    transform: translateY(-3px);
+  }
+}
+
+/* The trail behind you recedes; the crumb you are on is the one being read.
+   The same weighting shadcn's breadcrumb uses, and the reason it reads at a
+   glance rather than as two names of equal claim.
+
+   4.89:1 on this ground. A step lighter measured 3.44:1 and two steps 2.01:1,
+   which is a word you can see is there and cannot make out. */
+.ez-fork-root {
+  color: var(--muted-foreground);
+}
+
+/* The separator may go lighter than either crumb: it is punctuation, not a
+   word, and the line still reads if it is only half noticed. Inline-flex so the
+   mark centres against the text rather than sitting on its baseline. */
+.ez-fork-sep {
+  display: inline-flex;
+  align-items: center;
+  color: var(--ink-ghost);
+}
+
+/* A line of text that happens to be clickable, not a button. No padding, no
+   plate, no radius: the crumbs sit on the line at the size they read at, and
+   anything drawn around one would make the trail a row of controls. */
+.ez-fork-root {
+  flex-shrink: 0;
+  border: none;
+  background: none;
+  padding: 0;
+  font-family: inherit;
+  font-size: inherit;
+  line-height: inherit;
+  cursor: pointer;
+}
+
+/* The only thing on this line that goes anywhere, so the only one that answers
+   the pointer - and it answers by getting darker rather than by growing a fill.
+   A crumb is a line of text; a plate behind it would make it a button, which is
+   the one thing a breadcrumb's links are not. */
+.ez-fork-root:hover {
+  color: var(--foreground);
+}
+
+.ez-fork-sep {
+  flex-shrink: 0;
+  user-select: none;
+}
+
+/* The last crumb, which is also the way to every other conversation. Drawn as
+   text rather than as a control: a breadcrumb that looks like a button stops
+   reading as a location. */
+/* Where you are. It opens the picker, but it is drawn as the page you are on
+   rather than as a control: no padding, no hover. A breadcrumb's last crumb is
+   a statement of position, and dressing it as a button would make the line read
+   as two buttons and a chevron. */
+.ez-fork-here {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  border: none;
+  background: none;
+  padding: 0;
+  color: var(--foreground);
+  font-family: inherit;
+  font-size: inherit;
+  line-height: inherit;
+  /* The weight the popover gives the row you are on, and the violet the mark
+     beside it already carries - so the crumb and the list agree about which
+     conversation this is. */
+  font-weight: 500;
+  color: var(--explore-ink);
+  cursor: pointer;
+}
+
+/* The one signal that this crumb does something. It carries no plate and grows
+   none on hover - a breadcrumb that sprouts a button is no longer a breadcrumb -
+   so it answers by lifting off the ground instead. Far enough to be felt, and
+   measured to stay above 4.5:1 there; the mark beside it goes with it, or half
+   the crumb would answer and half would not.
+
+   It holds that state while its menu is open, keyed off the `aria-expanded` the
+   control already has to carry. A trigger that drops back to rest the moment the
+   pointer moves into the menu it just opened leaves the menu looking like it
+   came from nowhere. */
+.ez-fork-here:hover,
+.ez-fork-here[aria-expanded='true'] {
+  color: color-mix(in oklab, var(--explore-ink) 80%, var(--paper));
+}
+
+.ez-fork-here:hover svg,
+.ez-fork-here[aria-expanded='true'] svg {
+  color: color-mix(in oklab, var(--explore-accent) 80%, var(--paper));
+}
+
+/* With the branches one-way this crumb names where you are and opens nothing,
+   so it stops answering the pointer - see `BRANCHES_REACHABLE`. The rules above
+   come back with the flag; these only outrank them while it is off. */
+.ez-fork-here:disabled {
+  cursor: default;
+}
+
+.ez-fork-here:disabled:hover {
+  color: var(--explore-ink);
+}
+
+.ez-fork-here:disabled:hover svg {
+  color: var(--explore-accent);
+}
+
+/* The one violet here. The name is a location and takes the page's ink; the
+   mark says which kind of branch it is, which is the only thing on this line
+   that is about explore rather than about position. */
+.ez-fork-here svg {
+  flex-shrink: 0;
+  color: var(--explore-accent);
+}
+
+.ez-fork-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Hung off the crumb it was opened from, so it scales from there rather than
+   from its own middle. */
+.ez-fork-menu,
+.ez-fork-more-menu {
+  position: absolute;
+  top: calc(100% - 2px);
+  z-index: 5;
+  display: flex;
+  /* Bounded on both sides. `.ez-menu` sizes to `max-content`, so without a cap
+     one long element label sets the width of the panel and pushes it past the
+     sidebar; with one, the label is what gives way. */
+  min-width: 170px;
+  max-width: min(100%, 280px);
+  animation: ez-menu-in var(--t-menu) var(--ease-out) both;
+  /* Looser than the resume card's list, which was tried and read as cramped
+     here. That list sits inside a card that already has padding around it; this
+     one is the panel, so the breathing room the card was providing has to come
+     from the plate. The plate is asymmetric on purpose: the extra is wanted
+     above and below the list, not beside it, where the rows already carry their
+     own. Seven rows before it scrolls, as before. */
+  --notice-row: 22px;
+  padding: 7px 4px;
+  gap: 0;
+  max-height: calc(var(--notice-row) * 7);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+/* Each drops from under the crumb that opens it, which is why one is anchored
+   left and the other right: dropped from the wrong end, the right-hand one runs
+   off the sidebar. */
+.ez-fork-menu {
+  left: 14px;
+  right: auto;
+  transform-origin: top left;
+}
+
+.ez-fork-more-menu {
+  left: auto;
+  right: 14px;
+  transform-origin: top right;
+}
+
+.ez-fork-menu[hidden],
+.ez-fork-more-menu[hidden] {
+  display: none;
+}
+
+@keyframes ez-menu-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+}
+
+.ez-fork-row {
+  border-radius: 5px;
+}
+
+/* Every row is a direct branch of the same line, so there is no depth to draw
+   and no indent to draw it with. The padding is horizontal only: the row's
+   height is its leading, the way the resume card's rows are built, so a
+   vertical pad here would make it a box around a line of text. */
+.ez-fork-row {
+  padding: 0 6px;
+}
+
+/* The name is what the row is chosen by, so it keeps its width and the detail
+   gives way. The base row gives the name `flex: 1`, whose `flex-basis: 0` makes
+   it the *first* thing to run out of room - so it needs its content width back,
+   and the detail needs to be the one that flexes. */
+.ez-fork-row .ez-notice-row-name {
+  flex: 0 0 auto;
+}
+
+.ez-fork-row .ez-notice-row-when {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The way into the branches, at the far end of the row the crumbs start. Text
+   and a mark, like everything else on this line - a plate here would make the
+   row read as a toolbar rather than as a statement of where you are. */
+.ez-fork-more {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex-shrink: 0;
+  /* Pushed to the end, which is what puts it opposite the crumb rather than
+     beside it. */
+  margin-left: auto;
+  border: none;
+  background: none;
+  padding: 0;
+  color: var(--muted-foreground);
+  font-family: inherit;
+  font-size: inherit;
+  line-height: inherit;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.ez-fork-more:hover,
+.ez-fork-more[aria-expanded='true'] {
+  color: var(--foreground);
+}
+
+.ez-fork-more svg {
+  color: var(--ink-ghost);
+}
+
+/* A trail's last item is where you are, not a way to get anywhere - so on the
+   main line the root crumb stops answering the pointer and takes the weight the
+   current crumb carries inside a branch. */
+.ez-fork-root:disabled {
+  color: var(--foreground);
+  font-weight: 500;
+  cursor: default;
+}
+
+/* `display` in an author rule outranks the UA's `[hidden]`, so every part of the
+   row that sets one has to say this for itself. */
+.ez-fork-sep[hidden],
+.ez-fork-here[hidden],
+.ez-fork-more[hidden] {
+  display: none;
+}
+
+/* ------------------------------------------------------------- thread push */
+
+/* The thread moved between conversations. It enters from the side the review
+   actually went - right when going into a branch, left when coming back out -
+   so the movement says which way, not merely that something changed. */
+.ez-conv-scroll[data-enter='deeper'] {
+  animation: ez-push-in var(--t-view) var(--ease-out) both;
+}
+
+.ez-conv-scroll[data-enter='back'] {
+  animation: ez-push-out var(--t-view) var(--ease-out) both;
+}
+
+.ez-conv-scroll[data-enter='swap'] {
+  animation: ez-fade-in var(--t-view) var(--ease-out) both;
+}
+
+@keyframes ez-push-in {
+  from {
+    opacity: 0;
+    transform: translateX(14px);
+  }
+}
+
+@keyframes ez-push-out {
+  from {
+    opacity: 0;
+    transform: translateX(-14px);
+  }
+}
+
+@keyframes ez-fade-in {
+  from {
+    opacity: 0;
+  }
+}
+
+/* Fewer and gentler, not none: the fade still says the view changed, and only
+   the travel - the part that is motion for its own sake here - goes. */
+@media (prefers-reduced-motion: reduce) {
+  .ez-fork-bar,
+  .ez-fork-menu,
+  .ez-conv-scroll[data-enter] {
+    animation-name: ez-fade-in;
+    animation-duration: var(--t-pop);
+  }
 }

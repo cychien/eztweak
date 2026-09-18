@@ -4,6 +4,7 @@ import { Footer } from './sections/Footer'
 import { Hero } from './sections/Hero'
 import { Logos } from './sections/Logos'
 import { Nav } from './sections/Nav'
+import { Overlays } from './sections/Overlays'
 import { Pricing } from './sections/Pricing'
 import { Stats } from './sections/Stats'
 import { Testimonial } from './sections/Testimonial'
@@ -19,6 +20,7 @@ export function App() {
         <Stats />
         <Testimonial />
         <Pricing />
+        <Overlays />
         <Faq />
       </main>
       <Footer />
