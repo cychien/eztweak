@@ -101,6 +101,47 @@ test('a reference with no label parses to an empty one', () => {
   ])
 })
 
+// A reference can carry the variant the user settled on in an explore round. It
+// travels whole to the agent, html included, so it is bounded and checked here
+// the way everything else that reaches a prompt from the page is.
+test('a reference carries the variant the user chose', () => {
+  const refs = parseReferences([
+    {
+      n: 1,
+      anchor: { source: 'a.tsx:1' },
+      label: 'cta',
+      variant: { name: '實心', html: '<b>x</b>' },
+    },
+  ])
+  assert.deepEqual(refs, [
+    {
+      n: 1,
+      anchor: { source: 'a.tsx:1' },
+      label: 'cta',
+      variant: { name: '實心', html: '<b>x</b>' },
+    },
+  ])
+})
+
+test('a plain pick does not invent the field', () => {
+  const refs = parseReferences([{ n: 1, anchor: { source: 'a.tsx:1' }, label: 'cta' }])
+  assert.equal('variant' in refs![0]!, false)
+})
+
+// Present and unusable fails the whole request rather than quietly becoming a
+// plain pick: the comment's `[ref n]` would then name something other than what
+// the user attached, which is the one thing a marker must never do.
+test('a variant that is there and unusable fails the request', () => {
+  const anchor = { source: 'a.tsx:1' }
+  assert.equal(parseReferences([{ n: 1, anchor, label: '', variant: {} }]), null)
+  assert.equal(parseReferences([{ n: 1, anchor, label: '', variant: { html: '   ' } }]), null)
+  assert.equal(parseReferences([{ n: 1, anchor, label: '', variant: 'nope' }]), null)
+  assert.equal(
+    parseReferences([{ n: 1, anchor, label: '', variant: { html: 'x'.repeat(33 * 1024) } }]),
+    null,
+  )
+})
+
 test('more references than a person would pick is refused', () => {
   const many = Array.from({ length: 17 }, (_, i) => ({
     n: i + 1,

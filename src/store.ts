@@ -354,6 +354,16 @@ export class SessionStore {
     if (settled.some((e, i) => e.status !== explores[i]!.status)) this.writeExplores(settled)
   }
 
+  /** The round is taking variants again, because a turn is about to run in the
+   *  branch it belongs to. Not `endExplore`'s inverse: that one *settles* a round,
+   *  and settling one that holds nothing dismisses it outright. A dismissed round
+   *  is past reviving - nothing of it is on the page and its url is gone. */
+  resumeExplore(id: string): ExploreState | null {
+    return this.patchExplore(id, (e) =>
+      e.status === 'dismissed' ? e : { ...e, status: 'generating' },
+    )
+  }
+
   /** Put one of a round's variants on the page, or `null` for the original.
    *  Refused for a variant the round does not have, so the page can never be
    *  asked to show markup nothing recorded. */

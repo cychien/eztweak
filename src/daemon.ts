@@ -114,6 +114,12 @@ interface SnapshotWire {
   agentOnline: boolean
   /** Agent took a batch and hasn't come back to poll — it's off editing. */
   agentBusy: boolean
+  /** Work the agent has and has not started: a batch waiting behind a session that
+   *  is still opening, or the explore about to run in the branch just made. The
+   *  complement of `agentBusy` rather than an overlap with it - the two together
+   *  are "the review is waiting", which is what the thread draws a pulse for, and
+   *  apart they are whether a turn has actually begun. */
+  agentQueued?: true
   /** The agent's latest word on what it is doing right now. Transient by design:
    *  progress is status, not conversation, so it lives next to `agentBusy` and
    *  dies with it instead of accumulating stale lines in the log. */
@@ -228,6 +234,10 @@ function acpPrompt(
     'use `anchor.components` / `anchor.section` / `anchor.selector` / `anchor.text`.',
     '`[file n]` in a comment is `attachments[n-1]` (read the file at `path`);',
     '`[ref n]` names the entry in `references` whose `n` matches.',
+    'A reference carrying a `variant` is one the user chose in an explore round. Its html is',
+    'the look they settled on, not code to paste: it is a stand-in that rendered in a shadow',
+    "root with styles of its own. Build that look for real, in the project's own components,",
+    'tokens and conventions, against the element the reference anchors to.',
     'Apply every item, then reply with what you changed, item by item, one short line each.',
     '',
     JSON.stringify(spoken, null, 2),
@@ -539,6 +549,13 @@ class SessionRuntime {
       agentOnline:
         this.pollWaiters.size > 0 || (!!this.acp && this.acp.snapshot().state !== 'exited'),
       agentBusy: this.agentBusy,
+      // Work the agent has been given and not yet started: a batch sitting behind
+      // a session that is still opening, or the explore about to run in the branch
+      // just made. Not the same as busy - no turn has begun - but the review is
+      // waiting all the same, and the thread says so.
+      ...(!this.agentBusy && (this.pendingExplore || this.store.nextBatch())
+        ? { agentQueued: true as const }
+        : {}),
       ...(this.agentProgress ? { agentProgress: this.agentProgress } : {}),
       ...(this.agentBusy && this.activeBatch ? { activeBatchId: this.activeBatch } : {}),
       ...(this.acp ? { acp: this.acp.snapshot(), chats: this.chatsWire() } : {}),
@@ -929,19 +946,25 @@ class SessionRuntime {
     return `Variant ${round.variants.length} ("${variant.name}") is now on the user's page.`
   }
 
-  /** The round the current branch is running, while it is still running it. */
-  private generatingExplore(): ExploreState | undefined {
-    const chatId = this.store.currentChat.id
-    return this.store.explores.find((e) => e.chatId === chatId && e.status === 'generating')
+  /** The round a conversation is about, while any of it is still on offer. */
+  private roundOf(chatId: string): ExploreState | undefined {
+    return this.store.explores.find((e) => e.chatId === chatId && e.status !== 'dismissed')
   }
 
-  /** The branch's turn is over, however it ended. The url stops taking variants
-   *  either way: an agent that goes on calling the tool after the turn it was
-   *  asked in is answering a question nobody is waiting on. */
+  /** The branch's turn is over, however it ended, so the round stops taking
+   *  variants - but not for good, and its url stays open.
+   *
+   *  It has to. The agent was handed that url when its session opened and no
+   *  protocol takes one back, so the tool sits in its list for as long as the
+   *  branch does. Closing the url at the end of the first turn left every
+   *  finished branch advertising a tool that answers 404 - and the user asking
+   *  for more in the one conversation where asking for more should work.
+   *
+   *  What refuses a variant between turns is the round's status, which the next
+   *  turn in this branch puts back: see `resumeRound`. */
   private endExplore(status: ExploreStatus): void {
-    const round = this.generatingExplore()
-    if (!round) return
-    this.exploreMcp.close(round.id)
+    const round = this.roundOf(this.store.currentChat.id)
+    if (!round || round.status !== 'generating') return
     this.store.endExplore(round.id, status)
     if (!round.variants.length && status === 'done') {
       this.store.appendConversation({
@@ -950,6 +973,25 @@ class SessionRuntime {
         ts: Date.now(),
       })
     }
+  }
+
+  /** The review has left the branch, so the round is done with: the url goes, and
+   *  a turn that was still running is settled as the cancel that took it. */
+  private closeRound(chatId: string): void {
+    const round = this.roundOf(chatId)
+    if (!round) return
+    this.exploreMcp.close(round.id)
+    if (round.status === 'generating') this.store.endExplore(round.id, 'cancelled')
+  }
+
+  /** A turn is about to run in the conversation being read, so if that
+   *  conversation is a branch with a round, the round is taking variants again.
+   *  Asking for more in the branch carries on the round rather than starting one:
+   *  the strip grows, and what was already chosen stays chosen. */
+  private resumeRound(): void {
+    const round = this.roundOf(this.store.currentChat.id)
+    if (!round || round.status === 'generating') return
+    this.store.resumeExplore(round.id)
   }
 
   selectVariant(id: string, variantId: string | null): boolean {
@@ -963,6 +1005,34 @@ class SessionRuntime {
     this.exploreMcp.close(id)
     this.broadcast()
     return true
+  }
+
+  /** Done with a round: the review leaves the branch and the page goes back to
+   *  what it really is.
+   *
+   *  One act, because it is one decision. A round dismissed with the review still
+   *  standing in its branch leaves a conversation whose only purpose has just been
+   *  taken away - the agent still holds the variant tool and the daemon no longer
+   *  answers it, which is the shape the user met as "MCP server 已經斷線".
+   *
+   *  `variantId` is the one the user chose. The page still goes back to the real
+   *  element: the choice travels to the main line as markup for the agent to build
+   *  properly, and a stand-in left on the page would make it impossible to see
+   *  whether that work had landed.
+   *
+   *  Out of the branch before the round is dismissed, because leaving can be
+   *  refused - an agent that has gone - and the other order would strand the
+   *  review in a branch with nothing left in it. */
+  exitExplore(id: string, variantId?: string): boolean {
+    const round = this.store.explores.find((e) => e.id === id)
+    if (!round) return false
+    if (variantId && !round.variants.some((v) => v.id === variantId)) return false
+    const parent = this.store.chats.find((c) => c.id === round.chatId)?.parentChatId
+    if (parent && this.store.currentChat.id === round.chatId && !this.switchAcpChat(parent)) {
+      return false
+    }
+    if (variantId) this.store.markExploreAdopted(id, variantId)
+    return this.dismissExplore(id)
   }
 
   /** Show an earlier conversation and put the agent back on it. */
@@ -987,6 +1057,19 @@ class SessionRuntime {
     const from = this.store.currentChat.id
     const to = move()
     if (!to) return false
+    // The round of the conversation being left is over for good now, which is the
+    // one end a round's own turn never gets to report: the turn goes with the
+    // session - `reopenSession` cancels a working one - and its end then arrives
+    // on a session this daemon has already let go of, which the epoch drops.
+    //
+    // Before the session is opened rather than after. `reopenSession` reads the
+    // open rounds synchronously to hand the next session its urls, and a round
+    // the review is walking away from must not be among them: the agent would
+    // start the new conversation holding a tool for the old one, and reach for it
+    // first. The rollback below can then leave a closed round behind, which costs
+    // nothing - the only way past that line is an agent that has exited, and a
+    // round whose agent is gone is over whatever this says.
+    this.closeRound(from)
     if (!this.acp.reopenSession()) {
       this.store.switchChat(from)
       return false
@@ -1027,6 +1110,10 @@ class SessionRuntime {
       this.acp = null
       return
     }
+    // Before the prompt: a variant can arrive on the agent's first tool call, and
+    // a round still settled when it does would refuse it. The explore's own turn
+    // above needs none of this - `startExplore` opened the round generating.
+    this.resumeRound()
     this.acp.prompt(acpPrompt(outcome, this.activeSkills, this.acp.snapshot().agent))
   }
 
@@ -1458,6 +1545,20 @@ class SessionRuntime {
       const id = String(req.body?.id ?? '')
       if (!id) return res.status(400).json({ error: 'id is required' })
       if (!this.dismissExplore(id)) return res.status(409).json({ error: 'no such explore round' })
+      res.json({ ok: true })
+    })
+
+    // Done with a round, with or without a pick: the review comes out of the
+    // branch and the page goes back to what it really is.
+    api.post('/explore/exit', (req, res) => {
+      const id = String(req.body?.id ?? '')
+      const variantId = req.body?.variantId
+      if (!id || (variantId !== undefined && typeof variantId !== 'string')) {
+        return res.status(400).json({ error: 'id is required' })
+      }
+      if (!this.exitExplore(id, variantId)) {
+        return res.status(409).json({ error: 'that round cannot be left right now' })
+      }
       res.json({ ok: true })
     })
 

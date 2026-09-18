@@ -132,24 +132,143 @@ test('an explore runs on a branch and its variants come back through the tool', 
   assert.equal((await state(port)).acp?.ask, undefined)
 })
 
-test('the round is over when the turn is, and a late variant is refused', async () => {
+// A round's own turn is what normally ends it, and there is one way out that the
+// turn never gets to report: the review leaves the branch. The turn is cancelled
+// with the session and its end then arrives on a session the daemon has already
+// let go of, which the epoch drops - so left alone the round stays `generating`
+// for good, the strip says 還在想 about an agent that is not, and the round's url
+// goes on taking variants for a turn nobody is waiting on.
+test('leaving a branch ends the round it was running', async () => {
+  const port = await ready()
+  const res = await api(port, '/explore/start', {
+    anchor: ANCHOR,
+    capture: CAPTURE,
+    direction: 'SLOW',
+  })
+  const { exploreId } = (await res.json()) as { exploreId: string }
+
+  // Variants in and the turn still parked, which is the state a user actually
+  // decides in: something on the page, the agent still going.
+  await waitFor(async () => {
+    const round = (await state(port)).explores?.find((e) => e.id === exploreId)
+    return round?.status === 'generating' && round.variants.length === 2
+  }, 'the round to be running with its variants in')
+  const branch = (await state(port)).chats?.find((c) => c.current)
+  const parent = branch?.parentChatId
+  assert.ok(parent, 'the explore should have branched')
+
+  await api(port, '/acp/chat', { id: parent })
+
+  const settled = await waitFor(async () => {
+    const round = (await state(port)).explores?.find((e) => e.id === exploreId)
+    return round && round.status !== 'generating' ? round : null
+  }, 'the round to be settled')
+  assert.equal(settled.status, 'cancelled')
+  assert.equal(settled.variants.length, 2, 'what had already arrived stays')
+})
+
+test('the round settles when its turn ends, and the url answers nobody else', async () => {
   const port = await ready()
   const round = await explore(port)
 
-  // The agent's url for the round is closed with the turn. Asking it again is
-  // what a confused agent does after its turn ended.
+  // The turn is over, so the round has stopped taking variants. Its status is
+  // what refuses one now - the url stays open for as long as the branch does,
+  // because the agent was handed it when the session opened and no protocol
+  // takes one back. See `endExplore`.
   const s = await state(port)
   const live = s.explores!.find((e) => e.id === round.id)!
   assert.equal(live.status, 'done')
   assert.equal(live.variants.length, 2)
 
-  // Straight at the url, the way the agent would: the round no longer takes it.
+  // And it is the round's own agent's url, nobody else's: the token is what says
+  // so, and an unknown round and a wrong token are refused the same way.
   const refused = await fetch(`http://127.0.0.1:${port}/__eztweak/api/mcp/${round.id}`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
     body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }),
   })
   assert.equal(refused.status, 404)
+})
+
+// The round belongs to the branch, not to the one turn that opened it. Asking for
+// more inside that branch used to reach a tool the daemon had stopped answering:
+// the agent still had the url - a session is handed its servers once, when it
+// opens - so every call after the first turn came back 404, in the one
+// conversation where asking for more is the obvious thing to do.
+test('asking for more in the branch carries the round on', async () => {
+  const port = await ready()
+  const round = await explore(port)
+  assert.equal(round.variants.length, 2)
+  const first = round.variants[0]!.id
+  assert.equal(round.selected, first)
+
+  // An ordinary message in the branch, which this agent answers by reaching for
+  // the variant tool again.
+  await api(port, '/send', { note: 'more of these: explore_variant' })
+
+  const grown = await waitFor(async () => {
+    const s = await state(port)
+    const live = s.explores?.find((e) => e.id === round.id)
+    return s.acp?.state === 'idle' && live && live.variants.length > 2 ? live : null
+  }, 'the round to take more variants')
+
+  assert.equal(grown.variants.length, 4, 'the strip grows rather than starting over')
+  assert.equal(grown.status, 'done', 'and the round settles again with that turn')
+  assert.equal(grown.selected, first, 'carrying on is not starting over')
+})
+
+// The two ways a round ends, and they are the same act with and without a pick:
+// the page goes back to the real element and the review comes out of the branch.
+// One call, because it is one decision - a round dismissed with the review still
+// standing in its branch leaves a conversation whose only purpose has just been
+// taken away, holding a variant tool the daemon no longer answers.
+test('leaving a round with a pick ends it and brings the review back', async () => {
+  const port = await ready()
+  const round = await explore(port)
+  const pick = round.variants[1]!
+  const branch = (await state(port)).chats!.find((c) => c.current)!
+  assert.ok(branch.parentChatId, 'the explore should have branched')
+
+  assert.equal((await api(port, '/explore/exit', { id: round.id, variantId: pick.id })).status, 200)
+
+  const after = await state(port)
+  // Off the strip and off the page. What the user chose is a picture of the
+  // thing; the real one is the main line's to build.
+  assert.equal(
+    after.explores?.find((e) => e.id === round.id),
+    undefined,
+  )
+  assert.equal(after.chats?.find((c) => c.current)?.id, branch.parentChatId)
+})
+
+test('leaving a round with no pick ends it just the same', async () => {
+  const port = await ready()
+  const round = await explore(port)
+  const branch = (await state(port)).chats!.find((c) => c.current)!
+
+  assert.equal((await api(port, '/explore/exit', { id: round.id })).status, 200)
+
+  const after = await state(port)
+  assert.equal(
+    after.explores?.find((e) => e.id === round.id),
+    undefined,
+  )
+  assert.equal(after.chats?.find((c) => c.current)?.id, branch.parentChatId)
+})
+
+test('a pick the round never produced is refused, and nothing moves', async () => {
+  const port = await ready()
+  const round = await explore(port)
+  const branch = (await state(port)).chats!.find((c) => c.current)!
+
+  assert.equal((await api(port, '/explore/exit', { id: round.id, variantId: 'nope' })).status, 409)
+
+  const after = await state(port)
+  assert.ok(
+    after.explores?.find((e) => e.id === round.id),
+    'the round is still there',
+  )
+  assert.equal(after.chats?.find((c) => c.current)?.id, branch.id, 'and so is the review')
 })
 
 test('a variant can be put on the page and taken off again, and a dismissed round leaves nothing', async () => {

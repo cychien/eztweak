@@ -64,6 +64,22 @@ export interface Reference {
   anchor: Anchor
   /** A name for the element, for the sidebar and the conversation log. */
   label: string
+  /** The markup the user settled on for this element, out of an explore round.
+   *
+   *  A reference carrying one is not "look at that" but "make this one look like
+   *  this". What a round produces is a stand-in - shadow-rooted, never written to
+   *  a file, never wired to anything - so choosing one is not the end of the work
+   *  but the start of it: this is the picture, now build the real thing the way
+   *  the project builds things. */
+  variant?: ChosenVariant
+}
+
+/** One explore variant, as the user hands it on. The round it came from is over
+ *  by then and its id would name nothing, so what travels is the markup itself
+ *  and the name the user chose it by. */
+export interface ChosenVariant {
+  name: string
+  html: string
 }
 
 /** A reference as it reads back in the conversation log and the queue: enough to

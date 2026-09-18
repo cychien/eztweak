@@ -104,6 +104,30 @@ test('a branch is its own conversation, and the review comes back to the one it 
   assert.ok((await visible(port)).some((e) => e.includes('only on the branch')))
 })
 
+// The other half: opening a conversation opens a session too, and nobody asked
+// that session for anything. A review that reported work waiting there would put
+// a pulse in the thread for its own plumbing, which is what it looked like on
+// every switch back to the main line.
+test('a switch nobody asked anything of reports no work waiting', async () => {
+  const port = await ready()
+  await send(port, 'on the main line')
+  const branched = await api(port, '/acp/branch')
+  const { parentChatId } = (await branched.json()) as { parentChatId: string }
+
+  // Polled across the whole switch rather than after it: the window this would be
+  // wrong in is exactly the one the session takes to come back up.
+  let sawWaiting = false
+  const moved = api(port, '/acp/chat', { id: parentChatId })
+  await waitFor(async () => {
+    const s = (await world.state(port)) as State & { agentQueued?: true }
+    if (s.agentQueued) sawWaiting = true
+    return s.acp?.state === 'idle' && s.chats?.find((c) => c.current)?.id === parentChatId
+  }, 'the switch to settle')
+  await moved
+
+  assert.equal(sawWaiting, false, 'a switch with nothing asked of it reported work waiting')
+})
+
 test('an agent that cannot branch is refused, and the review does not move', async () => {
   const port = await ready({ EZ_FAKE_NO_FORK: '1' })
   await send(port, 'on the main line')

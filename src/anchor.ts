@@ -1,7 +1,8 @@
 /** Parsing for the parts of a request that arrive as free-form JSON from a page
  *  we do not control. Pure, so the rules are testable without a server. */
 
-import type { Anchor, ExploreCapture, Reference } from './protocol.js'
+import { MAX_VARIANT_HTML, MAX_VARIANT_NAME } from './explore.js'
+import type { Anchor, ChosenVariant, ExploreCapture, Reference } from './protocol.js'
 
 /** A comment pointing at more elements than this is a bug or an attack, not a
  *  person. Rejecting is better than truncating: silently dropping references
@@ -122,6 +123,21 @@ export function attachmentIds(raw: unknown): string[] | null {
  *  whose anchor is unusable fails the whole request rather than vanishing - a
  *  missing reference leaves a `[ref N]` marker in the comment pointing at
  *  nothing, which is worse for the agent than an error the client can report. */
+/** The variant a reference was chosen out of, when it has one.
+ *
+ *  Three answers, not two: `undefined` for a plain pick, an object for a usable
+ *  one, and `null` for one that is there and unusable - which fails the whole
+ *  request rather than quietly becoming a plain pick. The same rule the anchor
+ *  beside it is held to, and for the same reason: the comment's `[ref n]` would
+ *  otherwise name something other than what the user attached. */
+function parseChosen(raw: unknown): ChosenVariant | null | undefined {
+  if (raw === undefined || raw === null) return undefined
+  if (typeof raw !== 'object') return null
+  const { name, html } = raw as Record<string, unknown>
+  if (typeof html !== 'string' || !html.trim() || html.length > MAX_VARIANT_HTML) return null
+  return { name: str(name, MAX_VARIANT_NAME) ?? '', html }
+}
+
 export function parseReferences(raw: unknown, max = MAX_REFERENCES): Reference[] | null {
   if (raw === undefined || raw === null) return []
   if (!Array.isArray(raw) || raw.length > max) return null
@@ -134,7 +150,14 @@ export function parseReferences(raw: unknown, max = MAX_REFERENCES): Reference[]
     // The comment's `[ref n]` markers resolve against this, so a missing or
     // nonsense number leaves the agent unable to tell which reference is which.
     if (typeof n !== 'number' || !Number.isInteger(n) || n < 1 || n > 999) return null
-    out.push({ n, anchor: clean, label: str(label, 120) ?? '' })
+    const chosen = parseChosen((item as Record<string, unknown>).variant)
+    if (chosen === null) return null
+    out.push({
+      n,
+      anchor: clean,
+      label: str(label, 120) ?? '',
+      ...(chosen ? { variant: chosen } : {}),
+    })
   }
   return out
 }

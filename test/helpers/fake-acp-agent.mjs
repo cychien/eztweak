@@ -6,7 +6,8 @@
  *  have to be read past `AcpAgent`, which owns the child's stdio.
  *
  *  Prompt vocabulary:
- *    SLOW      park the turn until cancelled, then stop with `cancelled`
+ *    SLOW      park the turn until cancelled, then stop with `cancelled` - in an
+ *              explore turn, after its variants have been sent
  *    CHUNKS    stream CHUNK_COUNT message chunks back-to-back, then end the turn
  *    CONFIGPUSH  push a `config_option_update` nobody asked for, then end the turn
  *    MODEPUSH  push a bare `current_mode_update`, then end the turn
@@ -407,6 +408,11 @@ const app = agent({ name: 'fake-acp-agent' })
           ]
       const said = await sendVariants(sessionId, variants)
       await say(said.join(' | '))
+      // `SLOW` parks an explore turn too, after its variants are in. That is the
+      // only way to hold a round in the state a user actually decides things in -
+      // variants on the page, the agent still going - and it is the state the one
+      // end a round's own turn never reports happens in: the review leaving.
+      if (text.includes('SLOW')) return await park(sessionId)
       return { stopReason: 'end_turn' }
     }
     // Ask permission for a tool - `Bash` unless `EZ_FAKE_PERMISSION_TOOL` names
@@ -451,12 +457,17 @@ const app = agent({ name: 'fake-acp-agent' })
     log.push(`prompt:${sessionId}`)
     await say(`${sessionId}:${text}`)
     if (!text.includes('SLOW')) return { stopReason: 'end_turn' }
-    const abort = new AbortController()
-    turns.set(sessionId, abort)
-    await new Promise((resolve) => abort.signal.addEventListener('abort', resolve, { once: true }))
-    turns.delete(sessionId)
-    return { stopReason: 'cancelled' }
+    return await park(sessionId)
   })
+
+/** Hold the turn open until the client cancels it. */
+async function park(sessionId) {
+  const abort = new AbortController()
+  turns.set(sessionId, abort)
+  await new Promise((resolve) => abort.signal.addEventListener('abort', resolve, { once: true }))
+  turns.delete(sessionId)
+  return { stopReason: 'cancelled' }
+}
 
 const stream = ndJsonStream(Writable.toWeb(process.stdout), Readable.toWeb(process.stdin))
 await app.connectWith(stream, () => new Promise(() => {}))
