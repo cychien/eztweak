@@ -153,6 +153,10 @@ export interface Chat {
    *  talked about at length and the review still returns to where it forked
    *  from, carrying only what the user chose to take back. */
   parentChatId?: string
+  /** When this conversation was offered a `DESIGN.md` for a project without one.
+   *  Set on the first prompt turn and never again: the conversation itself
+   *  remembers the answer. See `design-md.ts`. */
+  designMdOfferedAt?: number
 }
 
 /** One chat, with what it takes to choose between them: when, how much, and
@@ -713,6 +717,16 @@ export class SessionStore {
     const current = this.currentChat
     this.patchSession({
       chats: this.chats.map((c) => (c.id === current.id ? { ...c, acpSessionId, agent } : c)),
+    })
+  }
+
+  /** Stamp the current chat as having been offered a `DESIGN.md`. */
+  markDesignMdOffered(): void {
+    const current = this.currentChat
+    this.patchSession({
+      chats: this.chats.map((c) =>
+        c.id === current.id ? { ...c, designMdOfferedAt: Date.now() } : c,
+      ),
     })
   }
 

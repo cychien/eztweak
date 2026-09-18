@@ -25,6 +25,12 @@ import { type AcpConfigValue, configLabel, configValueName } from './acp-config.
 import { AGENT_PROFILES, type AgentProfile, agentBrandFor, agentProfileFor } from './agents.js'
 import { clearAgentRecord, reapOrphanedAgents } from './agent-children.js'
 import { attachmentIds, parseReferences, sanitizeAnchor, sanitizeCapture } from './anchor.js'
+import {
+  type DesignMdState,
+  designMdBrief,
+  designMdExploreRule,
+  designMdState,
+} from './design-md.js'
 import { injectOverlay, wantsHtml } from './inject.js'
 import type { AttachmentLocator } from './label.js'
 import { shortAnchor, toAgentAttachments, toAgentItem, toConversationItem } from './label.js'
@@ -205,6 +211,7 @@ function acpPrompt(
   feedback: Extract<PollResult, { type: 'feedback' }>,
   skills: string[],
   agent: string,
+  designMd: DesignMdState,
 ): string {
   // The markers the composer left behind, spent now that the agent is known. The
   // record keeps `[skill n]`, which belongs to nobody; what goes over the wire is
@@ -229,6 +236,9 @@ function acpPrompt(
     // rest still reach the agent, named in the user's own sentence below, where
     // they read as what they are - something the user asked for.
     ...(skills.length ? [`${skillPrefix(agent)}${skills[0]}`, ''] : []),
+    // Before the batch, because when there is a question in it the question
+    // comes first - "before you act on the batch below" has to be true.
+    ...(designMd === 'quiet' ? [] : [...designMdBrief(designMd), '']),
     'The user reviewed the running app in their browser and sent this feedback batch.',
     'Each item resolves to source: trust `anchor.source` (file:line) when present, else',
     'use `anchor.components` / `anchor.section` / `anchor.selector` / `anchor.text`.',
@@ -258,6 +268,7 @@ function explorePrompt(
   round: ExploreState,
   capture: ExploreCapture,
   files: AttachmentLocator,
+  designMd: DesignMdState,
 ): string {
   const attachments = toAgentAttachments(round.attachments, files)
   const styles = Object.entries(capture.styles ?? {})
@@ -384,7 +395,7 @@ function explorePrompt(
     '## Rules',
     '',
     '- Do not edit, create or delete any file. Nothing here is being implemented.',
-    "- You may read the file in the element's anchor for context; nothing else needs reading.",
+    ...designMdExploreRule(designMd),
     '- Each variant is exactly one root element, at most one `<style>` inside it.',
     '- **No JavaScript** - no `<script>`, no inline handlers, no `javascript:` urls. Interaction is done',
     '  with the platform: `:hover`/`:focus-visible`/`:active`; `<details>`; `<input type=checkbox>` +',
@@ -936,7 +947,12 @@ class SessionRuntime {
         ? { references: round.references.map((r) => ({ n: r.n, label: r.label })) }
         : {}),
     })
-    this.pendingExplore = explorePrompt(round, input.capture, this.store)
+    this.pendingExplore = explorePrompt(
+      round,
+      input.capture,
+      this.store,
+      designMdState(this.project, this.store.currentChat),
+    )
     this.deliverToAcp()
     this.broadcast()
     return round
@@ -1125,7 +1141,9 @@ class SessionRuntime {
     // a round still settled when it does would refuse it. The explore's own turn
     // above needs none of this - `startExplore` opened the round generating.
     this.resumeRound()
-    this.acp.prompt(acpPrompt(outcome, this.activeSkills, this.acp.snapshot().agent))
+    const designMd = designMdState(this.project, this.store.currentChat)
+    if (designMd === 'missing') this.store.markDesignMdOffered()
+    this.acp.prompt(acpPrompt(outcome, this.activeSkills, this.acp.snapshot().agent, designMd))
   }
 
   private wakePollers(): void {

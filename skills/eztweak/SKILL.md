@@ -82,6 +82,14 @@ import { eztweakSource } from 'eztweak/vite'
 Suggest this dev-only plugin when feedback repeatedly arrives without exact source locations. It has
 no production-build impact.
 
+## Design source of truth
+
+A project with a `DESIGN.md` at its root (the format: https://github.com/google-labs-code/design.md)
+has its design system read by the review agent before every visual change. A project without one is
+offered one by the review agent itself, once per conversation, before it acts on the first batch;
+the user answers in the shell. Do not create the file ahead of the review to pre-empt the offer, and
+do not answer it on the user's behalf.
+
 ## Commands
 
 - `npx -y eztweak@latest <url> --agent <profile-or-command> [--reopen]` - open or resume an ACP-managed review

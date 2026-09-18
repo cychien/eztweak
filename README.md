@@ -353,6 +353,17 @@ other's - so there is no way to hand a conversation over. Nothing eztweak owns i
 conversation stays in the thread's own picker with the agent that had it, and switching back finds it
 again, resumable by the agent that remembers it.
 
+A project's design system rides along as a [`DESIGN.md`](https://github.com/google-labs-code/design.md)
+at its root - tokens in YAML frontmatter, the reasons behind them in prose. When the file exists,
+every batch tells the agent it is the source of truth: read it before a visual change, keep to its
+tokens and rules, and extend it when a change needs something it does not cover. When it does not
+exist, the agent asks once, before the first batch of a conversation, whether to create one - from
+the project's own guideline documents, its Tailwind or shadcn configuration and `:root` variables
+where those exist, and from the components themselves where they do not - and lints the result with
+the format's own CLI before handling the batch to it. 這次先不要 handles the batch as before and the
+conversation is not asked again; `/new` starts one that does not know the answer, so it may ask
+once more.
+
 Three built-in profiles map short names to ACP server commands:
 
 | Profile | Command |
