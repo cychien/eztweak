@@ -286,7 +286,8 @@ test('an explore is bound by the harness only when it is on and ready', async ()
     onExplore.includes('reference/baseline.md') && onExplore.includes('reference/principles.md'),
     'and the standard is read with it, not left to a step the round may never reach',
   )
-  assert.ok(onExplore.includes('reference/critique.md'), 'and what each variant is judged by')
+  assert.ok(!onExplore.includes('reference/critique.md'), 'no review: an explore is to be quick')
+  assert.ok(onExplore.includes('An explore has no review, your'))
 })
 
 // A dev server that moved to another port is a new session; the switch is the project's.

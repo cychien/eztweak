@@ -208,7 +208,7 @@ export function truthExploreRule(truth: Truth, skill: string, inspire?: Inspire)
     "- You may read the file in the element's anchor for context, and `PRODUCT.md` and `DESIGN.md`",
     '  at the project root. Keep every variant to `PRODUCT.md`. `DESIGN.md` is a direction, not a',
     '  fence: variants may range past it.',
-    `- Read ${makeReading(skill)}, and make the variants by them. Judge each one yourself by`,
-    `  \`${skillReference(skill, 'critique')}\` before you send it.`,
+    `- Read ${makeReading(skill)}, and make the variants by them. An explore has no review, your`,
+    '  own included: send each variant as soon as it is made.',
   ]
 }

@@ -788,7 +788,8 @@ test('a piece of design is judged once by an independent reviewer, twice only af
     make.includes('**pivot**: the direction was wrong. Build a different one, not a variant'),
   )
   assert.ok(make.includes('A **tweak** gets no reviewer'))
-  assert.ok(make.includes('**An explore** gets no reviewer either'))
+  assert.ok(make.includes('**An explore** gets no review at all, not even your own'))
+  assert.ok(make.includes('made fast: nothing in it is built yet'), 'no shots, states or review')
   assert.ok(make.includes('When your agent has no way to start a subagent'), 'standalone fallback')
   assert.ok(!make.includes('last scores'), "the scores are the agent's business")
   assert.ok(make.includes('Leave out everything they did not ask about: the review, its scores'))

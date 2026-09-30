@@ -58,7 +58,9 @@ system's own material.
 A **tweak** adjusts what exists: the size, colour or spacing of a thing already on the page. A
 **piece of design** makes something new, or replaces how something looks. Most requests are
 tweaks. A tweak goes straight to Build, and gets your own look in Review rather than a reviewer's;
-everything else applies to both. An explore is always a piece of design.
+everything else applies to both. An explore is always a piece of design, made fast: nothing in it
+is built yet, so it decides like one but takes no screenshots beyond its capture, looks at no
+states, and has no review of any kind.
 
 ## Effort
 
@@ -258,9 +260,9 @@ It answers with scores, a verdict and at most three fixes. **One review**, acted
   answer. There is no third review.
 
 A **tweak** gets no reviewer: look at it yourself, rendered at the request's viewport, fix what is
-plainly off, and stop. **An explore** gets no reviewer either, since a variant is not on the page
-until the user picks one: judge each variant yourself by [critique.md](critique.md), in the slot
-the capture describes. When your agent has no way to start a subagent, review the piece yourself
+plainly off, and stop. **An explore** gets no review at all, not even your own: it is there to
+put directions in front of the user quickly, and the one they pick is reviewed when a batch builds
+it. Send each variant the moment it is made. When your agent has no way to start a subagent, review the piece yourself
 by critique.md, strictly, as if someone else had made it.
 
 ## Learn
