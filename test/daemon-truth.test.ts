@@ -202,6 +202,7 @@ test('switched on with a yes: the setup turn runs, and a later batch builds befo
   assert.ok(batch!.includes(BUILDING), 'the files are still missing, so they are built first')
   assert.ok(batch!.indexOf(BUILDING) < batch!.indexOf('按鈕改藍'))
   assert.ok(batch!.includes(MAKE))
+  assert.ok(batch!.includes('reference/baseline.md'), 'with the files missing, the standard too')
   assert.ok(!batch!.includes('這個專案'), 'and nobody is asked again')
 })
 
@@ -235,6 +236,9 @@ test('the effort is the project s, one of three, and the next batch is told it',
   await say(port, 'quickly')
   const low = (await prompts(port)).find((p) => p.includes('"quickly"'))!
   assert.ok(low.includes("Design effort for this turn: low. make.md's Effort section"))
+  assert.ok(low.includes('reference/make.md` and `'), 'make.md and the baseline, named together')
+  assert.ok(low.includes('reference/baseline.md'))
+  assert.ok(!low.includes('reference/principles.md'), 'low reads no principles')
   const moved = await ready(dir)
   assert.equal((await state(moved)).designEffort, 'low', 'a new port starts where it was left')
 })
@@ -278,6 +282,11 @@ test('an explore is bound by the harness only when it is on and ready', async ()
   assert.ok(onExplore.includes('`PRODUCT.md` and `DESIGN.md`'))
   assert.ok(onExplore.includes('Keep every variant to `PRODUCT.md`'))
   assert.ok(onExplore.includes(MAKE), 'a variant is made by the making step')
+  assert.ok(
+    onExplore.includes('reference/baseline.md') && onExplore.includes('reference/principles.md'),
+    'and the standard is read with it, not left to a step the round may never reach',
+  )
+  assert.ok(onExplore.includes('reference/critique.md'), 'and what each variant is judged by')
 })
 
 // A dev server that moved to another port is a new session; the switch is the project's.
@@ -324,9 +333,17 @@ test('every prompt sets the reply language, and a harness-on one names the daemo
   assert.ok(at('plain').includes(LANGUAGE) && at('with').includes(LANGUAGE))
   assert.ok(!at('plain').includes('inspiration'), 'off: nothing about the database')
   assert.ok(at('unlogged').includes('cannot be searched on this machine'), 'no login: skip it')
+  for (const name of ['make', 'baseline', 'principles']) {
+    assert.ok(
+      at('unlogged').includes(`reference/${name}.md`),
+      `${name}.md is named where the turn starts`,
+    )
+  }
   assert.ok(!at('unlogged').includes(' inspire ...'))
   assert.ok(at('with').includes('src/cli.ts inspire ...'), "the daemon's own CLI, run as it runs")
   assert.ok(at('with').includes('never another copy of eztweak'))
+  assert.ok(at('with').includes('reference/inspiration.md'), 'how to search, named where it starts')
+  assert.ok(!at('unlogged').includes('reference/inspiration.md'), 'and not when there is none')
 })
 
 test("the reply language is named from the user's own words, newest first", async () => {

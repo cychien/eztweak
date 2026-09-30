@@ -33,10 +33,10 @@ import {
   type Truth,
   type TruthFile,
   harnessReady,
+  makeReading,
   missingTruth,
   setupBrief,
   skillDir,
-  skillReference,
   truthBrief,
   truthExploreRule,
   truthFilesZh,
@@ -283,11 +283,11 @@ function acpPrompt(
     })(),
     ...(history.length ? [...history, ''] : []),
     'The user reviewed the running app in their browser and sent this feedback batch.',
-    // With a file missing, the brief above already names make.md.
+    // With a file missing, the brief above already names them.
     ...(harnessReady(truth)
       ? [
-          `Before your first change in this conversation, read \`${skillReference(SKILL_DIR, 'make')}\`:`,
-          'it is how design work is done here.',
+          `Before your first change in this conversation, read ${makeReading(SKILL_DIR, effort)}:`,
+          'make.md is how design work is done here, and the rest is the standard it is held to.',
         ]
       : []),
     'Each item resolves to source: trust `anchor.source` (file:line) when present, else',

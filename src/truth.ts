@@ -53,7 +53,7 @@ export const HARNESS_WORDS =
  *  not at all, when no one on this machine has logged in to it. */
 export type Inspire = { cli: string } | 'unavailable'
 
-function inspireLine(inspire: Inspire | undefined): string[] {
+function inspireLine(inspire: Inspire | undefined, skill: string): string[] {
   if (!inspire) return []
   if (inspire === 'unavailable') {
     return [
@@ -63,7 +63,8 @@ function inspireLine(inspire: Inspire | undefined): string[] {
   }
   return [
     `Run inspiration commands as \`${inspire.cli} inspire ...\` in place of \`npx -y eztweak@latest inspire ...\`,`,
-    'and never another copy of eztweak: if it fails, that is the failure.',
+    'and never another copy of eztweak: if it fails, that is the failure. Before a search, read',
+    `\`${skillReference(skill, 'inspiration')}\`: how to search, and how to read what comes back.`,
   ]
 }
 
@@ -118,6 +119,16 @@ function creationSteps(missing: TruthFile[], skill: string): string[] {
   return steps.map((step) => `read \`${skillReference(skill, step)}\` and follow it`)
 }
 
+/** What a design turn reads before its first change, named where the turn starts: a read that
+ *  make.md asks for only once its Build step is reached was skipped on the way there. Low effort
+ *  leaves out `principles.md`, as make.md's Effort section says. */
+export function makeReading(skill: string, effort: DesignEffort = 'high'): string {
+  const files = ['make', 'baseline', ...(effort === 'low' ? [] : ['principles'])].map(
+    (name) => `\`${skillReference(skill, name)}\``,
+  )
+  return `${files.slice(0, -1).join(', ')} and ${files.at(-1)}`
+}
+
 /** Never a question: switching the harness on was the user's yes. */
 export function truthBrief(
   truth: Truth,
@@ -131,7 +142,7 @@ export function truthBrief(
     return [
       HARNESS_ON,
       HARNESS_WORDS,
-      ...inspireLine(inspire),
+      ...inspireLine(inspire, skill),
       'Read `PRODUCT.md` and `DESIGN.md` at the project root before any visual change.',
       'Keep to `PRODUCT.md`; take `DESIGN.md` as a direction to start from, not a rule to obey.',
       'An ordinary change edits code only: leave the two files alone unless the user asks, or',
@@ -143,11 +154,11 @@ export function truthBrief(
   return [
     HARNESS_ON,
     HARNESS_WORDS,
-    ...inspireLine(inspire),
+    ...inspireLine(inspire, skill),
     `This project has no ${names(missing).join(' or ')} at its root:`,
     `${whatIsMissing(missing)}. Before you act on the batch below, create ${them}:`,
     `${creationSteps(missing, skill).join(', then ')}, then read`,
-    `\`${skillReference(skill, 'make')}\` and handle the batch by it.`,
+    `${makeReading(skill, effort)} and handle the batch by them.`,
     ...effortLine(effort),
   ]
 }
@@ -171,7 +182,7 @@ export function setupBrief(
   return [
     HARNESS_ON,
     HARNESS_WORDS,
-    ...inspireLine(inspire),
+    ...inspireLine(inspire, skill),
     'The user switched on the design harness - 增強設計, as the review shell calls it to them -',
     `and agreed to create what it needs. This project has no ${names(missing).join(' or ')} at its`,
     `root: ${whatIsMissing(missing)}.`,
@@ -193,10 +204,11 @@ export function truthExploreRule(truth: Truth, skill: string, inspire?: Inspire)
   }
   return [
     `- ${HARNESS_ON} ${HARNESS_WORDS}`,
-    ...inspireLine(inspire).map((l, i) => (i ? `  ${l}` : `- ${l}`)),
+    ...inspireLine(inspire, skill).map((l, i) => (i ? `  ${l}` : `- ${l}`)),
     "- You may read the file in the element's anchor for context, and `PRODUCT.md` and `DESIGN.md`",
     '  at the project root. Keep every variant to `PRODUCT.md`. `DESIGN.md` is a direction, not a',
     '  fence: variants may range past it.',
-    `- Read \`${skillReference(skill, 'make')}\` and make the variants by it.`,
+    `- Read ${makeReading(skill)}, and make the variants by them. Judge each one yourself by`,
+    `  \`${skillReference(skill, 'critique')}\` before you send it.`,
   ]
 }

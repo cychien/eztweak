@@ -221,12 +221,14 @@ that did not watch you make it.
 
 First screenshot the piece in place with `shot`, as in Look and in one run: `--around` it at the
 request's viewport - and at `390x844` too when the piece reflows - with its interactive elements in
-their states, plus one of the whole page at desktop, into files outside the project. Those are what the reviewer
-judges, and your own check that nothing is broken. Then give it this brief. Add only what it needs
-to run, and never your intent or your opinion of the result:
+their states, plus one of the whole page at desktop, into files outside the project. Those are what
+the reviewer judges, and your own check that nothing is broken. Then give it this brief, with the three paths
+written out in full - a file a reviewer is only pointed to from inside another is one it does not
+open. Add only what it needs to run, and never your intent or your opinion of the result:
 
 ```
-Review a UI change you did not make. Read <the path of critique.md, beside this file> and follow it.
+Review a UI change you did not make. Read <the paths of critique.md, baseline.md and principles.md,
+all beside this file>, then judge by critique.md.
 The user asked: "<the request, in their words>"
 Page: <url>, at <viewport - an item's anchor.viewport, else desktop>.
 The change is in: <the selector, or file:line, of what you changed>.

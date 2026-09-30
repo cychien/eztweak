@@ -23,8 +23,8 @@ praise nothing you cannot point at.
   business behind it.
 - `DESIGN.md`: the visual language the page speaks. A direction, not a rule; judge whether the
   piece belongs, not whether it complies.
-- `baseline.md`, beside this file: the standard every piece is held to, which these criteria are
-  drawn from. `principles.md` beside it holds the craft floor.
+- `baseline.md` and `principles.md`, which the brief names: the standard every piece is held to,
+  which these criteria are drawn from, and the craft floor. Read both before you score.
 - `.eztweak/taste.md`, when it exists: what this user has shown they consider good, learned from
   their own feedback. Read it before you judge; it outranks the examples below where they disagree.
 

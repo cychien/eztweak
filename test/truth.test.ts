@@ -187,10 +187,11 @@ const CLI = '/usr/local/bin/node /Users/me/.npm/_npx/abc/node_modules/eztweak/di
 const INSPIRE = { cli: CLI }
 
 test('the briefs stay short enough to be read', () => {
-  const len = (lines: string[]) => lines.join('\n').length
-  assert.ok(len(truthBrief(truth(false, false), SKILL, INSPIRE)) < 1100, 'building first')
-  assert.ok(len(truthBrief(truth(true, true), SKILL, INSPIRE)) < 750, 'the rule')
-  assert.ok(len(setupBrief(truth(false, false), SKILL, INSPIRE)) < 1250, 'the setup')
+  // The prose, not the paths: how long a path is depends on where the skill is installed.
+  const len = (lines: string[]) => lines.join('\n').replaceAll(SKILL, '').replaceAll(CLI, '').length
+  assert.ok(len(truthBrief(truth(false, false), SKILL, INSPIRE)) < 1000, 'building first')
+  assert.ok(len(truthBrief(truth(true, true), SKILL, INSPIRE)) < 800, 'the rule')
+  assert.ok(len(setupBrief(truth(false, false), SKILL, INSPIRE)) < 1150, 'the setup')
 })
 
 // The published package may predate a command, so the agent runs the daemon's own CLI, and it
@@ -778,6 +779,10 @@ test('a piece of design is judged once by an independent reviewer, twice only af
   assert.ok(make.includes('Deliver the direction that review calls better'))
   assert.ok(make.includes('There is no third review'))
   assert.ok(make.includes('Screenshots: <the files>.'), 'the reviewer judges what the maker shot')
+  assert.ok(
+    make.includes('Read <the paths of critique.md, baseline.md and principles.md, all beside this'),
+    'every file the reviewer judges by is named in its brief, not only pointed to from critique.md',
+  )
   assert.ok(make.includes('never your intent or your opinion of the result'))
   assert.ok(
     make.includes('**pivot**: the direction was wrong. Build a different one, not a variant'),
@@ -812,7 +817,8 @@ test("the reviewer looks before it scores, by the user's bar and not by novelty"
   const doc = readFileSync(skillReference(SKILL, 'critique'), 'utf8').replace(/\s+/g, ' ')
   assert.ok(doc.includes('You change nothing'))
   assert.ok(doc.includes('judge whether the piece belongs, not whether it complies'))
-  assert.ok(doc.includes('`baseline.md`, beside this file: the standard every piece is held to'))
+  assert.ok(doc.includes('`baseline.md` and `principles.md`, which the brief names'))
+  assert.ok(doc.includes('Read both before you score'))
   assert.ok(doc.includes('Assume the piece is not good enough until what you see proves it is'))
   assert.ok(doc.includes('## Look first') && doc.includes('Study the screenshots before you score'))
   assert.ok(doc.includes('a review takes a minute'), 'no tour of widths or the DOM')
