@@ -16,6 +16,10 @@ export const TARGET_FILE = join(DEV_DATA_DIR, 'target.json')
  *  finding the real daemon in its range and adopting it instead of starting. */
 export const DEV_CONTROL_PORT = 4410
 
+/** The ACP agent `npm run dev` brings up. Poll mode is deprecated; dev mode has
+ *  no reason to exercise it. */
+export const DEV_AGENT = 'claude'
+
 export const devEnv = {
   ...process.env,
   EZTWEAK_DATA_DIR: DEV_DATA_DIR,
@@ -26,6 +30,9 @@ export function runCli(args, opts = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [CLI, ...args], {
       env: devEnv,
+      // A session is scoped to the project the CLI was run from, so callers that
+      // care about the scope pass it.
+      ...(opts.cwd ? { cwd: opts.cwd } : {}),
       stdio: opts.capture ? ['ignore', 'pipe', 'inherit'] : 'inherit',
     })
     let out = ''

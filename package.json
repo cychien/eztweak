@@ -55,10 +55,12 @@
     "@agentclientprotocol/sdk": "^1.4.0",
     "@babel/parser": "^7.26.0",
     "@hugeicons/core-free-icons": "^4.2.3",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "express": "^5.1.0",
     "http-proxy-middleware": "^3.0.3",
     "magic-string": "^0.30.17",
-    "open": "^10.1.0"
+    "open": "^10.1.0",
+    "zod": "^4.5.4"
   },
   "devDependencies": {
     "@types/express": "^5.0.0",

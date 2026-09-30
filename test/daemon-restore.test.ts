@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -208,4 +208,135 @@ test('a restored session whose project is gone reports a dead agent, not a dead 
   }, 'the agent to report that it could not start')
   assert.match(state.acp?.error ?? '', /could not start|exited/)
   assert.equal(state.agentOnline, false)
+})
+
+// The daemon went down with a round mid-turn. No turn survives that, so the
+// round comes back closed - and the one that had nothing yet does not come back
+// on the strip at all.
+test('an explore mid-turn when the daemon went down is over when the session returns', async () => {
+  const origin = 'http://127.0.0.1:11'
+  const live = await world.liveDaemon()
+  const opened = await world.openSession(live.port, {
+    url: `${origin}/`,
+    project: PROJECT,
+    agent: FAKE_AGENT,
+  })
+  await acpIdle(opened.port)
+
+  const dir = readdirSync(join(world.dataDir, 'sessions')).find((d) => {
+    const s = JSON.parse(
+      readFileSync(join(world.dataDir, 'sessions', d, 'session.json'), 'utf8'),
+    ) as { targetOrigin: string }
+    return s.targetOrigin === origin
+  })!
+  const round = (id: string, variants: unknown[]) => ({
+    id,
+    chatId: 'c',
+    label: id,
+    anchor: { text: id },
+    status: 'generating',
+    variants,
+    selected: null,
+    startedAt: Date.now(),
+  })
+  writeFileSync(
+    join(world.dataDir, 'sessions', dir, 'explores.json'),
+    JSON.stringify([
+      round('bare', []),
+      round('partial', [{ id: 'v1', name: 'v', html: '<i/>', createdAt: Date.now() }]),
+    ]),
+  )
+
+  await world.stopDaemon(live.port)
+  world.spawnDaemon()
+  const second = await world.liveDaemon()
+  const found = await world.control(
+    second.port,
+    `/control/sessions/find?origin=${encodeURIComponent(origin)}`,
+  )
+  const { port } = (await found.json()) as { port: number }
+  const state = (await world.state(port)) as { explores?: { id: string; status: string }[] }
+  assert.deepEqual(
+    state.explores?.map((e) => [e.id, e.status]),
+    [['partial', 'cancelled']],
+  )
+})
+
+// `npm run dev` opens without `--agent` and finds the restored session, which has one.
+test('opening a session reports the agent it actually runs, flag or no flag', async () => {
+  world.spawnDaemon()
+  const first = await world.liveDaemon()
+  // Its own origin: the shared data dir may hold another test's session.
+  const origin = 'http://127.0.0.1:14/'
+
+  const withoutAgent = await world.openSession(first.port, { url: origin, project: PROJECT })
+  assert.equal(withoutAgent.agent, undefined, 'nothing is running one yet')
+
+  const opened = await world.openSession(first.port, {
+    url: origin,
+    project: PROJECT,
+    agent: FAKE_AGENT,
+  })
+  assert.equal(opened.agent, FAKE_AGENT)
+  await acpIdle(opened.port)
+
+  const reopened = await world.openSession(first.port, { url: origin, project: PROJECT })
+  assert.equal(
+    reopened.agent,
+    FAKE_AGENT,
+    'the session still runs it; the call just did not say so',
+  )
+
+  await world.stopDaemon(first.port)
+  world.spawnDaemon()
+  const second = await world.liveDaemon()
+  const restored = await world.openSession(second.port, { url: origin, project: PROJECT })
+  assert.equal(restored.agent, FAKE_AGENT, 'and a restored one brings it back')
+})
+
+// No turn survives the daemon, so a round cut off holding nothing is closed on restore, and its pill,
+// the way out of the branch, goes with it.
+test('a restore into a branch whose round was cut off holding nothing opens on the main line', async () => {
+  const world = new DaemonWorld(4620)
+  after(() => world.dispose())
+  const acpIdle = (port: number) =>
+    waitFor(async () => {
+      const s = (await world.state(port)) as unknown as State
+      return s.acp?.state === 'idle' ? s : null
+    }, 'the ACP agent to go idle')
+  world.spawnDaemon()
+  const live = await world.liveDaemon()
+  const origin = 'http://127.0.0.1:15/'
+  const opened = await world.openSession(live.port, {
+    url: origin,
+    project: PROJECT,
+    agent: FAKE_AGENT,
+  })
+  await acpIdle(opened.port)
+  const chats = async () =>
+    ((await world.state(opened.port)) as unknown as { chats: { id: string; current: boolean }[] })
+      .chats
+  const main = (await chats()).find((c) => c.current)!.id
+  const res = await fetch(`http://127.0.0.1:${opened.port}/__eztweak/api/explore/start`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      anchor: { source: 'src/App.tsx:42', selector: 'main > button.cta', text: '免費試用' },
+      capture: { html: '<button class="cta">免費試用</button>', parentWidth: 320 },
+      direction: 'NOVARIANTS SLOW',
+    }),
+  })
+  assert.equal(res.status, 200, await res.text())
+  await waitFor(async () => {
+    const s = (await world.state(opened.port)) as unknown as State
+    return s.acp?.state === 'working'
+  }, 'the explore turn')
+  assert.notEqual((await chats()).find((c) => c.current)!.id, main, 'standing in the branch')
+
+  await world.stopDaemon(live.port)
+  world.spawnDaemon()
+  await world.liveDaemon()
+  const restored = await acpIdle(opened.port)
+  assert.equal((await chats()).find((c) => c.current)!.id, main)
+  assert.ok(restored.conversation.some((e) => e.role === 'system' && e.text.includes('已回到主對話')))
 })

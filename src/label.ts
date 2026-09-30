@@ -70,7 +70,12 @@ export function toAgentItem(a: Annotation, files: AttachmentLocator): AgentItem 
   // comment is, then what the user handed over with it. References come before
   // files because they are anchors too, and because the comment's own `[ref N]`
   // markers need something to resolve against.
-  a.references?.forEach((r) => parts.push(`[ref ${r.n}: ${referenceLabel(r)}]`))
+  // A chosen variant says so in the marker as well as in the payload: the label
+  // is what the agent reads first, and "look at that element" and "make it look
+  // like this" are different asks about the same anchor.
+  a.references?.forEach((r) =>
+    parts.push(`[ref ${r.n}: ${r.variant ? 'chosen variant · ' : ''}${referenceLabel(r)}]`),
+  )
   // Numbered, not a bare list: the comment carries `[file n]` where the user put
   // it, and n is this array's position - so a comment about two files says which
   // is which instead of leaving the agent to guess from a comma-separated set.

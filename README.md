@@ -124,6 +124,10 @@ mid-word stays a slash, so urls and paths are left alone. The commands:
   to start over from, and a fresh session answering it would be answering something else. The 待送
   清單 is left alone: those you have not sent yet, so they were never the old context's to begin
   with. A note you were part-way through typing survives, so `/new` and then send is one move.
+  One thing does carry over: the first batch of the new chat is handed what you asked for in the
+  earlier ones, one line each, marked as already handled. The agent works to `PRODUCT.md`, starts
+  from `DESIGN.md`, and is told to write a correction into them when it has come up before; a fresh
+  session cannot see "before" on its own, so the daemon shows it.
 - **`$`** opens a second menu, of the skills this machine can run, and picking one
   asks the agent to run it over the batch you are about to send. The skill shows as a pill above
   the box until the batch goes, and on the sent bubble afterwards - which is the only place it
@@ -263,6 +267,7 @@ canvas scaled to 60% is still one you can read and type into.
 | `EZTWEAK_DATA_DIR` | `~/.eztweak` | Session state, the daemon registry and log, versions installed by the in-shell update, and the update-check cache |
 | `EZTWEAK_CONTROL_PORT` | `4400` | First port of the ten-port range the daemon searches for its control server |
 | `EZTWEAK_NO_UPDATE_CHECK` | unset | Set to `1` and the daemon never asks the npm registry for the latest version, so the shell never offers an update |
+| `EZTWEAK_INSPIRE_URL` | `https://inspire.ezdesign.dev` | The inspiration database the `inspire` commands query |
 
 Set both together to run a second, fully isolated instance: a starting daemon adopts any live
 daemon it finds inside its own control range, so moving the data dir alone still lands you on the
@@ -353,6 +358,53 @@ other's - so there is no way to hand a conversation over. Nothing eztweak owns i
 conversation stays in the thread's own picker with the agent that had it, and switching back finds it
 again, resumable by the agent that remembers it.
 
+The agent can design the way a designer works, through a five-step harness in the bundled skill:
+product, stack, design, components, make. It is opt-in, experimental - the switch says 實驗 - and a
+premium feature: the **增強設計** switch on its own line above the agent and the model, marked with a
+gold sparkle, turns it on, and the choice is remembered for the project - across sessions, a dev
+server that moved ports, `/new` and daemon restarts - except that it starts off when the project's
+`PRODUCT.md` or `DESIGN.md` is gone, so turning it on asks again. Off, every batch is handled
+exactly as it was before the harness existed. The harness applies only to a turn whose prompt says
+it is on; after it has been on in a conversation, every later turn with it off is told so, because
+the agent still remembers what it read while it was on. Two files at the project root are what it
+works to. **`PRODUCT.md`** says what the product is for - who uses it, what it makes possible, what
+must not change. **`DESIGN.md`** ([the format](https://github.com/google-labs-code/design.md)) says
+what it looks like, in broad strokes - a few anchor values in YAML frontmatter and the character of
+the language in prose, with the full scales left to the design system. When both exist, every batch
+tells the agent to read them before a visual change, keep to `PRODUCT.md`, and take `DESIGN.md` as
+a direction rather than a rule: a document held to the letter makes everything look alike, so the
+agent may go past it. An ordinary change edits code only. The two files change
+when you ask for it, when a correction has come twice, or when you state a rule - only on what you
+actually said, never on what the agent reads into a send-back; a change that only leaves a line stale is mentioned in the reply, not edited. Between them,
+`.eztweak/config.json` records the stack and the browser tool the agent looks at the page with. The
+skill needs no eztweak session to run: installed in Claude Code or Codex and invoked on its own, it
+walks the same steps against the project and the dev server.
+
+Turning the switch on in a project that lacks either file asks first, in the card above the
+composer: 啟用增強設計 - 增強設計會建立 PRODUCT.md 與 DESIGN.md，是否繼續？ 取消 leaves the switch off,
+because the harness cannot run without them. 繼續 turns it on and starts a setup turn at once, which walks the steps
+that build the missing files before any batch is worked. Switching off again before the agent has
+started that turn cancels it, and the thread says so. `PRODUCT.md` is written as a designer meets a
+client: the agent reads the project's own copy and assets first, then asks, three questions a round,
+what they could not answer - who it is for, what it makes possible, what must be preserved - each
+led by what it inferred, so you correct rather than dictate. Nothing about feel or style is asked there; that belongs to `DESIGN.md`, which
+is read off the running page the way a design-token extractor reads one: computed styles, counted,
+so the colour on three hundred elements is the surface and the one on two is the accent, and only
+the character and its anchors are written down; the format's own linter checks the result.
+
+How the agent then works - where it looks for precedent, the principles it builds to, how it
+writes a repeated correction back into the two files - lives in the bundled skill's `reference/`
+files, which the daemon points it at turn by turn. A piece of design is not judged by the agent
+that made it, since a maker praises its own work: it starts a subagent with a fresh context, which
+looks at the agent's screenshots of the change and scores it against the reaction good work gets on
+X and Dribbble, "super clean!", in a product held to the standard of Shopify, Stripe, Linear and
+Vercel - useful, super clean, clear, fitting, well made - and answers ship, refine or pivot. One review; a second only after a pivot,
+comparing the two directions. The reply never mentions the review. What you say about quality in so many words, or correct twice, is
+written to `.eztweak/taste.md`, which the agent builds to and the reviewer judges by,
+so both move toward your eye. The daemon carries
+only the facts a skill cannot know: whether the switch is on, which files exist, where the page
+is, what the turn is for.
+
 Three built-in profiles map short names to ACP server commands:
 
 | Profile | Command |
@@ -377,17 +429,48 @@ npx -y eztweak@latest poll http://localhost:5173/
 `poll` blocks until the user sends feedback, prints the structured batch as JSON, and exits. This
 mode remains available for scripts and integrations that consume the CLI contract directly.
 
+## Inspiration
+
+Before it builds a piece of design, the agent looks for precedent: a curated collection of
+interfaces, each entry carrying the reason it works and the case where it would be the wrong
+choice. It is searched by meaning - a description of what the piece has to show - and entries carry
+tags in their curator's own words, which nudge a search that names one. It needs a token:
+
+```
+npx -y eztweak@latest login --token <token>
+npx -y eztweak@latest inspire --query "a command menu over the whole product"
+npx -y eztweak@latest inspire --query "an onboarding checklist" --tag "dark popover" --limit 3
+```
+
+`login` writes the token to `~/.eztweak/credentials.json`, mode 600; without `--token` it prompts,
+and `logout` forgets it. A search takes a `--query`, `--tag`, or both. `inspire` prints a block per
+result - the tags, `Shows:`, `Components:`,
+`Actions:`, `Why it works:`, `Wrong when:`, and local paths to the entry's images, which are
+downloaded once and reused after that; `(approximate)` in a heading means the entry was read off a
+screenshot. `--json` prints the same response with those paths in place of the service's own URLs,
+and carries what the block leaves out: the visible wording, the layout and its metrics, and the
+relevance score. There is no fixed list of tags; the query does the finding.
+
+Nothing about the collection ships in the package: a query returns what it asked for, and the
+results belong in the agent's reply, not in your repository. A search that finds nothing exits 0
+with one line, and one that cannot run - no token, a refused token, a service that cannot be
+reached - exits 2 with one line, so the agent says so and carries on.
+
 ## Development
 
 Working on eztweak itself takes one command:
 
 ```
 npm run dev                 # watch src/, serve the playground fixture, start an isolated daemon,
-                            # open the review shell
+                            # open the review shell with an ACP agent on it
 npm run dev -- --no-plugin  # the same page without eztweakSource(), to see fallback-only anchors
-npm run dev:agent           # second terminal: a stand-in agent that polls, prints anchors, replies
+npm run dev:agent           # a stand-in poll-mode agent, for working on the poll contract itself
 npm run dev:cli status      # the eztweak CLI, pointed at the dev daemon instead of the real one
 ```
+
+`npm run dev` opens the review in ACP mode, scoped to the fixture - the agent's working directory
+is `fixtures/playground`, which is the project it is reviewing. Nothing else is needed; `dev:agent`
+is only for the poll contract.
 
 A client rebuild (`src/client/**`) only needs a browser reload; a rebuild the daemon loads
 restarts it, and in-flight polls reconnect on their own. Dev mode keeps its daemon registry and

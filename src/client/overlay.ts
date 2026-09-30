@@ -3,11 +3,13 @@
 import Add01Icon from '@hugeicons/core-free-icons/Add01Icon'
 import AlignSelectionIcon from '@hugeicons/core-free-icons/AlignSelectionIcon'
 import TextSelectIcon from '@hugeicons/core-free-icons/TextSelectIcon'
+import MagicWand01Icon from '@hugeicons/core-free-icons/MagicWand01Icon'
 import { type AttachController, attachify } from './attach.js'
 import { GRACE_MS, draftExpired, draftPendingNames, normalizeDraft } from './draft.js'
 import type { AnchorWire, DraftSubject, DraftWire, RefWire } from './draft.js'
 import { type IconNode, icon } from './icon.js'
 import { modLabel } from './pick.js'
+import { type Candidate, SWAPPED_ATTR, VariantSwapper, captureElement } from './variant.js'
 import { following, scrollRange, scrollRatio } from './scroll-sync.js'
 import {
   type Point,
@@ -109,6 +111,23 @@ function setFrameZoom(zoom: number): void {
   scheduleRepaint()
 }
 let annotations: AnnotationWire[] = []
+/** Whether this review can run an explore at all. The shell knows - it depends
+ *  on what the agent advertised - and says so, because a command in the menu
+ *  that always fails is worse than one that is not offered. */
+let canExplore = false
+/** What is standing in for what on this page. Built with the overlay's own
+ *  `cssPath` and `componentChain`, so the candidates it searches are described
+ *  exactly the way the anchors it is searching for were built. */
+const swapper = new VariantSwapper(document, (element): Candidate => {
+  const source = element.closest(`[${SOURCE_ATTR}]`)?.getAttribute(SOURCE_ATTR)
+  const text = (element.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, 80)
+  return {
+    ...(source ? { source } : {}),
+    components: componentChain(element),
+    selector: cssPath(element),
+    ...(text ? { text } : {}),
+  }
+})
 let hoverTarget: Element | null = null
 /** A popup is open in one of the other previews. One annotation is composed at
  *  a time wherever it lives, so a held frame stops highlighting, selecting and
@@ -163,7 +182,6 @@ const ui = {
   /** Shown only while picking: a wash at the edges of the viewport, and a pill
    *  saying what the modifier does. The page stays clickable underneath, so the
    *  chrome is the only thing telling the user this moment is different. */
-  veil: el('div', 'ez-pick-veil'),
   banner: el('div', 'ez-pick-banner'),
   /** The box being dragged, with its size read out in the corner. */
   region: el('div', 'ez-region'),
@@ -174,6 +192,12 @@ const ui = {
   popup: null as HTMLElement | null,
   /** Lives beside the popup: its uploads are only ever discarded with it. */
   popupAttach: null as AttachController | null,
+  /** A step *inside* the open popup that Escape should take back before the
+   *  popup itself. Only `/explore` has one today. Returns whether it took the
+   *  press, the way `closeSlash` does - the layers above it are settled the
+   *  same way, and a hook that cannot say "not mine" would eat presses that
+   *  belong to the popup. */
+  popupBack: null as (() => boolean) | null,
   selectionBubble: null as HTMLElement | null,
 }
 
@@ -214,11 +238,7 @@ function componentChain(element: Element): string[] {
   const names: string[] = []
   let current = fiber as { type?: unknown; return?: unknown } | null
   while (current && names.length < 3) {
-    const type = current.type as
-      | { displayName?: string; name?: string }
-      | string
-      | null
-      | undefined
+    const type = current.type as { displayName?: string; name?: string } | string | null | undefined
     if (type && typeof type !== 'string') {
       const name = type.displayName || type.name
       if (name && /^[A-Z]/.test(name) && !names.includes(name)) names.push(name)
@@ -479,6 +499,7 @@ function closePopup(): void {
   // the annotation and clears this first, so nothing here can delete them.
   ui.popupAttach?.discard()
   ui.popupAttach = null
+  ui.popupBack = null
   if (ui.popup) post({ type: 'ez:popup', open: false })
   ui.popup?.remove()
   ui.popup = null
@@ -531,13 +552,28 @@ function escape(): void {
     cancelPick('escape')
     return
   }
+  // A step inside the popup - an armed `/explore` - is a layer above the popup
+  // and below the pick: taking it back returns the ordinary composer, holding
+  // everything that was typed before the command, rather than throwing the
+  // whole remark away.
+  if (ui.popupBack?.()) return
+  // An open popup closes whatever the mode. It can be open with no mode armed:
+  // one rebuilt after an explore comes back whenever the round ends, which may
+  // be long after the mode was let go of - and checking the mode first left
+  // Escape refusing the one thing on screen it has always meant "close" for.
+  if (ui.popup) {
+    dismiss()
+    return
+  }
   if (mode === 'off') return
-  if (ui.popup) dismiss()
-  else exitToIdle()
+  exitToIdle()
 }
 
 /** `anchor` is re-evaluated on every repaint, so the popup tracks its subject
  *  through scrolls and reflows instead of freezing where it opened. */
+const COMPOSE_PLACEHOLDER = '想怎麼調整？輸入 / 用指令 (⌘+Enter 送出)'
+const EXPLORE_PLACEHOLDER = '給予探索方向，或留白自由探索'
+
 function openPopup(
   subject: DraftSubject,
   anchor: () => DOMRect,
@@ -546,6 +582,11 @@ function openPopup(
    *  what clears the previous one, and a caller assigning it first would have
    *  it wiped out from under them. */
   run: Range | null = null,
+  /** The element this popup is about, when it is about one. Only an element can
+   *  be explored - a region resolves to a common ancestor and a bare pin to
+   *  whatever sat under it, neither of which is a thing to produce variants of -
+   *  so the command is only offered when this is here. */
+  exploreElement: Element | null = null,
 ): void {
   closePopup()
   selectionRange = run
@@ -555,7 +596,9 @@ function openPopup(
 
   const actions = el('div', 'ez-actions')
   const save = el('button', 'ez-btn ez-btn-primary') as HTMLButtonElement
-  save.append(icon(Add01Icon as IconNode, 14), document.createTextNode('加入待送清單'))
+  const saveIcon = icon(Add01Icon as IconNode, 14)
+  const saveLabel = document.createTextNode('加入待送清單')
+  save.append(saveIcon, saveLabel)
   const cancel = el('button', 'ez-btn')
   cancel.textContent = '取消'
   actions.append(cancel, save)
@@ -564,11 +607,21 @@ function openPopup(
   // and an upload settling repaints it from `pending()` mid-request.
   let saving = false
 
+  /** The element this popup is about, when it is about one - which is what an
+   *  explore needs and a region or a bare pin does not have. */
+  const exploreTarget = subject.kind === 'element' ? exploreElement : null
+  let exploring = false
+  /** Sits inside the field, above the text, because it labels *this box* - in the
+   *  gap above it would read as a separate notice about the popup. */
+  const exploreHead = el('div', 'ez-explore-head')
+  exploreHead.append(icon(MagicWand01Icon as IconNode, 15), el('span', 'ez-explore-title'))
+  exploreHead.querySelector('.ez-explore-title')!.textContent = '探索樣式'
+  exploreHead.hidden = true
   const attach = attachify({
     api: API,
     mk: el,
     className: 'ez-input',
-    placeholder: '想怎麼調整？輸入 / 用指令 (⌘+Enter 儲存)',
+    placeholder: COMPOSE_PLACEHOLDER,
     onChange: () => {
       save.disabled = saving || attach.pending() > 0
       // The shell is holding a copy of this box in case the page it sits on goes
@@ -576,6 +629,9 @@ function openPopup(
       // one, so this is where that copy is refreshed.
       if (pick?.suspended) postDraft()
     },
+    // `enabled` rather than a built-once list, because what this box is for can
+    // change while it is open: arming an explore from inside one is a command
+    // with nothing to do, and the menu should not offer it.
     commands: [
       {
         id: 'element',
@@ -585,10 +641,82 @@ function openPopup(
         icon: AlignSelectionIcon as IconNode,
         run: () => void armPick('popup', newPickId()),
       },
+      {
+        id: 'explore',
+        label: 'Explore',
+        hint: '探索樣式',
+        keywords: ['explore', 'variant', 'ui', '探索', '樣式', '版本'],
+        icon: MagicWand01Icon as IconNode,
+        enabled: () => canExplore && !!exploreTarget && !exploring,
+        run: () => setExploring(true),
+      },
     ],
   })
   const input = attach.editable
   ui.popupAttach = attach
+  attach.field.prepend(exploreHead)
+
+  /** What the ordinary composer was holding when `/explore` was armed. Kept as
+   *  nodes rather than markup so a chip whose upload is still in flight keeps
+   *  its identity and lands back in the box it left. */
+  let stashed: DocumentFragment | null = null
+
+  /** Arming and disarming are the same repaint, which is why they are one
+   *  function: every part of the composer that says which of the two things this
+   *  box is about to do has to move together, or it says both.
+   *
+   *  The remark and the direction are different things, so they are different
+   *  buffers. Arming puts the remark aside and offers an empty box for the
+   *  direction; stepping back throws the direction away and hands the remark
+   *  back untouched. `/explore` is a step on the way to asking for variants, like
+   *  any other command in this menu - it must not cost the user what they had
+   *  already written, and it must not hand the next explore the last one's
+   *  direction. */
+  function setExploring(on: boolean): void {
+    if (on === exploring) return
+    exploring = on
+    const current = document.createDocumentFragment()
+    // Appending moves the nodes, so this empties the box in the same breath.
+    current.append(...input.childNodes)
+    if (on) stashed = current
+    else if (stashed) {
+      input.append(stashed)
+      stashed = null
+    }
+    // Moving nodes fires nothing, and the placeholder and the send button are
+    // both driven off `input`.
+    input.dispatchEvent(new InputEvent('input', { bubbles: true }))
+    exploreHead.hidden = !on
+    popup.classList.toggle('ez-popup-explore', on)
+    input.dataset.placeholder = on ? EXPLORE_PLACEHOLDER : COMPOSE_PLACEHOLDER
+    input.setAttribute('aria-label', on ? EXPLORE_PLACEHOLDER : COMPOSE_PLACEHOLDER)
+    cancel.textContent = on ? '返回' : '取消'
+    // An SVG has no `hidden` property of its own, and the attribute is what the
+    // stylesheet and the a11y tree both read.
+    saveIcon.toggleAttribute('hidden', on)
+    saveLabel.textContent = on ? '探索' : '加入待送清單'
+    input.focus()
+    caretToEnd()
+  }
+
+  /** After nodes are moved back in, the caret would otherwise sit at the start of
+   *  restored text - in front of the sentence the user was part-way through. */
+  function caretToEnd(): void {
+    const range = document.createRange()
+    range.selectNodeContents(input)
+    range.collapse(false)
+    const selection = document.getSelection()
+    selection?.removeAllRanges()
+    selection?.addRange(range)
+  }
+
+  // Escape takes this step back before it takes the popup, the same way it
+  // unwinds every other layer.
+  ui.popupBack = () => {
+    if (!exploring) return false
+    setExploring(false)
+    return true
+  }
 
   const submit = async () => {
     if (saving || attach.pending() > 0) return
@@ -597,7 +725,10 @@ function openPopup(
     const references = attach.refs()
     // A pasted screenshot, or an element pointed at, can be the whole remark, so
     // text is only required when nothing came with it.
-    if (!comment && attachments.length === 0 && references.length === 0) {
+    // An explore with no direction is a request in its own right - "show me
+    // options" - which is what its placeholder offers. Only a *remark* has to
+    // say something.
+    if (!exploring && !comment && attachments.length === 0 && references.length === 0) {
       input.focus()
       return
     }
@@ -607,7 +738,24 @@ function openPopup(
     save.disabled = true
     saving = true
     try {
-      await onSave(comment, attachments, references)
+      // An explore is not an annotation: nothing is queued, nothing is sent to
+      // the review's own conversation, and what the user typed is the direction
+      // rather than a comment. The pill is what says which of the two this is.
+      if (exploring && exploreTarget) {
+        post({
+          type: 'ez:explore',
+          anchor: buildAnchor(exploreTarget),
+          capture: captureElement(exploreTarget),
+          direction: comment,
+          // The direction travels with whatever was put in the sentence. "Like
+          // this screenshot", "make it match that button" are directions, and
+          // the markers in the text name these.
+          attachments,
+          references,
+        })
+      } else {
+        await onSave(comment, attachments, references)
+      }
     } catch {
       // Nothing was recorded, so the composer is taken back whole - text, files
       // and references still in it - rather than the remark being lost in silence.
@@ -622,11 +770,32 @@ function openPopup(
     // A dismiss during the request already took this popup down, and whatever is
     // open now is not this submit's to close.
     if (ui.popup !== popup) return
+    // An explore does not end the comment it was armed from - it goes off to
+    // answer a question about it, and what it answers with belongs back in that
+    // sentence. So the comment is handed to the shell as a draft before the popup
+    // goes: the direction it carried is spent, the remark it was holding before
+    // `/explore` is what travels, and the shell rebuilds the popup here, at the
+    // same place and the same scroll, once the user has chosen or left. The route
+    // a pick takes when its popup does not survive a navigation - and this one
+    // does not survive on purpose. A round runs for a minute or more, with the
+    // page's markup swapped under it and the user scrolling through variants;
+    // a popup hidden in place through that comes back positioned against a page
+    // that has moved, and `rebuildPopup` is what finds the element again.
+    if (exploring && exploreTarget) {
+      setExploring(false)
+      const draft = exploreDraft(attach)
+      if (draft) post({ type: 'ez:explore-held', draft })
+      dismiss()
+      return
+    }
     // Stays in the current mode: the next annotation is usually right there.
     dismiss()
   }
   save.onclick = () => void submit()
-  cancel.onclick = dismiss
+  // One layer at a time, the way Escape unwinds them: from an armed explore this
+  // goes back to the ordinary comment box, holding everything already typed,
+  // rather than throwing the whole composer away.
+  cancel.onclick = () => (exploring ? setExploring(false) : dismiss())
   input.onkeydown = (e) => {
     if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') void submit()
     // No Escape branch: the document listener captures keydown, so it has already
@@ -761,7 +930,11 @@ const SETTLE_MS = 800
 function whenSubjectSettles(subject: DraftSubject, done: (target: Element | null) => void): void {
   const deadline = Date.now() + SETTLE_MS
   const attempt = (): void => {
-    const target = resolveSubject(subject)
+    const found = resolveSubject(subject)
+    // An element a variant is standing in for is out of layout: a popup placed
+    // against it lands in the corner. It counts as not here yet, and the swap
+    // being undone is what the wait is usually for.
+    const target = found?.hasAttribute(SWAPPED_ATTR) ? null : found
     if (target || Date.now() >= deadline) {
       done(target)
       return
@@ -816,6 +989,14 @@ function rebuildPopup(draft: DraftWire, subject: DraftSubject, target: Element |
         // looking at when they framed this, which a repaint would overwrite.
         ...(target && !box ? {} : { anchor: subject.anchor }),
       }),
+    null,
+    // The element this comment is about, so `/explore` is on offer again. A
+    // rebuilt popup used to come back without it, and every comment that had
+    // just been through one explore could not start another - which is the one
+    // thing a user with a variant in hand and a note to go with it wants next.
+    // A region has no single element to explore; `openPopup` already refuses a
+    // subject that is not an element, so only the box has to be kept out here.
+    box ? null : target,
   )
   ui.popupAttach?.restore(draft.body)
   showPopupNotice(lines)
@@ -878,9 +1059,7 @@ function markerPosition(a: AnnotationWire): { top: number; left: number } | null
 function renderMarkers(): void {
   ui.markers.textContent = ''
   if (pick) return
-  const relevant = annotations.filter(
-    (a) => a.anchor.page === location.pathname && madeHere(a),
-  )
+  const relevant = annotations.filter((a) => a.anchor.page === location.pathname && madeHere(a))
   relevant.forEach((a, i) => {
     const at = markerPosition(a)
     if (!at) return
@@ -974,9 +1153,14 @@ function resumePopup(view?: Pick): void {
   ui.popupAttach?.editable.focus()
 }
 
+/** Whether the review is reading an explore branch rather than its main line.
+ *  The shell says so, because which conversation is current is its to know. Only
+ *  `/explore` reads it: the line that shows the state is drawn by the shell, on
+ *  the frame's edge, where it can follow the frame's corner. */
+let inExplore = false
+
 function paintPickChrome(): void {
   const on = Boolean(pick)
-  ui.veil.style.display = on ? 'block' : 'none'
   ui.banner.style.display = on ? 'flex' : 'none'
   if (!pick) return
   const back = pick.returnTo && pick.returnTo !== location.pathname ? pick.returnTo : null
@@ -1000,6 +1184,21 @@ function currentDraft(): DraftWire | null {
     // Read now rather than at popup-open: this is the view the user is leaving.
     subject: { ...popupSubject, scroll: { x: window.scrollX, y: window.scrollY } },
     body: normalizeDraft(ui.popupAttach.snapshot()),
+  }
+}
+
+/** The comment an explore was armed from, as data the shell can rebuild it
+ *  from. Not `currentDraft`: that one belongs to a pick, and an explore is not a
+ *  pick - it has no placeholder in the sentence, because what comes back is
+ *  appended rather than filled in. */
+function exploreDraft(attach: AttachController): DraftWire | null {
+  if (!popupSubject) return null
+  return {
+    id: `x${Date.now().toString(36)}`,
+    host: 'popup',
+    createdAt: Date.now(),
+    subject: { ...popupSubject, scroll: { x: window.scrollX, y: window.scrollY } },
+    body: normalizeDraft(attach.snapshot()),
   }
 }
 
@@ -1387,11 +1586,7 @@ function onMouseMove(e: MouseEvent): void {
   // the pointer and sits on the run's own element. Letting it keep chasing would
   // offer a different element than the one the bubble is about to annotate.
   const run = pick ? null : liveSelectionRange()
-  const target = run
-    ? selectionOwner(run)
-    : e.target instanceof Element
-      ? e.target
-      : null
+  const target = run ? selectionOwner(run) : e.target instanceof Element ? e.target : null
   if (target !== hoverTarget) {
     hoverTarget = target
     moveHighlight(target)
@@ -1500,6 +1695,8 @@ function onClick(e: MouseEvent): void {
     subjectOf('element', target),
     () => target.getBoundingClientRect(),
     (comment, files, refs) => saveAnnotation('element', target, comment, files, refs),
+    null,
+    target,
   )
 }
 
@@ -1755,7 +1952,6 @@ function boot(): void {
     ui.badge,
     ui.pin,
     ui.markers,
-    ui.veil,
     ui.region,
     ui.banner,
   )
@@ -1773,9 +1969,13 @@ function boot(): void {
   if (framed) document.addEventListener('click', onNavClick)
   document.addEventListener('mouseup', onMouseUp, true)
   document.addEventListener('keydown', onKeyDown, true)
-  document.addEventListener('keyup', (e) => {
-    if (isModKey(e.key)) setModHeld(false)
-  }, true)
+  document.addEventListener(
+    'keyup',
+    (e) => {
+      if (isModKey(e.key)) setModHeld(false)
+    },
+    true,
+  )
   // A window that loses focus mid-hold never delivers the keyup.
   window.addEventListener('blur', () => {
     setModHeld(false)
@@ -1806,7 +2006,23 @@ function boot(): void {
       returnTo?: string
       draft?: DraftWire
       held?: boolean
+      exploreId?: string
+      anchor?: AnchorWire
+      html?: string | null
+      on?: boolean
     }
+    // What the page is being asked to show in place of what it really has, and
+    // whether an explore can be started at all.
+    if (data?.type === 'ez:variant' && data.exploreId && data.anchor !== undefined) {
+      swapper.set({
+        exploreId: data.exploreId,
+        anchor: data.anchor,
+        html: data.html ?? null,
+      })
+    }
+    if (data?.type === 'ez:variants-clear') swapper.clear()
+    if (data?.type === 'ez:can-explore') canExplore = data.on === true
+    if (data?.type === 'ez:in-explore') inExplore = data.on === true
     if (data?.type === 'ez:set-mode') setMode(data.mode ?? 'off')
     if (data?.type === 'ez:escape') escape()
     if (data?.type === 'ez:viewport') {

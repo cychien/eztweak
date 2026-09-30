@@ -270,6 +270,7 @@ test('the sweep drops only stale, unreferenced attachments', () => {
   const stale = store.addAttachment('stale.png', 'image/png', bytes('x'))
   const queued = store.addAttachment('queued.png', 'image/png', bytes('x'))
   const sent = store.addAttachment('sent.png', 'image/png', bytes('x'))
+  const explored = store.addAttachment('explored.png', 'image/png', bytes('x'))
 
   store.addAnnotation({
     id: 'q',
@@ -280,6 +281,14 @@ test('the sweep drops only stale, unreferenced attachments', () => {
     attachments: [queued],
   })
   store.sendBatch('note', [sent])
+  store.startExplore({
+    id: 'r1',
+    chatId: 'c1',
+    label: 'CTA',
+    anchor,
+    direction: '照 [file 1] 的風格',
+    attachments: [explored],
+  })
 
   // Date the orphan back past the grace window, so the sweep runs against the
   // real clock and the rule under test is age, not a doctored `now`.
@@ -294,6 +303,11 @@ test('the sweep drops only stale, unreferenced attachments', () => {
   assert.equal(existsSync(store.attachmentPath(fresh)), true, 'young orphan is still in grace')
   assert.equal(existsSync(store.attachmentPath(queued)), true, 'queued annotation still holds it')
   assert.equal(existsSync(store.attachmentPath(sent)), true, 'sent batch still holds it')
+  assert.equal(
+    existsSync(store.attachmentPath(explored)),
+    true,
+    'an explore round still holds its direction files',
+  )
 })
 
 // A crash between the two writes leaves bytes nothing will ever name.
@@ -569,4 +583,45 @@ test('asking for a fresh chat while already on an empty one has nothing to do', 
   assert.equal(store.onEmptyNewestChat, false)
   assert.equal(store.switchChat(fresh)?.id, fresh)
   assert.equal(store.onEmptyNewestChat, true)
+})
+
+// A closed round keeps what arrived. When nothing did, there is nothing to keep
+// and nothing for the strip to show - so it leaves rather than lingering as a tab.
+test('a round that ends with nothing is dismissed; one that ends with something is kept', () => {
+  const store = new SessionStore('http://localhost:9012', PROJECT)
+  store.startExplore({ id: 'empty', chatId: 'c1', label: 'A', anchor })
+  store.startExplore({ id: 'full', chatId: 'c2', label: 'B', anchor: { ...anchor, text: 'other' } })
+  store.addVariant('full', { name: 'v', html: '<i/>' })
+
+  assert.equal(store.endExplore('empty', 'cancelled')!.status, 'dismissed')
+  assert.equal(store.endExplore('full', 'cancelled')!.status, 'cancelled')
+  assert.equal(store.explores.find((e) => e.id === 'full')!.variants.length, 1)
+})
+
+test('a round still generating when the store is reopened is over, because no turn survived', () => {
+  const origin = 'http://localhost:9013'
+  const first = new SessionStore(origin, PROJECT)
+  first.startExplore({ id: 'bare', chatId: 'c1', label: 'A', anchor })
+  first.startExplore({ id: 'partial', chatId: 'c2', label: 'B', anchor: { ...anchor, text: 'x' } })
+  first.addVariant('partial', { name: 'v', html: '<i/>' })
+
+  // Closed by an earlier version, when an empty round was allowed to stay: a
+  // tab with nothing behind it, which today's rule would not have left.
+  first.startExplore({ id: 'legacy', chatId: 'c3', label: 'C', anchor: { ...anchor, text: 'y' } })
+  const legacy = first.explores.map((e) => (e.id === 'legacy' ? { ...e, status: 'cancelled' } : e))
+  writeFileSync(join(first.dir, 'explores.json'), JSON.stringify(legacy))
+
+  const reopened = new SessionStore(origin, PROJECT)
+  reopened.settleExplores()
+  assert.deepEqual(
+    reopened.explores.map((e) => [e.id, e.status]),
+    [
+      ['bare', 'dismissed'],
+      ['partial', 'cancelled'],
+      ['legacy', 'dismissed'],
+    ],
+  )
+  // Idempotent: nothing left to settle, nothing rewritten.
+  reopened.settleExplores()
+  assert.equal(reopened.explores.find((e) => e.id === 'partial')!.variants.length, 1)
 })

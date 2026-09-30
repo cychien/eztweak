@@ -1,12 +1,37 @@
 /** Parsing for the parts of a request that arrive as free-form JSON from a page
  *  we do not control. Pure, so the rules are testable without a server. */
 
-import type { Anchor, Reference } from './protocol.js'
+import { MAX_VARIANT_HTML, MAX_VARIANT_NAME } from './explore.js'
+import type { Anchor, ChosenVariant, ExploreCapture, Reference } from './protocol.js'
 
 /** A comment pointing at more elements than this is a bug or an attack, not a
  *  person. Rejecting is better than truncating: silently dropping references
  *  would leave the `[ref N]` markers in the comment naming nothing. */
 const MAX_REFERENCES = 16
+
+/** How much of the explored element's markup the agent is shown. Enough for a
+ *  component, not for a page: the point is what this element looks like, and a
+ *  whole section's worth of DOM buys nothing the prompt can use. Truncation is
+ *  flagged rather than hidden, so the agent knows it is not seeing all of it. */
+const MAX_CAPTURE_HTML = 16 * 1024
+/** The matched rules are the richest capture field and the one most able to
+ *  bloat - a utility-class element matches dozens. Capped in count, per rule
+ *  and in total, to the same figures the page uses. */
+const MAX_CAPTURE_RULES = 40
+const MAX_CAPTURE_RULE_CHARS = 1000
+const MAX_CAPTURE_RULES_BYTES = 4 * 1024
+const MAX_CAPTURE_TOKENS = 40
+const MAX_CAPTURE_SIBLINGS = 12
+
+/** What a shadow tree inherits from the page: these, and nothing else. */
+const CAPTURE_INHERITED = [
+  'font-family',
+  'font-size',
+  'font-weight',
+  'line-height',
+  'letter-spacing',
+  'color',
+]
 
 const str = (v: unknown, max: number): string | undefined =>
   typeof v === 'string' && v ? v.slice(0, max) : undefined
@@ -98,6 +123,21 @@ export function attachmentIds(raw: unknown): string[] | null {
  *  whose anchor is unusable fails the whole request rather than vanishing - a
  *  missing reference leaves a `[ref N]` marker in the comment pointing at
  *  nothing, which is worse for the agent than an error the client can report. */
+/** The variant a reference was chosen out of, when it has one.
+ *
+ *  Three answers, not two: `undefined` for a plain pick, an object for a usable
+ *  one, and `null` for one that is there and unusable - which fails the whole
+ *  request rather than quietly becoming a plain pick. The same rule the anchor
+ *  beside it is held to, and for the same reason: the comment's `[ref n]` would
+ *  otherwise name something other than what the user attached. */
+function parseChosen(raw: unknown): ChosenVariant | null | undefined {
+  if (raw === undefined || raw === null) return undefined
+  if (typeof raw !== 'object') return null
+  const { name, html } = raw as Record<string, unknown>
+  if (typeof html !== 'string' || !html.trim() || html.length > MAX_VARIANT_HTML) return null
+  return { name: str(name, MAX_VARIANT_NAME) ?? '', html }
+}
+
 export function parseReferences(raw: unknown, max = MAX_REFERENCES): Reference[] | null {
   if (raw === undefined || raw === null) return []
   if (!Array.isArray(raw) || raw.length > max) return null
@@ -110,7 +150,144 @@ export function parseReferences(raw: unknown, max = MAX_REFERENCES): Reference[]
     // The comment's `[ref n]` markers resolve against this, so a missing or
     // nonsense number leaves the agent unable to tell which reference is which.
     if (typeof n !== 'number' || !Number.isInteger(n) || n < 1 || n > 999) return null
-    out.push({ n, anchor: clean, label: str(label, 120) ?? '' })
+    const chosen = parseChosen((item as Record<string, unknown>).variant)
+    if (chosen === null) return null
+    out.push({
+      n,
+      anchor: clean,
+      label: str(label, 120) ?? '',
+      ...(chosen ? { variant: chosen } : {}),
+    })
+  }
+  return out
+}
+
+/** The design-relevant computed values, and nothing else. A whitelist rather
+ *  than a cap on how many arrive: the page is asked for exactly these, and a
+ *  client sending anything else is sending something the prompt has no use for. */
+const CAPTURE_STYLES = [
+  'box-sizing',
+  'font-family',
+  'font-size',
+  'font-weight',
+  'line-height',
+  'letter-spacing',
+  'color',
+  'background-color',
+  'border',
+  'border-radius',
+  'padding',
+  'gap',
+  'box-shadow',
+  'text-transform',
+]
+
+/** What the page said the explored element currently looks like. Bounded for
+ *  the same reason every other client-supplied field is: it ends up inside the
+ *  agent's prompt. Null when there is no markup to explore, which is a 400 -
+ *  a round with nothing to vary is not a round. */
+export function sanitizeCapture(raw: unknown): ExploreCapture | null {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null
+  const v = raw as Record<string, unknown>
+  const html = str(v.html, MAX_CAPTURE_HTML)
+  if (!html) return null
+  const out: ExploreCapture = { html }
+  if (v.truncated === true || (typeof v.html === 'string' && v.html.length > MAX_CAPTURE_HTML)) {
+    out.truncated = true
+  }
+  const styles: Record<string, string> = {}
+  const given =
+    typeof v.styles === 'object' && v.styles !== null ? (v.styles as Record<string, unknown>) : {}
+  for (const property of CAPTURE_STYLES) {
+    const value = str(given[property], 120)
+    if (value) styles[property] = value
+  }
+  if (Object.keys(styles).length) out.styles = styles
+  const width = v.parentWidth
+  if (typeof width === 'number' && Number.isFinite(width) && width > 0) {
+    out.parentWidth = Math.round(width)
+  }
+  const rules = cappedStrings(
+    v.rules,
+    MAX_CAPTURE_RULES,
+    MAX_CAPTURE_RULE_CHARS,
+    MAX_CAPTURE_RULES_BYTES,
+  )
+  if (rules.length) out.rules = rules
+  if (typeof v.slot === 'object' && v.slot !== null) {
+    const given = v.slot as Record<string, unknown>
+    const slot: NonNullable<ExploreCapture['slot']> = {}
+    for (const key of ['display', 'direction', 'align', 'justify', 'gap'] as const) {
+      const value = str(given[key], 120)
+      if (value) slot[key] = value
+    }
+    if (typeof given.inherits === 'object' && given.inherits !== null) {
+      const inherits: Record<string, string> = {}
+      for (const property of CAPTURE_INHERITED) {
+        const value = str((given.inherits as Record<string, unknown>)[property], 120)
+        if (value) inherits[property] = value
+      }
+      if (Object.keys(inherits).length) slot.inherits = inherits
+    }
+    if (Object.keys(slot).length) out.slot = slot
+  }
+  if (typeof v.tokens === 'object' && v.tokens !== null) {
+    const tokens: Record<string, string> = {}
+    for (const [name, value] of Object.entries(v.tokens as Record<string, unknown>)) {
+      if (Object.keys(tokens).length >= MAX_CAPTURE_TOKENS) break
+      if (!/^--[\w-]{1,60}$/.test(name)) continue
+      const clean = str(value, 120)
+      if (clean) tokens[name] = clean
+    }
+    if (Object.keys(tokens).length) out.tokens = tokens
+  }
+  if (Array.isArray(v.siblings)) {
+    const siblings: NonNullable<ExploreCapture['siblings']> = []
+    for (const raw of v.siblings.slice(0, MAX_CAPTURE_SIBLINGS)) {
+      if (typeof raw !== 'object' || raw === null) continue
+      const sib = raw as Record<string, unknown>
+      const tag = str(sib.tag, 30)
+      if (!tag || typeof sib.width !== 'number' || typeof sib.height !== 'number') continue
+      const cls = str(sib.class, 80)
+      const text = str(sib.text, 60)
+      siblings.push({
+        tag,
+        ...(cls ? { class: cls } : {}),
+        ...(text ? { text } : {}),
+        width: Math.round(sib.width),
+        height: Math.round(sib.height),
+      })
+    }
+    if (siblings.length) out.siblings = siblings
+  }
+  if (typeof v.theme === 'object' && v.theme !== null) {
+    const given = v.theme as Record<string, unknown>
+    const theme: NonNullable<ExploreCapture['theme']> = {}
+    const scheme = str(given.scheme, 40)
+    if (scheme) theme.scheme = scheme
+    const classes = str(given.classes, 120)
+    if (classes) theme.classes = classes
+    const dataTheme = str(given.dataTheme, 40)
+    if (dataTheme) theme.dataTheme = dataTheme
+    if (Object.keys(theme).length) out.theme = theme
+  }
+  return out
+}
+
+/** A list of strings, each and all bounded. Anything that is not a string is
+ *  dropped rather than failing the whole capture: one bad entry from the page
+ *  should not cost the agent the rest. */
+function cappedStrings(raw: unknown, max: number, each: number, total: number): string[] {
+  if (!Array.isArray(raw)) return []
+  const out: string[] = []
+  let bytes = 0
+  for (const item of raw) {
+    if (out.length >= max) break
+    const value = str(item, each)
+    if (!value) continue
+    if (bytes + value.length > total) break
+    out.push(value)
+    bytes += value.length
   }
   return out
 }

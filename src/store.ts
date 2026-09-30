@@ -3,14 +3,43 @@ import { mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSy
 import { join } from 'node:path'
 import { ATTACHMENT_GRACE_MS, SESSIONS_DIR } from './constants.js'
 import type { AcpConfigValue } from './acp-config.js'
+import type { Said } from './history.js'
+import { rememberDesignHarness } from './preferences.js'
 import type {
+  Anchor,
   Annotation,
   Attachment,
   ConversationEntry,
+  ExploreState,
+  ExploreStatus,
+  ExploreVariant,
   FeedbackBatch,
   Reference,
   SessionEndedBy,
 } from './protocol.js'
+
+/** Whether two anchors point at the same place on the page, for the one
+ *  question that needs to know: can these two explore rounds both have their
+ *  variant standing in a slot, or are they fighting over one.
+ *
+ *  `source` first, because `file:line` is the only identity here that survives a
+ *  re-render. Without the build plugin there is only the selector, which is
+ *  weaker - two rounds on structurally identical elements may be judged the same
+ *  - and the cost of that is one selection cleared, not a wrong swap. */
+/** How a round closes: with its variants under `status`, or - holding none -
+ *  dismissed, off the strip and off the page. A round already dismissed stays so
+ *  whatever it holds. */
+function closeExplore(round: ExploreState, status: ExploreStatus): ExploreState {
+  if (round.status === 'dismissed') return round
+  return round.variants.length
+    ? { ...round, status }
+    : { ...round, status: 'dismissed', selected: null }
+}
+
+export function sameTarget(a: Anchor, b: Anchor): boolean {
+  if (a.source && b.source) return a.source === b.source && a.text === b.text
+  return !!a.selector && a.selector === b.selector
+}
 
 export function newId(): string {
   return randomBytes(6).toString('hex')
@@ -101,6 +130,8 @@ export interface PersistedSession {
   chats?: Chat[]
   /** Which of `chats` the shell is showing and the agent is on. */
   currentChatId?: string
+  /** Per session, not per chat, so `/new` keeps it. */
+  designHarness?: boolean
   /** Superseded by `chats`. Read once, to migrate; never written again. */
   conversationClear?: ConversationClear
 }
@@ -120,6 +151,16 @@ export interface Chat {
    *  best, that no such session exists. */
   agent?: string
   startedAt: number
+  /** The conversation this one was branched off, when it was. A branch carries
+   *  the parent's history - the agent was handed a copy of it - but nothing said
+   *  in the branch reaches the parent, which is the point: an explore can be
+   *  talked about at length and the review still returns to where it forked
+   *  from, carrying only what the user chose to take back. */
+  parentChatId?: string
+  /** Once handed, the earlier conversations are in the agent's context for good. */
+  historyGivenAt?: number
+  /** When harness instructions first reached this chat's agent; they stay in its context. */
+  harnessSeenAt?: number
 }
 
 /** One chat, with what it takes to choose between them: when, how much, and
@@ -136,6 +177,9 @@ export interface ChatSummary {
   agent?: string
   /** The first thing the user said in it, for a conversation no agent will name. */
   said?: string
+  /** The conversation this one branched off, when it did. What the picker draws
+   *  the indent from, and what 回主線 goes back to. */
+  parentChatId?: string
 }
 
 export interface ConversationClear {
@@ -239,6 +283,124 @@ export class SessionStore {
     return this.readJson<ConversationEntry[]>('conversation.json') ?? []
   }
 
+  // ------------------------------------------------------------------ explore
+
+  /** Every round this review has had, oldest first, dismissed ones included -
+   *  the thread still refers to them, and a dismissed round is history rather
+   *  than a mistake. Callers that draw the strip filter them out. */
+  get explores(): ExploreState[] {
+    return this.readJson<ExploreState[]>('explores.json') ?? []
+  }
+
+  private writeExplores(explores: ExploreState[]): void {
+    this.writeJson('explores.json', explores)
+  }
+
+  private patchExplore(id: string, patch: (e: ExploreState) => ExploreState): ExploreState | null {
+    const explores = this.explores
+    const found = explores.find((e) => e.id === id)
+    if (!found) return null
+    const next = patch(found)
+    this.writeExplores(explores.map((e) => (e.id === id ? next : e)))
+    return next
+  }
+
+  /** Open a round on one element.
+   *
+   *  Any live round already holding this element's place gives it up: two rounds
+   *  cannot both have their variant standing in one slot, and the newer one is
+   *  the one the user just asked for. Rounds on *other* elements are left alone,
+   *  which is what lets a button and a heading be explored at once. */
+  startExplore(
+    round: Omit<ExploreState, 'status' | 'variants' | 'selected' | 'startedAt'>,
+  ): ExploreState {
+    const fresh: ExploreState = {
+      ...round,
+      status: 'generating',
+      variants: [],
+      selected: null,
+      startedAt: Date.now(),
+    }
+    const explores = this.explores.map((e) =>
+      e.selected && sameTarget(e.anchor, fresh.anchor) ? { ...e, selected: null } : e,
+    )
+    this.writeExplores([...explores, fresh])
+    return fresh
+  }
+
+  /** What earlier rounds on this element already showed the user, oldest first and capped, so the
+   *  next round can offer something else. */
+  earlierVariants(round: ExploreState): { name: string; note?: string }[] {
+    return this.explores
+      .filter((e) => e.id !== round.id && sameTarget(e.anchor, round.anchor))
+      .flatMap((e) => e.variants.map(({ name, note }) => (note ? { name, note } : { name })))
+      .slice(-12)
+  }
+
+  /** Record a variant against a round that is still taking them. Null when the
+   *  round is over or gone, which is how a late one is refused. */
+  addVariant(id: string, variant: Omit<ExploreVariant, 'id' | 'createdAt'>): ExploreState | null {
+    const round = this.explores.find((e) => e.id === id)
+    if (!round || round.status !== 'generating') return null
+    return this.patchExplore(id, (e) => ({
+      ...e,
+      variants: [...e.variants, { ...variant, id: newId(), createdAt: Date.now() }],
+    }))
+  }
+
+  /** The round's turn is over, however it ended. What a closed round keeps is
+   *  what had arrived, so one that ends holding nothing is dismissed outright:
+   *  there is no variant to leave on the page and no reason for a tab. */
+  endExplore(id: string, status: ExploreStatus): ExploreState | null {
+    return this.patchExplore(id, (e) => closeExplore(e, status))
+  }
+
+  /** Bring every round into line with how rounds close now, on restore.
+   *
+   *  No turn survives the daemon, so a round still generating when its session
+   *  comes back is over - cancelled, with whatever had arrived. Left alone it
+   *  stayed generating for good, a strip saying 還在想 about an agent that was
+   *  not. And a round closed by an earlier version holding nothing is dismissed
+   *  the way `endExplore` would dismiss it today, so the strip is not carrying
+   *  tabs for rounds that were empty before the rule existed. */
+  settleExplores(): void {
+    const explores = this.explores
+    const settled = explores.map((e) =>
+      closeExplore(e, e.status === 'generating' ? 'cancelled' : e.status),
+    )
+    if (settled.some((e, i) => e.status !== explores[i]!.status)) this.writeExplores(settled)
+  }
+
+  /** The round is taking variants again, because a turn is about to run in the
+   *  branch it belongs to. Not `endExplore`'s inverse: that one *settles* a round,
+   *  and settling one that holds nothing dismisses it outright. A dismissed round
+   *  is past reviving - nothing of it is on the page and its url is gone. */
+  resumeExplore(id: string): ExploreState | null {
+    return this.patchExplore(id, (e) =>
+      e.status === 'dismissed' ? e : { ...e, status: 'generating' },
+    )
+  }
+
+  /** Put one of a round's variants on the page, or `null` for the original.
+   *  Refused for a variant the round does not have, so the page can never be
+   *  asked to show markup nothing recorded. */
+  selectVariant(id: string, variantId: string | null): ExploreState | null {
+    const round = this.explores.find((e) => e.id === id)
+    if (!round) return null
+    if (variantId !== null && !round.variants.some((v) => v.id === variantId)) return null
+    return this.patchExplore(id, (e) => ({ ...e, selected: variantId }))
+  }
+
+  /** Close a round: nothing of it is on the page any more, and its url stops
+   *  taking variants. Kept in the list, because the thread refers to it. */
+  dismissExplore(id: string): ExploreState | null {
+    return this.patchExplore(id, (e) => ({ ...e, status: 'dismissed', selected: null }))
+  }
+
+  markExploreAdopted(id: string, variantId: string): ExploreState | null {
+    return this.patchExplore(id, (e) => ({ ...e, adopted: variantId }))
+  }
+
   addAnnotation(a: Annotation): void {
     this.writeJson('queue.json', [...this.annotations, a])
   }
@@ -317,6 +479,57 @@ export class SessionStore {
     this.writeJson('outbox.json', [...this.outbox, batch])
     this.writeJson('queue.json', [])
     return batch
+  }
+
+  /** Through the outbox so it waits its turn; the annotation queue is left alone. */
+  sendSetup(): FeedbackBatch {
+    const batch: FeedbackBatch = {
+      batchId: newId(),
+      items: [],
+      note: null,
+      setup: true,
+      sentAt: Date.now(),
+    }
+    this.writeJson('outbox.json', [...this.outbox, batch])
+    return batch
+  }
+
+  /** A branch was handed its parent's transcript, so the parent's exposure counts. */
+  harnessSeen(): boolean {
+    const chats = this.chats
+    const seen = new Set<string>()
+    for (
+      let chat: Chat | undefined = this.currentChat;
+      chat && !seen.has(chat.id);
+      chat = chats.find((c) => c.id === chat!.parentChatId)
+    ) {
+      if (chat.harnessSeenAt) return true
+      seen.add(chat.id)
+    }
+    return false
+  }
+
+  markHarnessSeen(): void {
+    const current = this.currentChat
+    if (current.harnessSeenAt) return
+    this.patchSession({
+      chats: this.chats.map((c) => (c.id === current.id ? { ...c, harnessSeenAt: Date.now() } : c)),
+    })
+  }
+
+  /** Only undelivered ones: a setup turn already running is the agent's to finish. */
+  settleUndeliveredSetup(): string[] {
+    const outbox = this.outbox
+    const now = Date.now()
+    const settled: string[] = []
+    for (const batch of outbox) {
+      if (batch.setup && !batch.deliveredAt && !batch.ackedAt) {
+        batch.ackedAt = now
+        settled.push(batch.batchId)
+      }
+    }
+    if (settled.length) this.writeJson('outbox.json', outbox)
+    return settled
   }
 
   // -------------------------------------------------------------- attachments
@@ -401,6 +614,7 @@ export class SessionStore {
       take(batch.attachments)
       for (const item of batch.items) take(item.attachments)
     }
+    for (const round of this.explores) take(round.attachments)
     return ids
   }
 
@@ -412,9 +626,7 @@ export class SessionStore {
     const cutoff = now - ATTACHMENT_GRACE_MS
     const referenced = this.referencedAttachmentIds()
     const index = this.attachmentIndex
-    const doomed = Object.values(index).filter(
-      (a) => !referenced.has(a.id) && a.createdAt < cutoff,
-    )
+    const doomed = Object.values(index).filter((a) => !referenced.has(a.id) && a.createdAt < cutoff)
     this.dropAttachments(doomed)
 
     // Files written before the crash that stopped their index entry. Nothing
@@ -535,7 +747,45 @@ export class SessionStore {
     return chat
   }
 
+  /** Begin a conversation branched off the current one.
+   *
+   *  Unlike `startChat`, this one is born knowing its session: the agent has
+   *  already copied the transcript into `acpSessionId`, and recording it here is
+   *  what makes the reopen that follows a *resume of the copy* rather than a
+   *  fresh start. The order matters - the store moves first, because what the
+   *  agent opens is read back off it. */
+  startBranch(acpSessionId: string | undefined, agent: string | undefined): Chat {
+    const chat: Chat = {
+      id: newId(),
+      startedAt: Date.now(),
+      parentChatId: this.currentChat.id,
+      ...(acpSessionId && agent ? { acpSessionId, agent } : {}),
+    }
+    this.patchSession({ chats: [...this.chats, chat], currentChatId: chat.id })
+    return chat
+  }
+
   /** Show an earlier conversation and put the agent back on it. */
+  /** The conversation a chain of branches grew from. */
+  mainLineOf(id: string): string {
+    const chats = this.chats
+    const seen = new Set<string>()
+    let chat = chats.find((c) => c.id === id)
+    while (chat?.parentChatId && !seen.has(chat.id)) {
+      seen.add(chat.id)
+      chat = chats.find((c) => c.id === chat!.parentChatId)
+    }
+    return chat?.id ?? id
+  }
+
+  /** A branch whose explore rounds are all over has nothing left to do; only explore makes them. */
+  spentBranch(): boolean {
+    const current = this.currentChat
+    if (!current.parentChatId) return false
+    const rounds = this.explores.filter((e) => e.chatId === current.id)
+    return rounds.length > 0 && rounds.every((e) => e.status === 'dismissed')
+  }
+
   switchChat(id: string): Chat | null {
     const chat = this.chats.find((c) => c.id === id)
     if (!chat) return null
@@ -552,6 +802,25 @@ export class SessionStore {
     this.patchSession({
       chats: this.chats.map((c) => (c.id === current.id ? { ...c, acpSessionId, agent } : c)),
     })
+  }
+
+  get designHarness(): boolean {
+    return this.session.designHarness === true
+  }
+
+  /** The user's switch, remembered for the project across sessions. */
+  setDesignHarness(on: boolean): void {
+    this.patchSession({ designHarness: on })
+    rememberDesignHarness(this.project, on)
+  }
+
+  /** A state derived at start, not chosen, so the project's remembered choice is left alone. */
+  restoreDesignHarness(on: boolean): void {
+    if (on !== this.designHarness) this.patchSession({ designHarness: on })
+  }
+
+  setupPending(): boolean {
+    return this.outbox.some((b) => b.setup && !b.ackedAt)
   }
 
   /** The session to ask this agent to resume, if the current chat has one *it*
@@ -576,6 +845,59 @@ export class SessionStore {
     return entry.chatId === undefined
       ? isFirst && entry.ts >= chat.startedAt
       : entry.chatId === chat.id
+  }
+
+  /** Excludes this chat and the chain it branched from: the agent has those transcripts. */
+  /** What the user wrote themselves, newest first: each batch's note and comments. The rest of a
+   *  user entry - a setup, an explore - is worded by the shell. */
+  userWords(): string[] {
+    const words: string[] = []
+    const log = this.conversation
+    for (let i = log.length - 1; i >= 0; i--) {
+      const entry = log[i]!
+      if (entry.role !== 'user' || !entry.items) continue
+      for (const said of [entry.text, ...entry.items.map((item) => item.comment)]) {
+        if (said?.trim()) words.push(said)
+      }
+    }
+    return words
+  }
+
+  earlierChatsSaid(): Said[] {
+    const chats = this.chats
+    const firstId = chats[0]?.id
+    const seen = new Set<string>()
+    for (
+      let chat: Chat | undefined = this.currentChat;
+      chat && !seen.has(chat.id);
+      chat = chats.find((c) => c.id === chat!.parentChatId)
+    ) {
+      seen.add(chat.id)
+    }
+    const known = chats.filter((c) => seen.has(c.id))
+    const said: Said[] = []
+    const log = this.conversation
+    for (let i = log.length - 1; i >= 0; i--) {
+      const entry = log[i]!
+      if (entry.role !== 'user') continue
+      if (known.some((chat) => this.belongsTo(entry, chat, chat.id === firstId))) continue
+      for (const item of entry.items ?? []) {
+        const comment = item.comment?.trim()
+        if (comment) said.push({ where: item.where, said: comment })
+      }
+      const note = entry.text?.trim()
+      if (note) said.push({ said: note })
+    }
+    return said
+  }
+
+  markHistoryGiven(): void {
+    const current = this.currentChat
+    this.patchSession({
+      chats: this.chats.map((c) =>
+        c.id === current.id ? { ...c, historyGivenAt: Date.now() } : c,
+      ),
+    })
   }
 
   /** The thread as the shell should draw it: the current chat, and nothing else. */
@@ -610,6 +932,7 @@ export class SessionStore {
         current: chat.id === current,
         ...(chat.acpSessionId ? { acpSessionId: chat.acpSessionId } : {}),
         ...(chat.agent ? { agent: chat.agent } : {}),
+        ...(chat.parentChatId ? { parentChatId: chat.parentChatId } : {}),
         ...(said
           ? {
               said:

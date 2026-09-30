@@ -5,6 +5,7 @@ import { after, test } from 'node:test'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { AcpAgent } from '../src/acp-agent.js'
+import { type McpServerEntry, isExploreTool } from '../src/mcp-explore.js'
 import type { AcpLimit, AcpSessionStart, AcpSnapshot } from '../src/acp-agent.js'
 
 const FAKE = join(dirname(fileURLToPath(import.meta.url)), 'helpers', 'fake-acp-agent.mjs')
@@ -35,6 +36,11 @@ interface HarnessOptions {
   /** A figure from before this daemon started, as `usage-limit.ts` would supply
    *  it. */
   rememberedLimit?: AcpLimit
+  /** The mcp servers to open every session with, as the daemon's explore rounds
+   *  would supply them. */
+  mcpServers?: () => McpServerEntry[]
+  /** Which tools are the daemon's own, as it would tell the agent. */
+  ownTool?: (toolName: string) => boolean
   /** Prompts to hand over the way `deliverToAcp` does - on the agent going idle,
    *  from the same `onChange` the daemon acts on. Ordering claims about a pick
    *  landing before a session's first turn only mean anything against this. */
@@ -100,6 +106,8 @@ function harness(options: HarnessOptions = {}) {
       wake()
     },
     ...(options.resume ? { resumeSessionId: options.resume } : {}),
+    ...(options.mcpServers ? { mcpServers: options.mcpServers } : {}),
+    ...(options.ownTool ? { ownTool: options.ownTool } : {}),
     onSessionOpen: (sessionId, how) => {
       opens.push({ sessionId, how })
       wake()
@@ -261,6 +269,25 @@ test('a new chat mid-turn cancels it and drops its outcome', async () => {
     h.turns.map((t) => t.reply),
     ['s2:after'],
   )
+})
+
+// A review that moves twice in quick succession - into a branch from the corner
+// chip, then straight back out through the breadcrumb - asks for the second move
+// while the first session is still opening. It used to be refused, so the click
+// that asked for it did nothing at all and the review sat in a conversation the
+// user had already left; only a second click, once the session was up, landed.
+test('a move asked for while the session is still opening is honoured', async () => {
+  const h = harness()
+  after(() => h.acp.stop())
+  await h.idle()
+
+  assert.equal(h.acp.reopenSession(), true)
+  assert.equal(h.acp.snapshot().state, 'starting')
+  assert.equal(h.acp.reopenSession(), true, 'the second move was dropped')
+
+  h.queue('after')
+  await h.until('the turn on the newest session to end', () => h.turns.length > 0)
+  assert.equal(h.turns[0]?.reply, 's3:after', 'the review answered on a superseded session')
 })
 
 test('a new chat is refused before the first session is up', () => {
@@ -707,4 +734,208 @@ test('a reset time is not carried across to another window', async () => {
     ],
   })
   h.acp.stop()
+})
+
+/** An elicitation form from the fake agent; the turn's reply is the response
+ *  the agent was handed, so the assertion is on exactly what it got. */
+const FORM = JSON.stringify({
+  message: 'Tell me about it',
+  requestedSchema: {
+    type: 'object',
+    properties: {
+      style: { type: 'string', oneOf: [{ const: 'a', title: 'A' }, { const: 'b', title: 'B' }] },
+      note: { type: 'string', title: 'Anything else' },
+      count: { type: 'integer', minimum: 1 },
+      confirm: { type: 'boolean' },
+      tags: { type: 'array', items: { type: 'string', enum: ['x', 'y'] } },
+    },
+    required: ['style', 'count', 'confirm', 'tags'],
+  },
+})
+
+test('an elicitation form reaches the shell with every field and is accepted with typed answers', async () => {
+  const h = harness()
+  after(() => h.acp.stop())
+  await h.idle()
+  h.acp.prompt(`ELICIT ${FORM}`)
+  const asked = await h.until('the ask', (s) => !!s.ask)
+  assert.equal(asked.ask!.kind, 'question')
+  assert.equal(asked.ask!.title, 'Tell me about it')
+  assert.deepEqual(
+    asked.ask!.fields.map((f) => [f.key, f.kind, f.optional ?? false]),
+    [
+      ['style', 'select', false],
+      ['note', 'text', true],
+      ['count', 'number', false],
+      ['confirm', 'boolean', false],
+      ['tags', 'multiselect', false],
+    ],
+  )
+  // A half-answer is refused and the ask stays up.
+  assert.equal(h.acp.answer(asked.ask!.id, { style: 'a' }), false)
+  assert.ok(h.acp.snapshot().ask)
+  assert.equal(h.acp.answer(asked.ask!.id, { style: 'a', count: 2, confirm: true, tags: ['y'] }), true)
+  assert.equal(h.acp.snapshot().ask, undefined)
+  await h.until('the turn', () => h.turns.length === 1)
+  assert.deepEqual(JSON.parse(h.turns[0]!.reply), {
+    action: 'accept',
+    content: { style: 'a', count: 2, confirm: true, tags: ['y'] },
+  })
+})
+
+test('a declined form tells the agent so', async () => {
+  const h = harness()
+  after(() => h.acp.stop())
+  await h.idle()
+  h.acp.prompt(`ELICIT ${FORM}`)
+  const asked = await h.until('the ask', (s) => !!s.ask)
+  assert.equal(h.acp.decline(asked.ask!.id), true)
+  assert.equal(h.acp.decline(asked.ask!.id), false)
+  await h.until('the turn', () => h.turns.length === 1)
+  assert.deepEqual(JSON.parse(h.turns[0]!.reply), { action: 'decline' })
+})
+
+test('a form with a required field the shell cannot draw is declined without asking', async () => {
+  const h = harness()
+  after(() => h.acp.stop())
+  const form = JSON.stringify({
+    message: 'x',
+    requestedSchema: { properties: { blob: { type: 'object' } }, required: ['blob'] },
+  })
+  const turn = await h.ask(`ELICIT ${form}`)
+  assert.deepEqual(JSON.parse(turn.reply), { action: 'decline' })
+})
+
+// ------------------------------------------------------------------ branching
+
+/** One explore round's server, as `ExploreMcp.serverEntries` builds it. */
+const EXPLORE_SERVERS: McpServerEntry[] = [
+  { type: 'http', name: 'eztweak-explore-r1', url: 'http://127.0.0.1:1/x', headers: [] },
+]
+
+/** What a fork is for: the branch carries the parent's history, the parent never
+ *  hears what was said in the branch, and the review can go back. These assert
+ *  the mechanics of the copy - that the client forks the *live* session and then
+ *  resumes the copy, in that order. Whether the agent really carried the
+ *  transcript over is the agent's promise, measured against the real one. */
+test('forking is refused when the agent cannot do it, and nothing moves', async () => {
+  const h = harness({ env: { EZ_FAKE_NO_FORK: '1' } })
+  after(() => h.acp.stop())
+  await h.ask('one')
+  assert.equal(h.acp.canBranch, false)
+  assert.equal(await h.acp.forkSession(), null)
+  assert.equal(h.opens.length, 1)
+})
+
+test('a fork the agent takes and then refuses leaves the review where it was', async () => {
+  const h = harness({ env: { EZ_FAKE_REFUSE_FORK: '1' } })
+  after(() => h.acp.stop())
+  await h.ask('one')
+  assert.equal(h.acp.canBranch, true)
+  assert.equal(await h.acp.forkSession(), null)
+  assert.equal(h.opens.length, 1)
+})
+
+test('a branch is resumed, not prompted - a forked session is not live until it is', async () => {
+  let resume: string | undefined
+  const h = harness({ resume: () => resume })
+  after(() => h.acp.stop())
+  await h.ask('one')
+
+  const forked = (await h.acp.forkSession())!
+  // The daemon's move: record the copy against a new chat, then reopen. If the
+  // client prompted the fork without resuming it, the fake agent - like the real
+  // one - answers "Session not found" and this turn never ends.
+  resume = forked
+  assert.equal(h.acp.reopenSession(), true)
+  await h.until('the branch', (s) => s.state === 'idle')
+  assert.deepEqual(h.opens.at(-1), { sessionId: forked, how: 'resumed' })
+  assert.equal((await h.ask('on the branch')).reply, `${forked}:on the branch`)
+
+  // Back to the parent, which is an ordinary resume of the session it was on.
+  resume = h.opens[0]!.sessionId
+  assert.equal(h.acp.reopenSession(), true)
+  await h.until('the parent', (s) => s.state === 'idle')
+  const report = JSON.parse((await h.ask('REPORT')).reply) as Report & {
+    forkedFrom: Record<string, string>
+  }
+  assert.deepEqual(report.forkedFrom, { [forked]: h.opens[0]!.sessionId })
+  assert.deepEqual(
+    report.log.filter((l) => l.startsWith('fork:') || l.startsWith('resume:')),
+    [`fork:${h.opens[0]!.sessionId}`, `resume:${forked}`, `resume:${h.opens[0]!.sessionId}`],
+  )
+})
+
+test("a remembered pick is re-asserted on a branch, which comes back on the agent's default", async () => {
+  let resume: string | undefined
+  const h = harness({ resume: () => resume, pinned: { model: 'haiku' } })
+  after(() => h.acp.stop())
+  await h.idle()
+  await h.until('the pick', (s) => option(s, 'model')?.currentValue === 'haiku')
+
+  const forked = (await h.acp.forkSession())!
+  resume = forked
+  h.acp.reopenSession()
+  await h.until('the branch', (s) => s.state === 'idle')
+  assert.equal(option(h.acp.snapshot(), 'model')?.currentValue, 'haiku')
+})
+
+test('the explore servers reach every session, including a branch', async () => {
+  let resume: string | undefined
+  const h = harness({ resume: () => resume, mcpServers: () => EXPLORE_SERVERS })
+  after(() => h.acp.stop())
+  await h.ask('one')
+  const forked = (await h.acp.forkSession())!
+  resume = forked
+  h.acp.reopenSession()
+  await h.until('the branch', (s) => s.state === 'idle')
+  const report = JSON.parse((await h.ask('REPORT')).reply) as Report & {
+    mcpBySession: Record<string, string[]>
+  }
+  assert.deepEqual(report.mcpBySession[h.opens[0]!.sessionId], ['eztweak-explore-r1'])
+  assert.deepEqual(report.mcpBySession[forked], ['eztweak-explore-r1'])
+})
+
+test('an agent that cannot reach an http mcp server is offered none', async () => {
+  const h = harness({ env: { EZ_FAKE_NO_MCP: '1' }, mcpServers: () => EXPLORE_SERVERS })
+  after(() => h.acp.stop())
+  const report = JSON.parse((await h.ask('REPORT')).reply) as Report & {
+    mcpBySession: Record<string, string[]>
+  }
+  assert.deepEqual(report.mcpBySession[h.opens[0]!.sessionId], [])
+})
+
+test("a tool that is not the daemon's own is put to the user as a permission card", async () => {
+  const h = harness({ ownTool: isExploreTool })
+  after(() => h.acp.stop())
+  await h.idle()
+  h.acp.prompt('PERMISSION')
+  const asked = await h.until('the ask', (s) => !!s.ask)
+  assert.equal(asked.ask!.kind, 'permission')
+  assert.equal(asked.ask!.title, 'Bash')
+  const field = asked.ask!.fields[0]!
+  assert.deepEqual(
+    field.kind === 'select' ? field.options.map((o) => [o.id, o.hint]) : field.kind,
+    [
+      ['allow-once', 'allow_once'],
+      ['allow-always', 'allow_always'],
+      ['reject', 'reject_once'],
+    ],
+  )
+  assert.equal(h.acp.answer(asked.ask!.id, { option: 'reject' }), true)
+  await h.until('the turn', () => h.turns.length === 1)
+  assert.equal(h.turns[0]!.reply, 'Bash: reject')
+})
+
+test("the daemon's own tool is granted once, with no card and nothing to write down", async () => {
+  // Named the way Claude Code names an MCP tool on one of our round servers.
+  const tool = 'mcp__eztweak-explore-r1__explore_variant'
+  const h = harness({ ownTool: isExploreTool, env: { EZ_FAKE_PERMISSION_TOOL: tool } })
+  after(() => h.acp.stop())
+  await h.idle()
+  const turn = await h.ask('PERMISSION')
+  // Granted as a one-off - `allow_once` - never as the "always" that would have
+  // become a rule in the project's settings keyed by a round id, dead on arrival.
+  assert.equal(turn.reply, `${tool}: allow-once`)
+  assert.equal(h.acp.snapshot().ask, undefined)
 })

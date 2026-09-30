@@ -59,6 +59,27 @@ test('references and files number independently of each other', () => {
   )
 })
 
+// A reference brought back from an explore carries the markup the user settled
+// on. It is the same kind of thing in the sentence - one `[ref n]`, one number
+// out of one space - and a different kind of thing to the agent, which is the
+// whole reason the payload rides on the reference rather than beside it.
+test('a chosen variant travels with the reference it is attached to', () => {
+  const chosen = { name: '\u5be6\u5fc3', html: '<b>x</b>' }
+  const body: DraftNode[] = [
+    text('make '),
+    { t: 'ref', n: 1, anchor: { source: 'a.tsx:1' }, label: 'cta', variant: chosen },
+    text(' like this'),
+  ]
+  assert.equal(draftText(body), 'make [ref 1] like this')
+  assert.deepEqual(draftRefs(body), [
+    { n: 1, anchor: { source: 'a.tsx:1' }, label: 'cta', variant: chosen },
+  ])
+})
+
+test('a plain pick does not grow the field', () => {
+  assert.equal('variant' in draftRefs([ref('a.tsx:1', 1)])[0]!, false)
+})
+
 // The numbering in the comment and the array the agent gets come out of the same
 // pass, so they cannot drift. This is the property that matters.
 test('every marker names the reference carrying that number', () => {

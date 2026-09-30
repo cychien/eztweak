@@ -29,6 +29,10 @@ export interface RefWire {
   /** A name for the element, for the sidebar and the conversation log. Not what
    *  the chip reads - see `n`. */
   label: string
+  /** The markup the user chose for this element, when the reference came out of
+   *  an explore round rather than off the picker. It rides in the chip's own
+   *  attribute, so the box is the only place it lives until the batch is sent. */
+  variant?: { name: string; html: string }
 }
 
 /** A reference once it has a place in a comment. `n` is assigned when the pick
@@ -49,7 +53,13 @@ export type DraftNode =
    *  is off choosing an element. It holds the spot so the answer lands where the
    *  slash was typed, in this document or in the one after the navigation. `n` is
    *  meaningless until the anchor arrives. */
-  | { t: 'ref'; n: number; anchor: AnchorWire | null; label: string }
+  | {
+      t: 'ref'
+      n: number
+      anchor: AnchorWire | null
+      label: string
+      variant?: { name: string; html: string }
+    }
   /** The skill this batch runs. In the sentence because that is where the user
    *  put it, but never *part* of the sentence: it travels as the batch's own
    *  field and the daemon turns it into the leading `/name` the agent expands,
@@ -104,7 +114,11 @@ export const refMarker = (n: number): string => `[ref ${n}]`
  *  was picked, while the number is the same one the sentence carries. The
  *  descriptive label goes in the chip's tooltip, where it answers "which one was
  *  that again" without crowding the line. */
-export const refChipText = (n: number): string => `選取元素 ${n}`
+/** What a reference chip reads. A pick and a chosen variant are the same kind of
+ *  thing in the sentence - both are `[ref n]` - and different kinds of thing to
+ *  the eye, because one points at the page and the other carries an answer. */
+export const refChipText = (n: number, chosen = false): string =>
+  `${chosen ? '探索樣式' : '選取元素'} ${n}`
 
 /** How an attachment appears in the comment text. Files are marked for the same
  *  reason references are: a comment can point at one mid sentence, so *where* it
@@ -252,7 +266,12 @@ export function draftRefs(body: DraftNode[]): NumberedRef[] {
   const out: NumberedRef[] = []
   for (const node of body) {
     if (node.t === 'ref' && node.anchor) {
-      out.push({ n: node.n, anchor: node.anchor, label: node.label })
+      out.push({
+        n: node.n,
+        anchor: node.anchor,
+        label: node.label,
+        ...(node.variant ? { variant: node.variant } : {}),
+      })
     }
   }
   return out

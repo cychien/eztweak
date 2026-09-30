@@ -102,13 +102,13 @@ export class DaemonWorld {
   async openSession(
     controlPort: number,
     body: { url: string; project: string; agent?: string; reopen?: boolean },
-  ): Promise<{ port: number; shellUrl: string }> {
+  ): Promise<{ port: number; shellUrl: string; agent?: string }> {
     const res = await this.control(controlPort, '/control/sessions', {
       method: 'POST',
       body: JSON.stringify(body),
     })
     if (!res.ok) throw new Error(`open session failed: ${res.status} ${await res.text()}`)
-    return (await res.json()) as { port: number; shellUrl: string }
+    return (await res.json()) as { port: number; shellUrl: string; agent?: string }
   }
 
   async state(sessionPort: number): Promise<Record<string, unknown>> {
