@@ -1,6 +1,13 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { type AcpAskField, fieldsFromSchema, validateAnswers } from '../src/acp-ask.js'
+import {
+  type AcpAskField,
+  askComplete,
+  askSendsOnPick,
+  askTitle,
+  fieldsFromSchema,
+  validateAnswers,
+} from '../src/acp-ask.js'
 
 /** The shape `claude-agent-acp` sends for AskUserQuestion: one titled `oneOf`
  *  select per question, each with an optional free-text companion. */
@@ -233,8 +240,8 @@ test("Claude's Other box folds into the choice it belongs to, and a typed Other 
   assert.deepEqual(
     fields.map((f) => [f.key, f.kind, 'custom' in f ? f.custom : undefined]),
     [
-      ['question_0', 'select', { key: 'question_0_custom', text: 'Other' }],
-      ['question_1', 'multiselect', { key: 'question_1_custom', text: 'Other' }],
+      ['question_0', 'select', { key: 'question_0_custom' }],
+      ['question_1', 'multiselect', { key: 'question_1_custom' }],
     ],
   )
   assert.deepEqual(validateAnswers(fields, { question_0: 'OAuth', question_1: ['A'] }), {
@@ -256,6 +263,51 @@ test("Claude's Other box folds into the choice it belongs to, and a typed Other 
   assert.equal(validateAnswers(fields, { question_0_custom: 42 }), null)
 })
 
+// claude-agent-acp 0.84 sends the `_meta` marker to JetBrains AIR alone.
+test('an Other box is found by its key when the adapter sends no marker', () => {
+  const strip = ({ _meta, ...rest }: Record<string, unknown>) => rest
+  const unmarked = {
+    ...CLAUDE_ASK,
+    properties: {
+      ...CLAUDE_ASK.properties,
+      question_0_custom: strip(CLAUDE_ASK.properties.question_0_custom),
+      question_1_custom: strip(CLAUDE_ASK.properties.question_1_custom),
+    },
+  }
+  assert.deepEqual(
+    fieldsFromSchema(unmarked)!.map((f) => [f.key, 'custom' in f ? f.custom : undefined]),
+    [
+      ['question_0', { key: 'question_0_custom' }],
+      ['question_1', { key: 'question_1_custom' }],
+    ],
+  )
+})
+
+test('the option Claude recommends reads （推薦）, and is still answered by its id', () => {
+  const [field] = fieldsFromSchema({
+    properties: {
+      question_0: {
+        type: 'string',
+        oneOf: [
+          { const: 'Flat (Recommended)', title: 'Flat (Recommended)' },
+          { const: 'Lifted', title: 'Lifted' },
+        ],
+      },
+    },
+  })!
+  assert.ok(field && field.kind === 'select')
+  assert.deepEqual(
+    field.options.map((o) => [o.id, o.name]),
+    [
+      ['Flat (Recommended)', 'Flat（推薦）'],
+      ['Lifted', 'Lifted'],
+    ],
+  )
+  assert.deepEqual(validateAnswers([field], { question_0: 'Flat (Recommended)' }), {
+    question_0: 'Flat (Recommended)',
+  })
+})
+
 test('an Other box whose question is missing, or required, stays a text field of its own', () => {
   const fields = fieldsFromSchema({
     properties: {
@@ -271,4 +323,46 @@ test('an Other box whose question is missing, or required, stays a text field of
     { key: 'lone', kind: 'text' },
     { key: 'question_0_custom', kind: 'text', optional: true, text: 'Other' },
   ])
+})
+
+test("the vendor's multi-question placeholder is not a title; a real message is", () => {
+  assert.equal(askTitle('Please answer the following questions.'), null)
+  assert.equal(askTitle('Which style?'), 'Which style?')
+  assert.equal(askTitle('  '), null, 'blank is no title either')
+  assert.equal(askTitle(undefined), null)
+})
+
+const sel = (key: string, optional = true, custom?: string): AcpAskField => ({
+  key,
+  kind: 'select',
+  options: [{ id: 'a', name: 'A' }],
+  ...(optional ? { optional: true } : {}),
+  ...(custom ? { custom: { key: custom } } : {}),
+})
+
+// Regression: claude-agent-acp marks every AskUserQuestion field optional.
+test('a form of several questions never sends on a pick, however optional they are', () => {
+  const three = [sel('q0'), sel('q1'), sel('q2')]
+  assert.equal(askSendsOnPick(three, false), false)
+  assert.equal(askComplete(three, new Set(['q0'])), true, 'one answer is still sendable')
+  assert.equal(askComplete(three, new Set()), false, 'but an empty card is not')
+})
+
+test('one question sends on a pick, which is how a permission prompt has always felt', () => {
+  const one = [sel('q0', false)]
+  assert.equal(askSendsOnPick(one, false), true)
+  assert.equal(askSendsOnPick(one, true), false, 'a half-typed Other holds it back')
+  assert.equal(askSendsOnPick([sel('q0'), sel('q1')], false), false)
+  assert.equal(
+    askSendsOnPick([{ key: 'note', kind: 'text' }], false),
+    false,
+    'typing is not picking',
+  )
+})
+
+test('a required field still has to be answered, by itself or by its Other box', () => {
+  const fields = [sel('q0', false, 'q0_other'), sel('q1')]
+  assert.equal(askComplete(fields, new Set(['q1'])), false, 'the required one is blank')
+  assert.equal(askComplete(fields, new Set(['q0'])), true)
+  assert.equal(askComplete(fields, new Set(['q0_other'])), true, 'Other answers its own question')
 })

@@ -217,6 +217,8 @@ export interface FeedbackBatch {
    *  with belongs to the agent, so the stored text carries the marker and
    *  `acpPrompt` spends it once the agent is known. */
   skills?: string[]
+  /** Not feedback: builds the design harness's files; carries no items or note. */
+  setup?: true
   sentAt: number
   deliveredAt?: number
   ackedAt?: number
@@ -279,6 +281,7 @@ export type PollResult =
       attachments?: AgentAttachment[]
       /** elements the note points at, rather than any one item */
       references?: Reference[]
+      setup?: true
     }
   | { type: 'session-ended'; endedBy: SessionEndedBy }
 

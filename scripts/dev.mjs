@@ -6,6 +6,7 @@ import { createServer } from 'vite'
 import { targets, watchAll } from './build.mjs'
 import {
   CLI,
+  DEV_AGENT,
   DEV_CONTROL_PORT,
   DEV_DATA_DIR,
   FIXTURE_ROOT,
@@ -212,6 +213,10 @@ writeFileSync(TARGET_FILE, JSON.stringify({ url: targetUrl }, null, 2))
 await clearStrayDaemon()
 startDaemon()
 if (!(await waitForDaemon())) throw new Error('dev daemon gave up during startup')
-await runCli([targetUrl])
+// ACP, always. Poll mode is deprecated, and a first run with no session to
+// restore would otherwise come up without an agent. Run from the fixture so the
+// review is scoped to it rather than to this repository: the agent's cwd is the
+// project under review, and that is what it edits.
+await runCli([targetUrl, '--agent', DEV_AGENT], { cwd: FIXTURE_ROOT })
 
-log('review shell open. next: `npm run dev:agent` in another terminal')
+log('review shell open')

@@ -44,6 +44,9 @@
   --mark: #e56d41;
   --mark-foreground: #fff;
 
+  /* 增強設計's sparkle only. Brightness chosen over contrast: 2.2:1 on --paper. */
+  --premium: #d6a21e;
+
   /* Attachments get a green kept soft enough to sit beside the warm surfaces
      without fighting them. The chip carries no border, so the fill alone has to
      separate it from --paper-sunken, which it is close to in luminance - hue is
@@ -1886,6 +1889,220 @@ body.ez-arranging .ez-frame {
   color: var(--ink-muted);
 }
 
+/* Inset like the agent's line below, so the two share a left edge. */
+/* As tall with the effort control as without, so switching the harness does not move the rows. */
+.ez-harness-row {
+  display: flex;
+  align-items: center;
+  min-height: 17px;
+  margin-bottom: 6px;
+  padding-left: 2px;
+}
+
+.ez-harness-row[hidden] {
+  display: none;
+}
+
+/* The label matches the agent and model names on the line below, and keeps its ink through a
+   switch. */
+.ez-harness {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: none;
+  color: var(--ink-faint);
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 13px;
+  cursor: pointer;
+  transition: color 0.12s ease;
+}
+
+.ez-harness:hover:not(:disabled) {
+  color: var(--ink-muted);
+}
+
+.ez-harness:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+/* Gold in both states: it marks the feature as premium, not whether it is on. */
+.ez-harness-mark {
+  display: flex;
+  flex-shrink: 0;
+  color: var(--premium);
+}
+
+.ez-harness-mark path {
+  fill: currentColor;
+}
+
+.ez-harness-label {
+  white-space: nowrap;
+}
+
+/* Status, not name: a hairline tag, so it is not read as part of the label. The line's 13px high. */
+.ez-harness-tag {
+  margin-left: 2px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--paper-edge);
+  color: var(--ink-muted);
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 13px;
+  white-space: nowrap;
+}
+
+/* At the row's end, in the switch's own type: a three-stop slider with its level beside it. */
+.ez-effort {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  cursor: pointer;
+}
+
+.ez-effort[hidden] {
+  display: none;
+}
+
+.ez-effort-label {
+  color: var(--ink-faint);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 13px;
+  white-space: nowrap;
+}
+
+.ez-effort-value {
+  min-width: 11px;
+  color: var(--ink-muted);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 13px;
+  white-space: nowrap;
+}
+
+/* 56px wide with an 11px thumb, whose centre travels from 5.5px to 50.5px. The 4px track runs
+   2.5px past that on each side, round at both ends, and is filled with ink up to the thumb. */
+.ez-effort-slider {
+  --at: 0.5;
+  --span: 45px;
+  position: relative;
+  width: 56px;
+  height: 11px;
+  flex-shrink: 0;
+}
+
+.ez-effort-track {
+  position: absolute;
+  top: 50%;
+  left: 3px;
+  width: calc(var(--span) + 5px);
+  height: 4px;
+  border-radius: 2px;
+  background: #d8d3c8;
+  transform: translateY(-50%);
+}
+
+.ez-effort-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: calc(2.5px + var(--span) * var(--at));
+  border-radius: 2px 0 0 2px;
+  background: var(--ink);
+}
+
+.ez-effort-thumb {
+  position: absolute;
+  top: 50%;
+  left: calc(2.5px + var(--span) * var(--at));
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow:
+    0 0 0 0.5px rgba(0, 0, 0, 0.2),
+    0 1px 2px rgba(0, 0, 0, 0.18);
+  transform: translate(-50%, -50%);
+}
+
+/* Over the drawing, invisible, the same size: it takes the pointer and the keys. */
+.ez-effort-input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.ez-effort-input:disabled {
+  cursor: default;
+}
+
+.ez-effort-slider:has(.ez-effort-input:disabled) {
+  opacity: 0.5;
+}
+
+.ez-effort-slider:has(.ez-effort-input:focus-visible) .ez-effort-thumb {
+  outline: 2px solid var(--ring, var(--ink));
+  outline-offset: 1px;
+}
+
+/* The gold stays on the sparkle alone: the track is warm grey off and ink on. */
+.ez-switch {
+  position: relative;
+  flex-shrink: 0;
+  width: 24px;
+  height: 13px;
+  margin-left: 2px;
+  border-radius: 999px;
+  background: #b6b1a5;
+  transition:
+    background-color 0.15s ease,
+    box-shadow 0.15s ease;
+}
+
+.ez-switch::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow:
+    0 0 0 0.5px rgba(0, 0, 0, 0.1),
+    0 1px 1.5px rgba(0, 0, 0, 0.14);
+  transition: transform 0.15s ease;
+}
+
+.ez-harness[aria-checked='true'] .ez-switch {
+  background: var(--ink);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12);
+}
+
+.ez-harness[aria-checked='true'] .ez-switch::after {
+  transform: translateX(11px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ez-harness,
+  .ez-switch,
+  .ez-switch::after {
+    transition: none;
+  }
+}
+
 /* Pushed to the end of the row, and the containing block its card hangs from. */
 .ez-usage {
   position: relative;
@@ -2760,8 +2977,6 @@ body.ez-arranging .ez-frame {
   color: var(--foreground);
 }
 
-/* Under the buttons and the quietest thing on the card: it changes what happens
-   after this question, not the answer to it. */
 .ez-notice-skip {
   display: inline-flex;
   align-items: center;
@@ -2771,6 +2986,10 @@ body.ez-arranging .ez-frame {
   font-size: 11px;
   cursor: pointer;
   user-select: none;
+}
+
+.ez-notice-skip[hidden] {
+  display: none;
 }
 
 .ez-notice-skip:hover {

@@ -25,7 +25,6 @@ export interface AcpAskOption {
  *  not the same control. Answered under its own `key`. */
 export interface AcpAskCustom {
   key: string
-  text?: string
 }
 
 /** One field of an ask. `optional` is set when the schema does not list the
@@ -87,20 +86,44 @@ interface PropertyIn {
   _meta?: Record<string, unknown> | null
 }
 
-/** How `claude-agent-acp` marks a question's "Other" box. A vendor key, read
- *  through ACP's `_meta` extension point, which is what the point is for. */
+/** How `claude-agent-acp` marked a question's "Other" box, through ACP's `_meta`
+ *  extension point. Since 0.84 it sends the marker to JetBrains AIR alone, so the
+ *  box is also known by the key it has always had: its question's, plus `_custom`. */
 const CUSTOM_ANSWER_META_KEY = '_askUserQuestionCustomAnswer'
+const CUSTOM_KEY_SUFFIX = '_custom'
 
-function customAnswerFor(property: PropertyIn): string | null {
+function customAnswerFor(
+  key: string,
+  property: PropertyIn,
+  properties: Record<string, unknown>,
+): string | null {
   const bag = property._meta?.[CUSTOM_ANSWER_META_KEY] as
     { questionId?: unknown; isCustomAnswer?: unknown } | undefined
-  return bag?.isCustomAnswer === true && typeof bag.questionId === 'string' ? bag.questionId : null
+  if (bag?.isCustomAnswer === true && typeof bag.questionId === 'string') return bag.questionId
+  if (!key.endsWith(CUSTOM_KEY_SUFFIX)) return null
+  const questionId = key.slice(0, -CUSTOM_KEY_SUFFIX.length)
+  return questionId in properties ? questionId : null
 }
+
+/** Claude's question tool asks the model to append this to the option it recommends. */
+const RECOMMENDED = /\s*\(recommended\)\s*$/i
+
+const optionName = (name: string): string =>
+  RECOMMENDED.test(name) ? `${name.replace(RECOMMENDED, '')}（推薦）` : name
 
 interface TitledOption {
   const?: unknown
   title?: string
   description?: string | null
+}
+
+/** `claude-agent-acp`'s message for a multi-question form; each field carries its own question. */
+const MULTI_QUESTION_PLACEHOLDER = 'Please answer the following questions.'
+
+export function askTitle(message: string | null | undefined): string | null {
+  const text = (message ?? '').trim()
+  if (!text || text === MULTI_QUESTION_PLACEHOLDER) return null
+  return text
 }
 
 /** The fields an elicitation form asks for, in the schema's own order - or null
@@ -112,9 +135,10 @@ export function fieldsFromSchema(schema: ElicitationSchemaIn): AcpAskField[] | n
   const required = new Set(schema.required ?? [])
   const fields: AcpAskField[] = []
   const customs: { key: string; text?: string; questionId: string }[] = []
-  for (const [key, raw] of Object.entries(schema.properties ?? {})) {
+  const properties = schema.properties ?? {}
+  for (const [key, raw] of Object.entries(properties)) {
     const property = raw as PropertyIn
-    const questionId = customAnswerFor(property)
+    const questionId = customAnswerFor(key, property, properties)
     if (questionId && property.type === 'string' && !required.has(key)) {
       const text = property.title ?? property.description ?? undefined
       customs.push({ key, questionId, ...(text ? { text } : {}) })
@@ -139,7 +163,8 @@ export function fieldsFromSchema(schema: ElicitationSchemaIn): AcpAskField[] | n
       })
       continue
     }
-    owner.custom = custom
+    // Its title and description are the adapter's English boilerplate; the shell words the box.
+    owner.custom = { key: custom.key }
   }
   return fields.length ? fields : null
 }
@@ -204,7 +229,7 @@ function selectOptions(
         ? [
             {
               id: o.const,
-              name: o.title ?? o.const,
+              name: optionName(o.title ?? o.const),
               ...(o.description ? { description: o.description } : {}),
             },
           ]
@@ -212,7 +237,7 @@ function selectOptions(
     )
     return options.length ? options : null
   }
-  if (plain?.length) return plain.map((value) => ({ id: value, name: value }))
+  if (plain?.length) return plain.map((value) => ({ id: value, name: optionName(value) }))
   return null
 }
 
@@ -228,6 +253,26 @@ function defaultIf<T extends 'string' | 'number' | 'boolean'>(
   type: T,
 ): { default?: T extends 'string' ? string : T extends 'number' ? number : boolean } {
   return typeof value === type ? ({ default: value } as never) : {}
+}
+
+/** Answered under its own key, or under its "Other" box. */
+function answeredField(field: AcpAskField, answered: ReadonlySet<string>): boolean {
+  return (
+    answered.has(field.key) ||
+    ((field.kind === 'select' || field.kind === 'multiselect') &&
+      !!field.custom &&
+      answered.has(field.custom.key))
+  )
+}
+
+export function askComplete(fields: AcpAskField[], answered: ReadonlySet<string>): boolean {
+  return answered.size > 0 && fields.every((f) => f.optional || answeredField(f, answered))
+}
+
+/** One question only: `claude-agent-acp` marks every AskUserQuestion field optional, so a
+ *  multi-question card that sent on a pick left with only the first answered. */
+export function askSendsOnPick(fields: AcpAskField[], typedCustom: boolean): boolean {
+  return !typedCustom && fields.length === 1 && fields[0]?.kind === 'select'
 }
 
 /** The answers the shell sent, checked against the fields they answer. Null when

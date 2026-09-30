@@ -1,97 +1,78 @@
 ---
 name: eztweak
-description: Start an ACP-managed visual review loop on a live dev app. The user annotates the real page in the browser, and a spawned coding agent receives exact source locations, edits the code, and reports progress in the review shell. Use after generating or modifying UI the user should visually review, or when the user asks to review or annotate a running page.
+description: A design harness for a web project (增強設計), and the way into an eztweak review session. Five steps - product, stack, design, components, make - that build UI which belongs to the product and its visual system rather than to a template. Use the harness only when the user explicitly asks for 增強設計 or the design harness, never for an ordinary UI request; use the review part when the user asks to review or annotate a running page.
 metadata:
   version: 0.6.2
 ---
 
-# eztweak - live-app ACP review
+# eztweak
 
-eztweak turns a locally running dev server into an annotatable review surface. Start the session
-with an ACP agent, then let that agent own the feedback loop. It receives each annotation batch,
-edits the source, and streams its work, questions, permission prompts, and replies into the review
-shell while the app's HMR updates the page in place.
+A design harness for a web project. It runs in Claude Code, Codex, Gemini CLI or any agent that
+can read this file, and it needs no eztweak session, daemon or UI: the project is the evidence,
+the browser tool is whatever the agent has, and the two files at the project root are the
+configuration. When an eztweak review session *is* open, its daemon points each turn at the step's
+file directly and this file is not on the path.
 
-You do not need eztweak installed globally. Invoke it as `npx -y eztweak@latest ...`.
+## The harness
 
-## When to use
+| Step | File | Runs when | Produces |
+| --- | --- | --- | --- |
+| 1 product | [reference/product.md](reference/product.md) | no `PRODUCT.md` | `PRODUCT.md` |
+| 2 stack | [reference/stack.md](reference/stack.md) | `.eztweak/config.json` is missing, stale, or names no browser tool | `.eztweak/config.json`: the stack, the design system and component library in use, the browser tool |
+| 3 design | [reference/design.md](reference/design.md) | no `DESIGN.md` | `DESIGN.md`: the visual language in broad strokes, a direction rather than a spec, no components |
+| 4 components | [reference/components.md](reference/components.md) | `.eztweak/config.json` records no `components.primitives` | `DESIGN.md`'s language made concrete in the design system, and the component set written in the project's own library |
+| 5 make | [reference/make.md](reference/make.md) | a request to change or build UI, or an explore round asking for variants | the change, or the variants |
 
-- You just generated or significantly changed a page or component and the user should review it visually
-- The user wants to give feedback by pointing at things instead of describing them in chat
-- You are iterating on visual, copy, or layout details where prose descriptions are lossy
+Steps 1 to 4 configure the project; 5 is the work, and it ends by having an independent reviewer
+judge what it made ([reference/critique.md](reference/critique.md)) and letting `PRODUCT.md`,
+`DESIGN.md` and this user's taste, `.eztweak/taste.md` - which the work is built to and judged by -
+learn from the request. Each
+step reads what the ones before it produced, and a step never rewrites another step's file. A step
+whose file is not there yet says so in one line and is skipped.
 
-## Agent profile
+## When the harness applies
 
-Use the ACP profile matching the current coding-agent environment unless the user explicitly names
-another ACP agent or command:
+Only in a turn that explicitly turns it on, never by default. Inside an eztweak review session,
+that is a prompt saying `增強設計 (the design harness) is on for this turn.` Outside a session, it
+is a request in which the user asks for 增強設計 or the design harness by name.
 
-- Claude Code: `claude`
-- Codex: `codex`
-- Gemini CLI: `gemini`
+Any other turn is handled as if this skill had never been read, even later in a conversation where
+the harness was on: no harness steps, no designing by `PRODUCT.md` or `DESIGN.md`, no review by
+its rules, and no edits to `PRODUCT.md`, `DESIGN.md` or `.eztweak/config.json` unless the request
+asks for one.
 
-Every skill invocation uses ACP mode. Never omit `--agent`, never run `eztweak poll`, and never fall
-back to Poll mode after an ACP failure. If the environment does not identify a supported profile and
-the user did not provide an ACP command, ask them which ACP agent to use.
+When it applies, talk to the user in the language they write in and in their words - 增強設計,
+設計規範, 靈感 - never the harness's own: harness, step or file names, precedent, inspire, or the
+review and its scores, which are the agent's business and not theirs.
 
-## Workflow
+- **Both files exist: in the harness.** Read `PRODUCT.md` and `DESIGN.md` before any visual change.
+  Keep to `PRODUCT.md`; take `DESIGN.md` as a direction to start from, not a rule to obey. An
+  ordinary change edits code only; the two
+  files change only as step 5 says. Run step 5 for the request. When `.eztweak/config.json` is
+  missing or stale, run step 2 first; when it records no `components.primitives`, run step 4
+  first.
+- **Either is missing: ask before anything else**, because the harness cannot run without it. Ask
+  the user, word for word, naming only the file that is missing when one exists:
 
-1. Make sure the dev server is running. Never start a second instance when one is already up.
-2. From the project root, run:
+  > 啟用增強設計：增強設計會建立 PRODUCT.md 與 DESIGN.md，是否繼續？
 
-   ```sh
-   npx -y eztweak@latest <url> --agent <profile>
-   ```
+  with two options in this order: 「繼續」 and 「取消」. Use your question tool if you have
+  one; otherwise ask in your reply and end the turn.
+  - **Yes:** walk steps 1 to 4 in order, starting at the first one whose output is missing, then
+    do the work through step 5.
+  - **No:** the harness cannot be used. Do the work as you would without this skill.
 
-   Use the full URL of the page to review, for example:
+## Opening an eztweak review
 
-   ```sh
-   npx -y eztweak@latest http://localhost:5173/pricing --agent codex
-   ```
+When the user wants to annotate a running page in the browser and have the feedback come back as
+exact source locations, open a review session: [reference/start.md](reference/start.md). This is
+the one part of the skill that needs eztweak installed.
 
-   The working directory matters because the session and spawned agent are scoped to that project.
-   If the CLI says the user previously ended the session, do not pass `--reopen` unless the user
-   explicitly asked to review again.
-3. Once the CLI reports the session and agent, tell the user the review shell is ready. Do not start
-   a parallel feedback loop or shadow the ACP agent's edits. The daemon delivers queued and future
-   batches automatically, one turn at a time. The shell owns the turn: the user can stop one that is
-   heading the wrong way (the Stop button, or Cmd/Ctrl+.), `/new` in the note box clears the agent's
-   context and carries the review on in a fresh session, and a batch sent mid-turn queues rather
-   than interrupting - so do not tell the user to wait for a turn to finish before annotating.
-4. The user ends the review from the shell. Do not end or stop a live session unless they ask.
+## Inside a review session
 
-## Failures and switching agents
-
-- If the ACP command is missing, unauthenticated, or exits, report that error and help fix that ACP
-  setup. Do not substitute Poll mode.
-- A live session can own only one ACP agent. If the CLI refuses a different agent, do not stop the
-  daemon automatically because it may hold other sessions. Ask the user whether to end the current
-  session or stop the daemon before switching.
-- Do not retry a failing launch indefinitely. After one retry for a transient failure, report the
-  blocker and preserve the session state.
-
-## Source anchors
-
-Projects using Vite get exact `file:line` anchors by adding the bundled plugin:
-
-```ts
-// vite.config.ts
-import { eztweakSource } from 'eztweak/vite'
-// plugins: [eztweakSource(), ...]
-```
-
-Suggest this dev-only plugin when feedback repeatedly arrives without exact source locations. It has
-no production-build impact.
-
-## Design source of truth
-
-A project with a `DESIGN.md` at its root (the format: https://github.com/google-labs-code/design.md)
-has its design system read by the review agent before every visual change. A project without one is
-offered one by the review agent itself, once per conversation, before it acts on the first batch;
-the user answers in the shell. Do not create the file ahead of the review to pre-empt the offer, and
-do not answer it on the user's behalf.
-
-## Commands
-
-- `npx -y eztweak@latest <url> --agent <profile-or-command> [--reopen]` - open or resume an ACP-managed review
-- `npx -y eztweak@latest status` - inspect local daemon sessions
-- `npx -y eztweak@latest stop` - stop the local daemon only when the user explicitly asks
+The daemon has done the routing: its prompt says whether the turn is a feedback batch or an
+explore round, and names the file to read. Do not route again. A batch adds what a bare request
+cannot: the page's `url`, the annotated `items` with their `anchor` (source `file:line`, selector,
+viewport), `references`, and `attachments`. An explore adds one element's capture - its markup,
+computed styles, slot and the page's tokens - and takes each variant back through a tool, editing
+no file. The making step says where each of those is used.

@@ -1,3 +1,4 @@
+import { randomBytes, timingSafeEqual } from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import { accessSync, constants, readFileSync } from 'node:fs'
 import { type Server, createServer } from 'node:http'
@@ -26,11 +27,30 @@ import { AGENT_PROFILES, type AgentProfile, agentBrandFor, agentProfileFor } fro
 import { clearAgentRecord, reapOrphanedAgents } from './agent-children.js'
 import { attachmentIds, parseReferences, sanitizeAnchor, sanitizeCapture } from './anchor.js'
 import {
-  type DesignMdState,
-  designMdBrief,
-  designMdExploreRule,
-  designMdState,
-} from './design-md.js'
+  DESIGN_EFFORTS,
+  type DesignEffort,
+  type Inspire,
+  type Truth,
+  type TruthFile,
+  harnessReady,
+  missingTruth,
+  setupBrief,
+  skillDir,
+  skillReference,
+  truthBrief,
+  truthExploreRule,
+  truthFilesZh,
+  truthState,
+} from './truth.js'
+import { historyBrief } from './history.js'
+import { replyLanguageLine } from './reply-language.js'
+import { type PageStorage, parsePageStorage, storageState } from './page-state.js'
+import {
+  rememberDesignEffort,
+  rememberedDesignEffort,
+  rememberedDesignHarness,
+} from './preferences.js'
+import { readInspireToken } from './credentials.js'
 import { injectOverlay, wantsHtml } from './inject.js'
 import type { AttachmentLocator } from './label.js'
 import { shortAnchor, toAgentAttachments, toAgentItem, toConversationItem } from './label.js'
@@ -80,6 +100,20 @@ function agentInstalled(profile: AgentProfile, env = process.env): boolean {
 }
 
 const distDir = dirname(fileURLToPath(import.meta.url))
+const SKILL_DIR = skillDir(distDir)
+
+const shellWord = (w: string) => (/^[\w@%+=:,./-]+$/.test(w) ? w : `'${w.replace(/'/g, `'\\''`)}'`)
+/** How this daemon's own CLI is run, so the agent never reaches for a different version. */
+const SELF_CLI = [process.execPath, ...process.execArgv, process.argv[1] ?? '']
+  .filter(Boolean)
+  .map(shellWord)
+  .join(' ')
+
+/** Read per turn: a login mid-review should reach the next batch. */
+function inspireAccess(): Inspire {
+  return readInspireToken() ? { cli: SELF_CLI } : 'unavailable'
+}
+
 const asset = (name: string) => readFileSync(join(distDir, name))
 
 /** The client percent-encodes it, because a filename is free to hold bytes no
@@ -150,6 +184,8 @@ interface SnapshotWire {
    *  advertised, so the page is told rather than left to guess: a command in the
    *  menu that always fails is worse than one that is not offered. */
   canExplore?: true
+  /** ACP mode only: the harness reaches the agent through this daemon's prompts. */
+  designHarness?: boolean
 }
 
 /** One conversation as the picker draws it. The count is what tells two of them
@@ -211,8 +247,12 @@ function acpPrompt(
   feedback: Extract<PollResult, { type: 'feedback' }>,
   skills: string[],
   agent: string,
-  designMd: DesignMdState,
+  truth: Truth,
+  history: string[] = [],
+  effort: DesignEffort = 'high',
+  language: string = replyLanguageLine([]),
 ): string {
+  if (feedback.setup) return setupPrompt(truth, feedback.url, language)
   // The markers the composer left behind, spent now that the agent is known. The
   // record keeps `[skill n]`, which belongs to nobody; what goes over the wire is
   // the name in the language this agent reads.
@@ -236,10 +276,20 @@ function acpPrompt(
     // rest still reach the agent, named in the user's own sentence below, where
     // they read as what they are - something the user asked for.
     ...(skills.length ? [`${skillPrefix(agent)}${skills[0]}`, ''] : []),
-    // Before the batch, because when there is a question in it the question
-    // comes first - "before you act on the batch below" has to be true.
-    ...(designMd === 'quiet' ? [] : [...designMdBrief(designMd), '']),
+    // Must precede the batch: a missing file's brief says "before you act on the batch below".
+    ...(() => {
+      const brief = truthBrief(truth, SKILL_DIR, inspireAccess(), effort)
+      return brief.length ? [...brief, ''] : []
+    })(),
+    ...(history.length ? [...history, ''] : []),
     'The user reviewed the running app in their browser and sent this feedback batch.',
+    // With a file missing, the brief above already names make.md.
+    ...(harnessReady(truth)
+      ? [
+          `Before your first change in this conversation, read \`${skillReference(SKILL_DIR, 'make')}\`:`,
+          'it is how design work is done here.',
+        ]
+      : []),
     'Each item resolves to source: trust `anchor.source` (file:line) when present, else',
     'use `anchor.components` / `anchor.section` / `anchor.selector` / `anchor.text`.',
     '`[file n]` in a comment is `attachments[n-1]` (read the file at `path`);',
@@ -249,10 +299,35 @@ function acpPrompt(
     "root with styles of its own. Build that look for real, in the project's own components,",
     'tokens and conventions, against the element the reference anchors to.',
     'Apply every item, then reply with what you changed, item by item, one short line each.',
+    'Change only what the items ask for. Anything else you notice goes in your reply as a',
+    'note, not into the code.',
+    language,
+    // An agent once stashed the user's in-progress work to verify its change.
+    'Do not stash, checkout, reset or commit in this repository unless the user asks; verify your',
+    'changes in place.',
     '',
     JSON.stringify(spoken, null, 2),
   ].join('\n')
 }
+
+function setupPrompt(truth: Truth, page: string, language: string): string {
+  return [
+    ...setupBrief(truth, SKILL_DIR, inspireAccess(), page),
+    language,
+    '',
+    'Do not stash, checkout, reset or commit in this repository unless the user asks.',
+  ].join('\n')
+}
+
+/** A round's variants tend to keep what the element already does and vary its surface; naming
+ *  those decisions first is what makes the variants differ in them. */
+const EXPLORE_DECISIONS = [
+  '- Before the first variant, name to yourself the decisions the element makes now: its size',
+  '  against its siblings, whether it is raised, its ground, what leads, how it is grouped, how much',
+  '  it shows. Give each variant a different answer to at least one of them. A decision every',
+  "  variant keeps is one the round never explored: keep one only because the user's direction or",
+  '  a rule here asks for it.',
+]
 
 /** What an explore branch is asked for.
  *
@@ -268,7 +343,9 @@ function explorePrompt(
   round: ExploreState,
   capture: ExploreCapture,
   files: AttachmentLocator,
-  designMd: DesignMdState,
+  truth: Truth,
+  earlier: { name: string; note?: string }[],
+  language: string,
 ): string {
   const attachments = toAgentAttachments(round.attachments, files)
   const styles = Object.entries(capture.styles ?? {})
@@ -286,7 +363,7 @@ function explorePrompt(
     `The user is exploring UI variants of one element on the page they are reviewing: ${round.label}.`,
     round.direction
       ? `They asked for: ${round.direction}`
-      : 'They gave no direction, so range across genuinely different treatments rather than varying one thing.',
+      : 'They gave no direction: they want to see how it could be arranged to read more easily and look cleaner. Range across genuinely different arrangements - what leads, what recedes, how it is grouped, how much it shows - rather than varying one thing.',
     ...(attachments?.length
       ? [
           '',
@@ -307,6 +384,13 @@ function explorePrompt(
           '```json',
           JSON.stringify(round.references, null, 2),
           '```',
+        ]
+      : []),
+    ...(earlier.length
+      ? [
+          '',
+          'Earlier rounds on this element already showed the user these. Offer directions that are not them:',
+          ...earlier.map((v) => `- ${v.name}${v.note ? `: ${v.note}` : ''}`),
         ]
       : []),
     '',
@@ -395,7 +479,7 @@ function explorePrompt(
     '## Rules',
     '',
     '- Do not edit, create or delete any file. Nothing here is being implemented.',
-    ...designMdExploreRule(designMd),
+    ...truthExploreRule(truth, SKILL_DIR, inspireAccess()),
     '- Each variant is exactly one root element, at most one `<style>` inside it.',
     '- **No JavaScript** - no `<script>`, no inline handlers, no `javascript:` urls. Interaction is done',
     '  with the platform: `:hover`/`:focus-visible`/`:active`; `<details>`; `<input type=checkbox>` +',
@@ -405,6 +489,7 @@ function explorePrompt(
     '- No `<iframe>`, `<link>`, `<object>`, `<embed>`.',
     '- The variants stand in for the real element on the page, so keep them the same kind of thing:',
     '  the same text, the same purpose, a different treatment.',
+    ...EXPLORE_DECISIONS,
     '',
     'Produce 4 variants. Send each one with the `explore_variant` tool the moment it is ready,',
     'rather than writing them all out first: each call puts another option in front of the user.',
@@ -412,6 +497,51 @@ function explorePrompt(
     'This conversation is a branch. The user may keep talking to you here about the variants, and',
     'nothing said here reaches the review they branched from unless they adopt one.',
     'When all four are sent, reply with one short line and stop.',
+    language,
+  ].join('\n')
+}
+
+/** A message sent in an explore branch after its first turn. It carries the round on: a batch's
+ *  framing here - apply the items, edit the code, and the review's history - told the agent the
+ *  variant tool was not for this turn. */
+function exploreFollowUpPrompt(
+  round: ExploreState,
+  feedback: Extract<PollResult, { type: 'feedback' }>,
+  truth: Truth,
+  language: string,
+): string {
+  const extra = {
+    ...(feedback.items.length ? { items: feedback.items } : {}),
+    ...(feedback.attachments?.length ? { attachments: feedback.attachments } : {}),
+    ...(feedback.references?.length ? { references: feedback.references } : {}),
+  }
+  return [
+    `The user is still in this branch, exploring ${round.label}, and wrote:`,
+    '',
+    `> ${(feedback.note ?? '').trim() || '(no words, only what is attached below)'}`,
+    ...(Object.keys(extra).length ? ['', '```json', JSON.stringify(extra, null, 2), '```'] : []),
+    '',
+    'This is the same round. When they want something to look at, send it with the',
+    '`explore_variant` tool, which is still yours in this branch: each call adds to the variants',
+    'already on their page. Answer in words only what needs no variant.',
+    ...(round.variants.length
+      ? [
+          '',
+          'On their page already, which new ones must not repeat:',
+          ...round.variants.map((v) => `- ${v.name}${v.note ? `: ${v.note}` : ''}`),
+        ]
+      : []),
+    '',
+    '## Rules',
+    '',
+    '- Everything the first message of this branch said still holds: do not edit, create or delete',
+    '  any file; one root per variant, at most one `<style>`, no JavaScript.',
+    ...truthExploreRule(truth, SKILL_DIR, inspireAccess()),
+    ...EXPLORE_DECISIONS,
+    '',
+    'When they ask for more without saying how many, send four. When what they asked for is sent,',
+    'reply with one short line and stop.',
+    language,
   ].join('\n')
 }
 
@@ -442,6 +572,9 @@ function turnEndNote(stopReason: string): string {
  *  it - the same thing the shell's update card promises in advance, in the same
  *  words, because it is the same event seen from either side of it. */
 const AGENT_RESTARTED_NOTE = '已開啟新 session，之前的對話不會延續'
+const HARNESS_SETUP_DROPPED = '已關閉增強設計，尚未開始的建立已取消'
+const EXPLORE_EMPTY = '這一輪探索沒有產出任何 variant，已回到主對話'
+const EXPLORE_OVER = '探索已結束，已回到主對話'
 
 /** What the thread is told when the review changes agent. Names the one it moved
  *  to, because the thread above belongs to a different one and the reader needs
@@ -481,6 +614,12 @@ class SessionRuntime {
    *  because a prompt to a session that is not up yet is a prompt that is
    *  dropped - see `deliverToAcp`. */
   private pendingExplore: string | null = null
+  private designEffort: DesignEffort = 'medium'
+  /** What the user's browser signs the page in with, for the agent's own to open it the same way.
+   *  Held in memory only, and handed out only for the token in the agent's environment. */
+  private pageCookies: string | null = null
+  private pageStorage: PageStorage | null = null
+  private readonly pageStateToken = randomBytes(32).toString('base64url')
   port = 0
   private server!: Server
   private sseClients = new Set<Response>()
@@ -522,6 +661,16 @@ class SessionRuntime {
     this.store.sweepAttachments()
     // Likewise: a round mid-turn when the last daemon went down has no turn now.
     this.store.settleExplores()
+    // Remembered per project; without its files and no setup to redeliver, on would build them unasked.
+    const remembered = rememberedDesignHarness(project) ?? this.store.designHarness
+    const complete = !missingTruth(truthState(project, remembered)).length
+    this.store.restoreDesignHarness(remembered && (complete || this.store.setupPending()))
+    this.designEffort = rememberedDesignEffort(project) ?? 'medium'
+    // Before the agent opens, so it opens on the main line rather than in the spent branch.
+    if (this.store.spentBranch()) {
+      this.store.switchChat(this.store.mainLineOf(this.store.currentChat.id))
+      this.store.appendConversation({ role: 'system', text: EXPLORE_OVER, ts: Date.now() })
+    }
     this.bus.setMaxListeners(50)
   }
 
@@ -546,6 +695,12 @@ class SessionRuntime {
     await closed
   }
 
+  /** Off the live agent, not the record: the record holds what was asked for. */
+  get acpCommand(): string | undefined {
+    const acp = this.acp?.snapshot()
+    return acp && acp.state !== 'exited' ? acp.agent : undefined
+  }
+
   /** Someone is attached — keeps the idle reaper off this session. */
   get inUse(): boolean {
     return this.sseClients.size > 0 || this.pollWaiters.size > 0
@@ -553,6 +708,17 @@ class SessionRuntime {
 
   touch(): void {
     this.lastActivity = Date.now()
+  }
+
+  /** The harness and its effort are read when a turn starts, so they hold still until it ends. */
+  private turnRunning(): boolean {
+    return this.acp?.snapshot().state === 'working'
+  }
+
+  private holdsPageStateToken(authorization: string | undefined): boolean {
+    const given = Buffer.from(authorization ?? '')
+    const expected = Buffer.from(`Bearer ${this.pageStateToken}`)
+    return given.length === expected.length && timingSafeEqual(given, expected)
   }
 
   snapshot(): SnapshotWire {
@@ -580,7 +746,14 @@ class SessionRuntime {
         : {}),
       ...(this.agentProgress ? { agentProgress: this.agentProgress } : {}),
       ...(this.agentBusy && this.activeBatch ? { activeBatchId: this.activeBatch } : {}),
-      ...(this.acp ? { acp: this.acp.snapshot(), chats: this.chatsWire() } : {}),
+      ...(this.acp
+        ? {
+            acp: this.acp.snapshot(),
+            chats: this.chatsWire(),
+            designHarness: this.store.designHarness,
+            designEffort: this.designEffort,
+          }
+        : {}),
       ...(update ? { update } : {}),
       ...(live.length ? { explores: live } : {}),
       ...(this.canExplore ? { canExplore: true as const } : {}),
@@ -695,6 +868,10 @@ class SessionRuntime {
       // on a different one.
       mcpServers: () => this.exploreMcp.serverEntries(this.port),
       ownTool: isExploreTool,
+      env: {
+        EZTWEAK_PAGE_STATE: `http://127.0.0.1:${this.port}${URL_PREFIX}/api/page-state`,
+        EZTWEAK_PAGE_STATE_TOKEN: this.pageStateToken,
+      },
       // Delivery rides on every state change: the moment the agent first goes
       // idle - or comes back idle - whatever is queued goes out.
       onChange: () => {
@@ -752,6 +929,8 @@ class SessionRuntime {
         // including a cancelled one: the user stopped it, and handing the batch
         // straight back would undo that.
         for (const id of delivered) this.store.ack(id)
+        // Before delivering, so a batch queued behind the round is answered on the main line.
+        this.leaveSpentBranch(EXPLORE_EMPTY)
         this.deliverToAcp()
         this.broadcast()
       },
@@ -852,6 +1031,38 @@ class SessionRuntime {
    *  above no longer counts is still history above. The log on disk is untouched
    *  either way: it is the record of the review, and windowing it costs nothing
    *  while deleting it would cost the only copy. */
+  /** Returns what is missing when a file is absent and the user has not agreed to create it. */
+  setHarness(on: boolean, create: boolean): { missing: TruthFile[] } | null {
+    if (!on) {
+      this.store.setDesignHarness(false)
+      for (const batchId of this.store.settleUndeliveredSetup()) {
+        this.store.appendConversation({
+          role: 'system',
+          text: HARNESS_SETUP_DROPPED,
+          ts: Date.now(),
+          batchId,
+        })
+      }
+      this.broadcast()
+      return null
+    }
+    const missing = missingTruth(truthState(this.project, true))
+    if (missing.length && !create) return { missing }
+    this.store.setDesignHarness(true)
+    if (missing.length) {
+      const batch = this.store.sendSetup()
+      this.store.appendConversation({
+        role: 'user',
+        text: `啟用增強設計，建立 ${truthFilesZh(missing)}`,
+        ts: Date.now(),
+        batchId: batch.batchId,
+      })
+      this.deliverToAcp()
+    }
+    this.broadcast()
+    return null
+  }
+
   newAcpChat(): boolean {
     // Already on a fresh one. Asking again is asking for what is already there,
     // and honouring it literally would pile up empty conversations in the picker
@@ -947,12 +1158,16 @@ class SessionRuntime {
         ? { references: round.references.map((r) => ({ n: r.n, label: r.label })) }
         : {}),
     })
+    const truth = truthState(this.project, this.store.designHarness, this.store.harnessSeen())
     this.pendingExplore = explorePrompt(
       round,
       input.capture,
       this.store,
-      designMdState(this.project, this.store.currentChat),
+      truth,
+      this.store.earlierVariants(round),
+      replyLanguageLine([input.direction ?? '', ...this.store.userWords()]),
     )
+    if (harnessReady(truth)) this.store.markHarnessSeen()
     this.deliverToAcp()
     this.broadcast()
     return round
@@ -993,13 +1208,13 @@ class SessionRuntime {
     const round = this.roundOf(this.store.currentChat.id)
     if (!round || round.status !== 'generating') return
     this.store.endExplore(round.id, status)
-    if (!round.variants.length && status === 'done') {
-      this.store.appendConversation({
-        role: 'system',
-        text: '這一輪沒有產出任何 variant',
-        ts: Date.now(),
-      })
-    }
+  }
+
+  /** A closed round takes its pill, the only way out of the branch, with it. */
+  private leaveSpentBranch(note: string): void {
+    if (!this.store.spentBranch()) return
+    if (!this.switchAcpChat(this.store.mainLineOf(this.store.currentChat.id))) return
+    this.store.appendConversation({ role: 'system', text: note, ts: Date.now() })
   }
 
   /** The review has left the branch, so the round is done with: the url goes, and
@@ -1009,6 +1224,25 @@ class SessionRuntime {
     if (!round) return
     this.exploreMcp.close(round.id)
     if (round.status === 'generating') this.store.endExplore(round.id, 'cancelled')
+  }
+
+  /** A branch is never come back to, so every round whose branch is off the way to `chatId` is
+   *  over, as 退出探索 would end it: the page goes back to the real element and the strip lets it
+   *  go. A round up the way stays, since the review is still inside its branch. */
+  private dismissRoundsLeftBehind(chatId: string): void {
+    const chats = this.store.chats
+    const way = new Set<string>()
+    let at = chats.find((c) => c.id === chatId)
+    while (at && !way.has(at.id)) {
+      way.add(at.id)
+      const parent: string | undefined = at.parentChatId
+      at = chats.find((c) => c.id === parent)
+    }
+    for (const round of this.store.explores) {
+      if (round.status === 'dismissed' || way.has(round.chatId)) continue
+      this.exploreMcp.close(round.id)
+      this.store.dismissExplore(round.id)
+    }
   }
 
   /** A turn is about to run in the conversation being read, so if that
@@ -1054,8 +1288,12 @@ class SessionRuntime {
     const round = this.store.explores.find((e) => e.id === id)
     if (!round) return false
     if (variantId && !round.variants.some((v) => v.id === variantId)) return false
-    const parent = this.store.chats.find((c) => c.id === round.chatId)?.parentChatId
-    if (parent && this.store.currentChat.id === round.chatId && !this.switchAcpChat(parent)) {
+    const mainLine = this.store.mainLineOf(round.chatId)
+    if (
+      mainLine !== round.chatId &&
+      this.store.currentChat.id === round.chatId &&
+      !this.switchAcpChat(mainLine)
+    ) {
       return false
     }
     if (variantId) this.store.markExploreAdopted(id, variantId)
@@ -1101,6 +1339,7 @@ class SessionRuntime {
       this.store.switchChat(from)
       return false
     }
+    this.dismissRoundsLeftBehind(to)
     this.agentBusy = false
     this.activeBatch = null
     this.activeSkills = []
@@ -1141,9 +1380,34 @@ class SessionRuntime {
     // a round still settled when it does would refuse it. The explore's own turn
     // above needs none of this - `startExplore` opened the round generating.
     this.resumeRound()
-    const designMd = designMdState(this.project, this.store.currentChat)
-    if (designMd === 'missing') this.store.markDesignMdOffered()
-    this.acp.prompt(acpPrompt(outcome, this.activeSkills, this.acp.snapshot().agent, designMd))
+    const chat = this.store.currentChat
+    const truth = truthState(this.project, this.store.designHarness, this.store.harnessSeen())
+    const round = this.roundOf(chat.id)
+    if (round && !outcome.setup) {
+      this.acp.prompt(
+        exploreFollowUpPrompt(round, outcome, truth, replyLanguageLine(this.store.userWords())),
+      )
+      if (harnessReady(truth)) this.store.markHarnessSeen()
+      return
+    }
+    // History serves make's learning step: harness on, feedback turns only.
+    const history =
+      truth.enabled && !outcome.setup && !chat.historyGivenAt
+        ? historyBrief(this.store.earlierChatsSaid())
+        : []
+    if (history.length) this.store.markHistoryGiven()
+    this.acp.prompt(
+      acpPrompt(
+        outcome,
+        this.activeSkills,
+        this.acp.snapshot().agent,
+        truth,
+        history,
+        this.designEffort,
+        replyLanguageLine(this.store.userWords()),
+      ),
+    )
+    if (truth.enabled) this.store.markHarnessSeen()
   }
 
   private wakePollers(): void {
@@ -1174,6 +1438,7 @@ class SessionRuntime {
       items: batch.items.map((a) => toAgentItem(a, this.store)),
       ...(attachments ? { attachments } : {}),
       ...(batch.references?.length ? { references: batch.references } : {}),
+      ...(batch.setup ? { setup: true as const } : {}),
     }
   }
 
@@ -1236,6 +1501,19 @@ class SessionRuntime {
     api.post(MCP_ROUTE, this.exploreMcp.handler())
 
     api.get('/state', (_req, res) => res.json(this.snapshot()))
+
+    api.post('/page-state', (req, res) => {
+      const storage = parsePageStorage(req.body)
+      if (!storage) return res.status(400).json({ error: 'not a page storage report' })
+      this.pageStorage = storage
+      res.json({ ok: true })
+    })
+    api.get('/page-state', (req, res) => {
+      if (!this.holdsPageStateToken(req.get('authorization'))) return res.sendStatus(401)
+      res
+        .set('cache-control', 'no-store')
+        .json(storageState(this.targetOrigin, this.pageCookies, this.pageStorage))
+    })
 
     api.get('/events', (req, res) => {
       res.set({
@@ -1605,6 +1883,31 @@ class SessionRuntime {
     })
 
     // SPIKE: clear the agent's context and carry on in a fresh session.
+    api.post('/harness', (req, res) => {
+      const on = req.body?.on
+      if (typeof on !== 'boolean') return res.status(400).json({ error: 'on must be a boolean' })
+      if (on && !this.acp) {
+        return res.status(409).json({ error: 'no ACP agent is ready on this session' })
+      }
+      if (this.turnRunning()) return res.status(409).json({ error: 'a turn is running' })
+      const refused = this.setHarness(on, req.body?.create === true)
+      if (refused) return res.status(409).json({ error: 'missing', missing: refused.missing })
+      res.json({ on })
+    })
+
+    // Per project, like the switch: how much of make.md the next batch runs.
+    api.post('/harness/effort', (req, res) => {
+      const effort = req.body?.effort
+      if (!DESIGN_EFFORTS.includes(effort)) {
+        return res.status(400).json({ error: `effort must be one of ${DESIGN_EFFORTS.join(', ')}` })
+      }
+      if (this.turnRunning()) return res.status(409).json({ error: 'a turn is running' })
+      this.designEffort = effort
+      rememberDesignEffort(this.project, effort)
+      this.broadcast()
+      res.json({ effort })
+    })
+
     api.post('/acp/new', (_req, res) => {
       if (!this.newAcpChat()) {
         return res.status(409).json({ error: 'no ACP agent is ready on this session' })
@@ -1754,9 +2057,10 @@ class SessionRuntime {
       changeOrigin: true,
       ws: true,
     })
-    app.use((req, res, next) =>
-      wantsHtml(req.headers.accept) ? htmlProxy(req, res, next) : rawProxy(req, res, next),
-    )
+    app.use((req, res, next) => {
+      this.pageCookies = req.headers.cookie ?? null
+      return wantsHtml(req.headers.accept) ? htmlProxy(req, res, next) : rawProxy(req, res, next)
+    })
 
     // Prefer the port this session last held so an already-open shell tab only
     // needs a reload after a daemon restart, but never fail over a taken port.
@@ -1989,6 +2293,8 @@ export async function daemonMain(version: string, opts: DaemonOptions = {}): Pro
       port: runtime.port,
       shellUrl: runtime.shellUrl(parsed.pathname + parsed.search),
       state: runtime.store.session.state,
+      // What the session runs, not what this call passed: a restored session keeps its agent.
+      ...(runtime.acpCommand ? { agent: runtime.acpCommand } : {}),
     })
   })
 

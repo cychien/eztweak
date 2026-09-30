@@ -32,6 +32,7 @@ import {
   type AcpAskAnswers,
   type AcpAskField,
   type ElicitationSchemaIn,
+  askTitle,
   fieldsFromSchema,
   validateAnswers,
 } from './acp-ask.js'
@@ -61,7 +62,8 @@ export type { AcpAskAnswers, AcpAskField, AcpAskOption } from './acp-ask.js'
 export interface AcpAsk {
   id: string
   kind: 'permission' | 'question'
-  title: string
+  /** Absent when the agent's message was boilerplate. */
+  title?: string
   fields: AcpAskField[]
 }
 
@@ -131,6 +133,8 @@ export interface AcpAgentOptions {
   /** Shell command that starts an ACP agent on stdio. */
   command: string
   cwd: string
+  /** Added to the agent's environment, and so to every command it runs. */
+  env?: Record<string, string>
   onChange: () => void
   /** The turn is over: its accumulated message - the agent's reply to the batch,
    *  which a cancelled turn can still have part of - and why it stopped. */
@@ -260,7 +264,7 @@ export class AcpAgent {
       detached: true,
       cwd: opts.cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: process.env,
+      env: { ...process.env, ...opts.env },
     })
     if (this.child.pid) trackAgent(this.child.pid, opts.command)
     this.child.stderr?.on('data', (chunk: Buffer) => {
@@ -768,7 +772,12 @@ export class AcpAgent {
     if (params.mode !== 'form') return { action: 'decline' }
     const fields = fieldsFromSchema(params.requestedSchema as ElicitationSchemaIn)
     if (!fields) return { action: 'decline' }
-    const outcome = await this.pendAsk({ kind: 'question', title: params.message, fields })
+    const title = askTitle(params.message)
+    const outcome = await this.pendAsk({
+      kind: 'question',
+      ...(title ? { title } : {}),
+      fields,
+    })
     if (!outcome) return { action: 'cancel' }
     if ('declined' in outcome) return { action: 'decline' }
     return { action: 'accept', content: outcome.answers }

@@ -6,12 +6,14 @@
  *  have to be read past `AcpAgent`, which owns the child's stdio.
  *
  *  Prompt vocabulary:
+ *    NOVARIANTS  in an explore turn, send no variant at all
  *    SLOW      park the turn until cancelled, then stop with `cancelled` - in an
  *              explore turn, after its variants have been sent
  *    CHUNKS    stream CHUNK_COUNT message chunks back-to-back, then end the turn
  *    CONFIGPUSH  push a `config_option_update` nobody asked for, then end the turn
  *    MODEPUSH  push a bare `current_mode_update`, then end the turn
  *    REFUSEHAIKU  from here on, take the request to switch to haiku and decline it
+ *    PAGESTATE  reply with the page-state url and token eztweak put in its environment
  *
  *  Env: EZ_FAKE_NO_RESUME     do not advertise session/resume
  *       EZ_FAKE_REFUSE_RESUME advertise it, then refuse every resume
@@ -323,6 +325,15 @@ const app = agent({ name: 'fake-acp-agent' })
       await say('armed')
       return { stopReason: 'end_turn' }
     }
+    if (text.includes('PAGESTATE')) {
+      await say(
+        JSON.stringify({
+          url: process.env.EZTWEAK_PAGE_STATE,
+          token: process.env.EZTWEAK_PAGE_STATE_TOKEN,
+        }),
+      )
+      return { stopReason: 'end_turn' }
+    }
     if (text.includes('REPORT')) {
       await say(
         JSON.stringify({
@@ -396,7 +407,9 @@ const app = agent({ name: 'fake-acp-agent' })
         await say(`not allowed: ${picked}`)
         return { stopReason: 'end_turn' }
       }
-      const variants = text.includes('BADVARIANTS')
+      const variants = text.includes('NOVARIANTS')
+        ? []
+        : text.includes('BADVARIANTS')
         ? [
             { name: 'two roots', html: '<div>a</div><div>b</div>' },
             { name: 'scripted', html: '<div><script>go()</script></div>' },

@@ -129,6 +129,8 @@ test('an explore runs on a branch and its variants come back through the tool', 
   // can write `width: 100%` with padding the way the page does.
   const asked = prompts.map((p) => p.text).find((t) => t.includes('更緊湊'))!
   assert.match(asked, /`box-sizing` is `border-box` on every element inside the root/)
+  // Variants that each keep what the element already does differ only in surface.
+  assert.match(asked, /name to yourself the decisions the element makes now/)
   assert.equal((await state(port)).acp?.ask, undefined)
 })
 
@@ -159,12 +161,26 @@ test('leaving a branch ends the round it was running', async () => {
 
   await api(port, '/acp/chat', { id: parent })
 
-  const settled = await waitFor(async () => {
-    const round = (await state(port)).explores?.find((e) => e.id === exploreId)
-    return round && round.status !== 'generating' ? round : null
-  }, 'the round to be settled')
-  assert.equal(settled.status, 'cancelled')
-  assert.equal(settled.variants.length, 2, 'what had already arrived stays')
+  // Gone from the strip, as a dismissed round is: going back is 退出探索.
+  await waitFor(
+    async () => !(await state(port)).explores?.some((e) => e.id === exploreId),
+    'the round to be let go',
+  )
+})
+
+test('a round deeper in stands while the review is inside its branch, and all go on the way out', async () => {
+  const port = await ready()
+  const first = await explore(port)
+  const second = await explore(port, {
+    anchor: { ...ANCHOR, source: 'src/App.tsx:99', selector: 'main > h1', text: '週報不用開會寫' },
+  })
+  const standing = (await state(port)).explores!.map((e) => e.id)
+  assert.ok(standing.includes(first.id), "the review is still inside the first round's branch")
+  assert.ok(standing.includes(second.id))
+
+  const main = (await state(port)).chats!.find((c) => !c.parentChatId)!
+  await api(port, '/acp/chat', { id: main.id })
+  assert.deepEqual((await state(port)).explores ?? [], [], 'back on the main line, both are over')
 })
 
 test('the round settles when its turn ends, and the url answers nobody else', async () => {
@@ -215,6 +231,20 @@ test('asking for more in the branch carries the round on', async () => {
   assert.equal(grown.variants.length, 4, 'the strip grows rather than starting over')
   assert.equal(grown.status, 'done', 'and the round settles again with that turn')
   assert.equal(grown.selected, first, 'carrying on is not starting over')
+
+  // A batch's framing - apply the items, edit the code, the review's history - once told the
+  // agent the variant tool was not for this turn.
+  const asked = (await report(port)).prompts
+    .map((p) => p.text)
+    .find((t) => t.includes('more of these'))!
+  assert.match(asked, /This is the same round/)
+  assert.match(asked, /`explore_variant` tool, which is still yours in this branch/)
+  assert.match(asked, /On their page already, which new ones must not repeat:/)
+  for (const v of round.variants) assert.ok(asked.includes(v.name), v.name)
+  assert.match(asked, /do not edit, create or delete\s+any file/)
+  assert.match(asked, /name to yourself the decisions the element makes now/)
+  assert.doesNotMatch(asked, /Apply every item/)
+  assert.doesNotMatch(asked, /This review had earlier conversations/)
 })
 
 // The two ways a round ends, and they are the same act with and without a pick:
@@ -323,6 +353,27 @@ test('two rounds on different elements both stand; a second on the same element 
   assert.ok(live.find((e) => e.id === again.id)!.selected)
 })
 
+test('a round on an element hears what earlier rounds on it offered, so it offers something else', async () => {
+  const port = await ready()
+  await explore(port)
+  await explore(port, {
+    anchor: { ...ANCHOR, source: 'src/App.tsx:99', selector: 'main > h1', text: '週報不用開會寫' },
+  })
+  await explore(port)
+  const asks = (await report(port)).prompts
+    .map((p) => p.text)
+    .filter((t) => t.includes('exploring UI variants'))
+  assert.equal(asks.length, 3)
+  assert.ok(!asks[0]!.includes('Earlier rounds on this element'), 'the first round has no history')
+  assert.ok(!asks[1]!.includes('Earlier rounds on this element'), 'another element has its own')
+  assert.ok(asks[2]!.includes('Earlier rounds on this element already showed the user these'))
+  assert.ok(asks[2]!.includes('- 緊湊版: tighter') && asks[2]!.includes('- Outline'))
+  assert.ok(
+    asks[0]!.includes('arranged to read more easily and look cleaner'),
+    'what explore is for',
+  )
+})
+
 test('a variant the page must not be shown is refused, and the agent is told why', async () => {
   const port = await ready()
   const round = await explore(port, { direction: 'BADVARIANTS' })
@@ -404,4 +455,52 @@ test('an explore with attachments that are not there is a bad request', async ()
     references: [{ label: 'no n' }],
   })
   assert.equal(bad.status, 400)
+})
+
+const current = async (port: number) => (await state(port)).chats!.find((c) => c.current)!
+
+async function startExplore(port: number, body: object): Promise<string> {
+  const res = await api(port, '/explore/start', { anchor: ANCHOR, capture: CAPTURE, ...body })
+  const started = (await res.json()) as { exploreId?: string; error?: string }
+  assert.equal(res.status, 200, started.error)
+  return started.exploreId!
+}
+
+// Its pill is where the way out lives, so a round closed for holding nothing must not leave the
+// review standing in a branch with no way back but the fork bar.
+test('a round that ends with no variant brings the review back to the main line', async () => {
+  const port = await ready()
+  const main = await current(port)
+  const id = await startExplore(port, { direction: 'NOVARIANTS' })
+  await waitFor(async () => {
+    const s = await state(port)
+    return s.acp?.state === 'idle' && !s.explores?.some((e) => e.id === id) ? s : null
+  }, 'the empty round to close')
+  const after = await state(port)
+  assert.equal(after.chats!.find((c) => c.current)!.id, main.id)
+  assert.ok(
+    after.conversation?.some((e) => e.role === 'system' && e.text.includes('已回到主對話')),
+    'the main thread says why the review is back',
+  )
+})
+
+test('leaving a round started inside another branch goes back to the main line', async () => {
+  const port = await ready()
+  const main = await current(port)
+  await explore(port)
+  const second = await explore(port, {
+    anchor: { ...ANCHOR, source: 'src/App.tsx:50', selector: 'main > a.more', text: '了解更多' },
+  })
+  assert.notEqual(
+    (await current(port)).parentChatId,
+    main.id,
+    'the second round is a branch of a branch',
+  )
+
+  const pick = second.variants[0]!
+  assert.equal(
+    (await api(port, '/explore/exit', { id: second.id, variantId: pick.id })).status,
+    200,
+  )
+  assert.equal((await current(port)).id, main.id)
 })

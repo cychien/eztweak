@@ -3,6 +3,8 @@ import { mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSy
 import { join } from 'node:path'
 import { ATTACHMENT_GRACE_MS, SESSIONS_DIR } from './constants.js'
 import type { AcpConfigValue } from './acp-config.js'
+import type { Said } from './history.js'
+import { rememberDesignHarness } from './preferences.js'
 import type {
   Anchor,
   Annotation,
@@ -128,6 +130,8 @@ export interface PersistedSession {
   chats?: Chat[]
   /** Which of `chats` the shell is showing and the agent is on. */
   currentChatId?: string
+  /** Per session, not per chat, so `/new` keeps it. */
+  designHarness?: boolean
   /** Superseded by `chats`. Read once, to migrate; never written again. */
   conversationClear?: ConversationClear
 }
@@ -153,10 +157,10 @@ export interface Chat {
    *  talked about at length and the review still returns to where it forked
    *  from, carrying only what the user chose to take back. */
   parentChatId?: string
-  /** When this conversation was offered a `DESIGN.md` for a project without one.
-   *  Set on the first prompt turn and never again: the conversation itself
-   *  remembers the answer. See `design-md.ts`. */
-  designMdOfferedAt?: number
+  /** Once handed, the earlier conversations are in the agent's context for good. */
+  historyGivenAt?: number
+  /** When harness instructions first reached this chat's agent; they stay in its context. */
+  harnessSeenAt?: number
 }
 
 /** One chat, with what it takes to choose between them: when, how much, and
@@ -324,6 +328,15 @@ export class SessionStore {
     return fresh
   }
 
+  /** What earlier rounds on this element already showed the user, oldest first and capped, so the
+   *  next round can offer something else. */
+  earlierVariants(round: ExploreState): { name: string; note?: string }[] {
+    return this.explores
+      .filter((e) => e.id !== round.id && sameTarget(e.anchor, round.anchor))
+      .flatMap((e) => e.variants.map(({ name, note }) => (note ? { name, note } : { name })))
+      .slice(-12)
+  }
+
   /** Record a variant against a round that is still taking them. Null when the
    *  round is over or gone, which is how a late one is refused. */
   addVariant(id: string, variant: Omit<ExploreVariant, 'id' | 'createdAt'>): ExploreState | null {
@@ -466,6 +479,57 @@ export class SessionStore {
     this.writeJson('outbox.json', [...this.outbox, batch])
     this.writeJson('queue.json', [])
     return batch
+  }
+
+  /** Through the outbox so it waits its turn; the annotation queue is left alone. */
+  sendSetup(): FeedbackBatch {
+    const batch: FeedbackBatch = {
+      batchId: newId(),
+      items: [],
+      note: null,
+      setup: true,
+      sentAt: Date.now(),
+    }
+    this.writeJson('outbox.json', [...this.outbox, batch])
+    return batch
+  }
+
+  /** A branch was handed its parent's transcript, so the parent's exposure counts. */
+  harnessSeen(): boolean {
+    const chats = this.chats
+    const seen = new Set<string>()
+    for (
+      let chat: Chat | undefined = this.currentChat;
+      chat && !seen.has(chat.id);
+      chat = chats.find((c) => c.id === chat!.parentChatId)
+    ) {
+      if (chat.harnessSeenAt) return true
+      seen.add(chat.id)
+    }
+    return false
+  }
+
+  markHarnessSeen(): void {
+    const current = this.currentChat
+    if (current.harnessSeenAt) return
+    this.patchSession({
+      chats: this.chats.map((c) => (c.id === current.id ? { ...c, harnessSeenAt: Date.now() } : c)),
+    })
+  }
+
+  /** Only undelivered ones: a setup turn already running is the agent's to finish. */
+  settleUndeliveredSetup(): string[] {
+    const outbox = this.outbox
+    const now = Date.now()
+    const settled: string[] = []
+    for (const batch of outbox) {
+      if (batch.setup && !batch.deliveredAt && !batch.ackedAt) {
+        batch.ackedAt = now
+        settled.push(batch.batchId)
+      }
+    }
+    if (settled.length) this.writeJson('outbox.json', outbox)
+    return settled
   }
 
   // -------------------------------------------------------------- attachments
@@ -702,6 +766,26 @@ export class SessionStore {
   }
 
   /** Show an earlier conversation and put the agent back on it. */
+  /** The conversation a chain of branches grew from. */
+  mainLineOf(id: string): string {
+    const chats = this.chats
+    const seen = new Set<string>()
+    let chat = chats.find((c) => c.id === id)
+    while (chat?.parentChatId && !seen.has(chat.id)) {
+      seen.add(chat.id)
+      chat = chats.find((c) => c.id === chat!.parentChatId)
+    }
+    return chat?.id ?? id
+  }
+
+  /** A branch whose explore rounds are all over has nothing left to do; only explore makes them. */
+  spentBranch(): boolean {
+    const current = this.currentChat
+    if (!current.parentChatId) return false
+    const rounds = this.explores.filter((e) => e.chatId === current.id)
+    return rounds.length > 0 && rounds.every((e) => e.status === 'dismissed')
+  }
+
   switchChat(id: string): Chat | null {
     const chat = this.chats.find((c) => c.id === id)
     if (!chat) return null
@@ -720,14 +804,23 @@ export class SessionStore {
     })
   }
 
-  /** Stamp the current chat as having been offered a `DESIGN.md`. */
-  markDesignMdOffered(): void {
-    const current = this.currentChat
-    this.patchSession({
-      chats: this.chats.map((c) =>
-        c.id === current.id ? { ...c, designMdOfferedAt: Date.now() } : c,
-      ),
-    })
+  get designHarness(): boolean {
+    return this.session.designHarness === true
+  }
+
+  /** The user's switch, remembered for the project across sessions. */
+  setDesignHarness(on: boolean): void {
+    this.patchSession({ designHarness: on })
+    rememberDesignHarness(this.project, on)
+  }
+
+  /** A state derived at start, not chosen, so the project's remembered choice is left alone. */
+  restoreDesignHarness(on: boolean): void {
+    if (on !== this.designHarness) this.patchSession({ designHarness: on })
+  }
+
+  setupPending(): boolean {
+    return this.outbox.some((b) => b.setup && !b.ackedAt)
   }
 
   /** The session to ask this agent to resume, if the current chat has one *it*
@@ -752,6 +845,59 @@ export class SessionStore {
     return entry.chatId === undefined
       ? isFirst && entry.ts >= chat.startedAt
       : entry.chatId === chat.id
+  }
+
+  /** Excludes this chat and the chain it branched from: the agent has those transcripts. */
+  /** What the user wrote themselves, newest first: each batch's note and comments. The rest of a
+   *  user entry - a setup, an explore - is worded by the shell. */
+  userWords(): string[] {
+    const words: string[] = []
+    const log = this.conversation
+    for (let i = log.length - 1; i >= 0; i--) {
+      const entry = log[i]!
+      if (entry.role !== 'user' || !entry.items) continue
+      for (const said of [entry.text, ...entry.items.map((item) => item.comment)]) {
+        if (said?.trim()) words.push(said)
+      }
+    }
+    return words
+  }
+
+  earlierChatsSaid(): Said[] {
+    const chats = this.chats
+    const firstId = chats[0]?.id
+    const seen = new Set<string>()
+    for (
+      let chat: Chat | undefined = this.currentChat;
+      chat && !seen.has(chat.id);
+      chat = chats.find((c) => c.id === chat!.parentChatId)
+    ) {
+      seen.add(chat.id)
+    }
+    const known = chats.filter((c) => seen.has(c.id))
+    const said: Said[] = []
+    const log = this.conversation
+    for (let i = log.length - 1; i >= 0; i--) {
+      const entry = log[i]!
+      if (entry.role !== 'user') continue
+      if (known.some((chat) => this.belongsTo(entry, chat, chat.id === firstId))) continue
+      for (const item of entry.items ?? []) {
+        const comment = item.comment?.trim()
+        if (comment) said.push({ where: item.where, said: comment })
+      }
+      const note = entry.text?.trim()
+      if (note) said.push({ said: note })
+    }
+    return said
+  }
+
+  markHistoryGiven(): void {
+    const current = this.currentChat
+    this.patchSession({
+      chats: this.chats.map((c) =>
+        c.id === current.id ? { ...c, historyGivenAt: Date.now() } : c,
+      ),
+    })
   }
 
   /** The thread as the shell should draw it: the current chat, and nothing else. */

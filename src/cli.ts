@@ -10,7 +10,22 @@ import {
   assertControlPortEnv,
 } from './constants.js'
 import { agentCommand } from './agents.js'
+import {
+  clearInspireToken,
+  credentialsFile,
+  readInspireToken,
+  writeInspireToken,
+} from './credentials.js'
 import { daemonMain } from './daemon.js'
+import {
+  DEFAULT_INSPIRE_URL,
+  InspireError,
+  cacheFiles,
+  parseSearchArgs,
+  renderSearch,
+  search,
+  withLocalPaths,
+} from './inspire.js'
 import { projectRoot } from './project-root.js'
 import { ensureDaemon, findRunningDaemon } from './registry.js'
 import { VERSION_HEADER } from './version.js'
@@ -38,6 +53,12 @@ Usage:
       end the session as the agent
   ${PKG_NAME} status | stop
       show session status / stop the background daemon
+  ${PKG_NAME} login [--token <t>] | logout
+      store (or forget) the inspiration database token, mode 600 in the data dir
+  ${PKG_NAME} inspire [--query "<text>"] [--tag a,b] [--limit n] [--json]
+      search the inspiration database by a description of what the piece has to
+      show, by tags, or both. Each result's images and code are cached locally
+      and printed as paths
   ${PKG_NAME} --version | --help
 
 Environment:
@@ -47,6 +68,7 @@ Environment:
       live daemon inside its own control range, so a separate data dir alone
       still lands you on the shared one.
   ${PKG_NAME.toUpperCase()}_NO_UPDATE_CHECK=1  never ask the npm registry whether a newer version exists
+  ${PKG_NAME.toUpperCase()}_INSPIRE_URL     inspiration API base (default: ${DEFAULT_INSPIRE_URL})
 
 A restarted daemon picks its sessions back up from disk and re-binds each to the
 port it last held, so an open review shell only needs a reload and queued
@@ -160,13 +182,19 @@ async function cmdOpen(
       ...(agentArg ? { agent: agentCommand(agentArg) } : {}),
     }),
   })
-  const body = (await res.json()) as { shellUrl?: string; error?: string; hint?: string }
+  const body = (await res.json()) as {
+    shellUrl?: string
+    error?: string
+    hint?: string
+    agent?: string
+  }
   if (!res.ok) fail(body.error ?? `daemon returned ${res.status}`, body.hint)
   await openShell(body.shellUrl!)
   console.log(`session: ${target.origin}`)
   console.log(`shell:   ${body.shellUrl}`)
-  if (agentArg) {
-    console.log(`agent:   ${agentCommand(agentArg)} (ACP) - review runs in the shell`)
+  // The daemon's answer, not the flag: a restored session keeps its agent.
+  if (body.agent) {
+    console.log(`agent:   ${body.agent} (ACP) - review runs in the shell`)
   } else {
     console.log(`next:    run \`${PKG_NAME} poll ${target.origin}/\` and wait for feedback`)
   }
@@ -276,6 +304,58 @@ async function cmdStop(): Promise<void> {
   console.log('daemon stopped')
 }
 
+/** Exit 2: the step could not run. One line, since the agent reports a failed step in one. */
+function failStep(message: string): never {
+  console.error(`error: ${message}`)
+  process.exit(2)
+}
+
+async function cmdLogin(args: string[]): Promise<void> {
+  const at = args.indexOf('--token')
+  if (at >= 0 && !args[at + 1]) fail('missing value for --token')
+  let token = args[at + 1]?.trim()
+  if (!token) {
+    if (!process.stdin.isTTY) {
+      fail('no token given', `run \`${PKG_NAME} login --token <token>\` when there is no terminal`)
+    }
+    const { createInterface } = await import('node:readline/promises')
+    const rl = createInterface({ input: process.stdin, output: process.stdout })
+    try {
+      token = (await rl.question('inspiration token: ')).trim()
+    } finally {
+      rl.close()
+    }
+  }
+  if (!token) fail('no token given')
+  writeInspireToken(token)
+  console.log(`token saved to ${credentialsFile()}`)
+}
+
+function cmdLogout(): void {
+  console.log(clearInspireToken() ? 'inspiration token removed' : 'no inspiration token to remove')
+}
+
+async function cmdInspire(args: string[]): Promise<void> {
+  const query = parseSearchArgs(args)
+  if ('error' in query) {
+    fail(query.error, `e.g. ${PKG_NAME} inspire --query "a command menu over the whole product"`)
+  }
+  const token = readInspireToken()
+  if (!token) failStep(`no inspiration token; run \`${PKG_NAME} login\` first`)
+  try {
+    const response = await search(query, token)
+    const files = await cacheFiles(response.results)
+    console.log(
+      query.json
+        ? JSON.stringify(withLocalPaths(response, files), null, 2)
+        : renderSearch(response, files, query),
+    )
+  } catch (err) {
+    if (err instanceof InspireError) failStep(err.message)
+    throw err
+  }
+}
+
 async function main(): Promise<void> {
   assertControlPortEnv()
   const argv = process.argv.slice(2)
@@ -311,6 +391,12 @@ async function main(): Promise<void> {
       return cmdStatus()
     case 'stop':
       return cmdStop()
+    case 'login':
+      return cmdLogin(rest)
+    case 'logout':
+      return cmdLogout()
+    case 'inspire':
+      return cmdInspire(rest)
     default: {
       const agentIdx = argv.indexOf('--agent')
       const agentArg = agentIdx >= 0 ? argv[agentIdx + 1] : undefined

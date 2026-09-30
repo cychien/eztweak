@@ -5,6 +5,7 @@ import AlignSelectionIcon from '@hugeicons/core-free-icons/AlignSelectionIcon'
 import ChevronDownIcon from '@hugeicons/core-free-icons/ChevronDownIcon'
 import ChevronRightIcon from '@hugeicons/core-free-icons/ChevronRightIcon'
 import MagicWand01Icon from '@hugeicons/core-free-icons/MagicWand01Icon'
+import SparklesIcon from '@hugeicons/core-free-icons/SparklesIcon'
 import ArrowRight02Icon from '@hugeicons/core-free-icons/ArrowRight02Icon'
 import Grid02Icon from '@hugeicons/core-free-icons/Grid02Icon'
 import ChatGptIcon from '@hugeicons/core-free-icons/ChatGptIcon'
@@ -20,6 +21,7 @@ import BubbleChatOutcomeIcon from '@hugeicons/core-free-icons/BubbleChatOutcomeI
 import Edit02Icon from '@hugeicons/core-free-icons/Edit02Icon'
 import type { SessionConfigOption } from '@agentclientprotocol/sdk'
 import type { AcpAskAnswer, AcpAskField, AcpAskOption } from '../acp-ask.js'
+import { askComplete, askSendsOnPick } from '../acp-ask.js'
 import { AGENT_PROFILES, type AgentBrand, agentBrandFor, agentProfileFor } from '../agents.js'
 import {
   type AcpConfigValue,
@@ -30,6 +32,7 @@ import {
 } from '../acp-config.js'
 import { attachify } from './attach.js'
 import { confirmSkipped, rememberConfirm } from './confirm-skip.js'
+import { collectPageStorage } from './page-storage.js'
 import { type Usage, planName, usageNote, usageRows } from './usage-note.js'
 import type { SlashCommand } from './slash.js'
 import type { Device, Size } from './devices.js'
@@ -156,6 +159,8 @@ interface SnapshotWire {
   update?: UpdateWire
   explores?: ExploreWire[]
   canExplore?: true
+  designHarness?: boolean
+  designEffort?: DesignEffort
 }
 
 interface ChatWire {
@@ -1902,6 +1907,8 @@ interface ConfirmOffer {
   title: string
   body: string
   go: string
+  /** False when a yes starts work the user should see coming every time. */
+  skippable?: boolean
 }
 
 let answerConfirm: ((ok: boolean) => void) | null = null
@@ -1910,12 +1917,16 @@ function closeConfirm(ok: boolean, offer?: ConfirmOffer): void {
   const answer = answerConfirm
   answerConfirm = null
   confirmCard.hidden = true
-  if (offer) rememberConfirm(localStorage, offer.key, { ok, skip: confirmSkip.checked })
+  if (offer && offer.skippable !== false) {
+    rememberConfirm(localStorage, offer.key, { ok, skip: confirmSkip.checked })
+  }
   answer?.(ok)
 }
 
 function askConfirm(offer: ConfirmOffer): Promise<boolean> {
-  if (confirmSkipped(localStorage, offer.key)) return Promise.resolve(true)
+  const skippable = offer.skippable !== false
+  if (skippable && confirmSkipped(localStorage, offer.key)) return Promise.resolve(true)
+  confirmSkipLabel.hidden = !skippable
   // A second question replaces the first, which is answered no: the card is one
   // card, and leaving a caller waiting on a card nobody can see would hang it.
   answerConfirm?.(false)
@@ -1939,12 +1950,143 @@ function askConfirm(offer: ConfirmOffer): Promise<boolean> {
   })
 }
 
+const harnessBtn = h('button', 'ez-harness')
+harnessBtn.type = 'button'
+harnessBtn.setAttribute('role', 'switch')
+harnessBtn.setAttribute('aria-checked', 'false')
+const HARNESS_HINT = '實驗性功能：開啟後，agent 會先了解你的產品、整理出設計規範，之後都照規範設計'
+const RUNNING_HINT = 'agent 正在執行，這一輪結束後才能調整'
+harnessBtn.title = HARNESS_HINT
+const harnessMark = h('span', 'ez-harness-mark')
+harnessMark.append(icon(SparklesIcon as IconNode, 12))
+harnessBtn.append(
+  harnessMark,
+  h('span', 'ez-harness-label', '增強設計'),
+  h('span', 'ez-switch'),
+  h('span', 'ez-harness-tag', '實驗'),
+)
+harnessBtn.onclick = () => void toggleHarness()
+
+type DesignEffort = 'low' | 'medium' | 'high'
+
+/** How much of the design flow each batch runs; shown only while the harness is on. */
+const EFFORTS: { level: DesignEffort; label: string; hint: string }[] = [
+  { level: 'low', label: '低', hint: '低：只看設計規範，直接實作，不截圖也不另外檢查' },
+  { level: 'medium', label: '中', hint: '中：完整設計流程，但不另外請人檢查' },
+  { level: 'high', label: '高', hint: '高：完整設計流程，最後再獨立檢查一次' },
+]
+
+/** A three-stop slider: dragging previews the level, letting go sets it. */
+const effortGroup = h('label', 'ez-effort')
+effortGroup.hidden = true
+const effortTrack = h('span', 'ez-effort-track')
+effortTrack.setAttribute('aria-hidden', 'true')
+effortTrack.append(h('span', 'ez-effort-fill'), h('span', 'ez-effort-thumb'))
+const effortSlider = h('input', 'ez-effort-input')
+effortSlider.type = 'range'
+effortSlider.min = '0'
+effortSlider.max = String(EFFORTS.length - 1)
+effortSlider.step = '1'
+effortSlider.setAttribute('aria-label', '設計力度')
+const effortValue = h('span', 'ez-effort-value')
+/** Drawn by the spans; operated by the native range laid over them, so keys and readers work. */
+const effortControl = h('span', 'ez-effort-slider')
+effortControl.append(effortTrack, effortSlider)
+effortGroup.append(h('span', 'ez-effort-label', '力度'), effortControl, effortValue)
+
+function showEffort(at: number): void {
+  const effort = EFFORTS[at]!
+  effortSlider.value = String(at)
+  effortControl.style.setProperty('--at', String(at / (EFFORTS.length - 1)))
+  effortSlider.setAttribute('aria-valuetext', effort.label)
+  effortValue.textContent = effort.label
+  effortGroup.title = effort.hint
+}
+
+effortSlider.oninput = () =>
+  showEffort(turnRunning() ? currentEffort() : Number(effortSlider.value))
+effortSlider.onchange = () => void setEffort(EFFORTS[Number(effortSlider.value)]!.level)
+
+async function setEffort(level: DesignEffort): Promise<void> {
+  if (!snapshot?.acp || turnRunning() || snapshot.designEffort === level) return
+  await api('/harness/effort', { method: 'POST', body: JSON.stringify({ effort: level }) })
+}
+
+let harnessPending = false
+
+const HARNESS_FILE: Record<string, string> = { product: 'PRODUCT.md', design: 'DESIGN.md' }
+
+async function toggleHarness(): Promise<void> {
+  if (harnessPending || !snapshot?.acp || turnRunning()) return
+  const on = !snapshot.designHarness
+  harnessPending = true
+  paintHarness()
+  try {
+    const res = await api('/harness', { method: 'POST', body: JSON.stringify({ on }) })
+    if (res.status !== 409) return
+    const { missing } = (await res.json()) as { missing?: string[] }
+    if (!missing?.length) return
+    const files = missing.map((f) => HARNESS_FILE[f] ?? f).join(' 與 ')
+    const ok = await askConfirm({
+      key: 'design-harness-create',
+      title: '啟用增強設計',
+      body: `增強設計會建立 ${files}，是否繼續？`,
+      go: '繼續',
+      skippable: false,
+    })
+    if (!ok) return
+    await reportPageStorage()
+    await api('/harness', { method: 'POST', body: JSON.stringify({ on: true, create: true }) })
+  } finally {
+    harnessPending = false
+    paintHarness()
+  }
+}
+
+/** Not disabled while a request is in flight: that made the label blink on every switch. */
+function paintHarness(): void {
+  const s = snapshot
+  harnessRow.hidden = !s?.acp
+  harnessBtn.setAttribute('aria-checked', String(!!s?.designHarness))
+  if (harnessPending) harnessBtn.setAttribute('aria-busy', 'true')
+  else harnessBtn.removeAttribute('aria-busy')
+  // Read-only mid-turn, looking the same: changed then, neither would say whether the turn took it.
+  const running = turnRunning()
+  harnessBtn.disabled = s?.state === 'ended'
+  harnessBtn.title = running ? RUNNING_HINT : HARNESS_HINT
+  harnessBtn.toggleAttribute('aria-readonly', running)
+  effortGroup.hidden = !s?.designHarness
+  effortSlider.disabled = s?.state === 'ended'
+  effortSlider.toggleAttribute('aria-readonly', running)
+  if (running) effortHeld = false
+  // Not while it is held: a broadcast mid-drag would snap it back under the pointer.
+  if (!effortHeld) showEffort(currentEffort())
+  if (running) effortGroup.title = RUNNING_HINT
+}
+
+function turnRunning(): boolean {
+  return snapshot?.acp?.state === 'working'
+}
+
+function currentEffort(): number {
+  return EFFORTS.findIndex((e) => e.level === (snapshot?.designEffort ?? 'medium'))
+}
+
+let effortHeld = false
+effortSlider.onpointerdown = () => (effortHeld = true)
+window.addEventListener('pointerup', () => (effortHeld = false))
+
 /** The agent and its model, on one line above the composer. */
 const controlRow = h('div', 'ez-control-row')
 controlRow.hidden = true
 controlRow.append(agentWrap, configWrap, limitWrap)
 
-queueSection.append(queueScroll, controlRow, noteAttach.wrap, sendBtn)
+/** Its own line: sharing the agent's truncated the agent and model names at default width. */
+const harnessRow = h('div', 'ez-harness-row')
+harnessRow.hidden = true
+harnessRow.append(harnessBtn, effortGroup)
+
+queueSection.append(queueScroll, harnessRow, controlRow, noteAttach.wrap, sendBtn)
 
 /** The editor for a queued annotation: the row's own comment, in place. One
  *  composer, built once and moved into whichever row is open - nothing else on
@@ -2826,6 +2968,14 @@ function setMulti(next: boolean): void {
   rebuildStage()
 }
 
+/** Ahead of anything that starts a turn: the agent's own browser opens the page signed in with it. */
+async function reportPageStorage(): Promise<void> {
+  const win = frames.values().next().value?.iframe.contentWindow
+  const storage = win ? await collectPageStorage(win).catch(() => null) : null
+  if (!storage) return
+  await api('/page-state', { method: 'POST', body: JSON.stringify(storage) }).catch(() => {})
+}
+
 async function api(path: string, init?: RequestInit): Promise<Response> {
   return fetch(`${API}${path}`, {
     headers: { 'content-type': 'application/json' },
@@ -2911,6 +3061,7 @@ async function sendBatch(): Promise<void> {
   sending = true
   sendBtn.disabled = true
   try {
+    await reportPageStorage()
     const res = await api('/send', {
       method: 'POST',
       body: JSON.stringify({
@@ -3858,6 +4009,7 @@ function render(): void {
   paintVeil()
   broadcast({ type: 'ez:in-explore', on: onBranch })
   agentWrap.hidden = !s.acp
+  paintHarness()
   // The row carries the gap below it, so it has to go when both of its controls
   // do - otherwise a poll-mode review keeps six pixels of nothing.
   controlRow.hidden = agentWrap.hidden && configWrap.hidden
@@ -4017,7 +4169,7 @@ function acpFeedEl(acp: AcpWire): HTMLElement {
  *  from. */
 function acpAskEl(ask: AcpAskWire): HTMLElement {
   const card = h('div', 'ez-acp-ask')
-  card.append(h('div', 'ez-acp-ask-title', ask.title))
+  if (ask.title) card.append(h('div', 'ez-acp-ask-title', ask.title))
   const values = new Map<string, AcpAskAnswer>()
   const choicesOnly = ask.fields.every((f) => f.kind === 'select')
   const customKeys = new Set(
@@ -4026,6 +4178,7 @@ function acpAskEl(ask: AcpAskWire): HTMLElement {
     ),
   )
   const typedCustom = (): boolean => [...values.keys()].some((k) => customKeys.has(k))
+  const sendsOnPick = (): boolean => askSendsOnPick(ask.fields, typedCustom())
   let settled = false
   const send = (body: Record<string, unknown>): void => {
     if (settled) return
@@ -4037,30 +4190,18 @@ function acpAskEl(ask: AcpAskWire): HTMLElement {
     }
     void api('/acp/answer', { method: 'POST', body: JSON.stringify({ id: ask.id, ...body }) })
   }
-  // A choice answered by its Other box counts as answered; a card with nothing
-  // in it is not sent - that is what 略過 is for.
-  const complete = (): boolean =>
-    values.size > 0 &&
-    ask.fields.every(
-      (f) =>
-        f.optional ||
-        values.has(f.key) ||
-        ((f.kind === 'select' || f.kind === 'multiselect') &&
-          !!f.custom &&
-          values.has(f.custom.key)),
-    )
+  const complete = (): boolean => askComplete(ask.fields, new Set(values.keys()))
   const submit = (): void => {
     if (complete()) send({ answers: Object.fromEntries(values) })
   }
   const submitBtn = h('button', 'ez-acp-opt ez-acp-opt-primary', '送出')
   submitBtn.onclick = submit
   const refresh = (): void => {
-    const instant = choicesOnly && !typedCustom()
-    submitBtn.hidden = instant
+    submitBtn.hidden = sendsOnPick()
     submitBtn.disabled = !complete()
   }
   const changed = (how: 'pick' | 'edit'): void => {
-    if (how === 'pick' && choicesOnly && !typedCustom()) submit()
+    if (how === 'pick' && sendsOnPick()) submit()
     else refresh()
   }
   // Every field says 選填 only when the card also has ones that are not: a
@@ -4081,7 +4222,7 @@ function acpAskEl(ask: AcpAskWire): HTMLElement {
     }
     card.append(acpFieldEl(field, values, changed, submit, labelId))
   })
-  if (ask.kind === 'question' || !choicesOnly) {
+  if (ask.kind === 'question' || !choicesOnly || !askSendsOnPick(ask.fields, false)) {
     const actions = h('div', 'ez-acp-ask-actions')
     if (ask.kind === 'question') {
       const skip = h('button', 'ez-acp-opt', '略過')
@@ -4162,7 +4303,8 @@ function acpFieldEl(
     if (!custom) return row
     const group = h('div', 'ez-acp-group')
     const box = textField(custom.key, {
-      placeholder: custom.text ?? '其他',
+      placeholder:
+        field.kind === 'multiselect' ? '其他答案（選填）' : '自己回答，或補充說明（選填）',
       onInput: () => {
         if (field.kind === 'select' && box.value) clearPick()
       },
@@ -4360,6 +4502,7 @@ window.addEventListener('message', (e: MessageEvent) => {
   // session's api - and the one that can say why it was refused.
   if (data?.type === 'ez:explore' && data.anchor && data.capture) {
     void (async () => {
+      await reportPageStorage()
       const res = await api('/explore/start', {
         method: 'POST',
         body: JSON.stringify({
